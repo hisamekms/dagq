@@ -1,24 +1,23 @@
-//! The sizes of the runs moving now, measured off the loop (ADR-t4542-1),
-//! for what they are expected to take yet ([`DiskState::remaining`]):
-//! as the runs that wait are measured for the host's sample
-//! ([`super::host_metrics`]), the loop lists the runs it counts as moving
+//! The sizes of unfinished disk-owning runs, measured off the loop,
+//! for what they are expected to take yet ([`DiskNeeds::remaining`]):
+//! independently of the host's sample ([`super::host_metrics`]),
+//! the loop lists those runs regardless of slots or approval source
 //! (no walk), and a thread of its own measures their worktree and
 //! `TMPDIR`s with [`RunFiles::tree_size`]'s count (hard links once, no link
 //! followed), one walk at a time, every
 //! [`MOVING_SIZE_INTERVAL_SECS`](crate::domain::disk::MOVING_SIZE_INTERVAL_SECS)
-//! and as soon as a run moves that has no measure of its present
+//! and as soon as a listed run has no measure of its present
 //! directories. The thread puts each run's size and when its measure
 //! started (so a slow walk ages it) in a state shared with the loop, which only reads it
 //! ([`crate::domain::disk::trusted_size`]). Nothing is removed.
 //!
-//! [`DiskState::remaining`]: crate::domain::disk::DiskState::remaining
+//! [`DiskNeeds::remaining`]: crate::domain::disk::DiskNeeds::remaining
 //! [`RunFiles::tree_size`]: crate::application::RunFiles::tree_size
 
 use super::*;
 use crate::application::{RUN_TMP_DIR, host_verification_tmp_path};
 use crate::domain::disk::{
-    MOVING_SIZE_INTERVAL_SECS, MovingWalk, MovingWalkInputs, SizeMeasure, moving_remaining,
-    moving_walk, trusted_size,
+    MOVING_SIZE_INTERVAL_SECS, MovingWalk, MovingWalkInputs, SizeMeasure, moving_walk, trusted_size,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,7 +27,7 @@ use std::sync::Mutex;
 /// `Ok(None)` for no directory there.
 pub type MeasureTree = Arc<dyn Fn(&Path) -> std::io::Result<Option<u64>> + Send + Sync>;
 
-/// What a moving run is measured of: the run, its worktree on the host
+/// What an unfinished run is measured of: the run, its worktree on the host
 /// (`None` for a run in a container, which builds in its machine's volume,
 /// or one with no worktree: never measured), and its `TMPDIR`s, that of its
 /// worker turns and that of its verification on the host. A measure of
@@ -77,11 +76,11 @@ struct Measured {
     at: Instant,
 }
 
-/// The latest measure of each moving run, written by the walk's thread and
+/// The latest measure of each registered run, written by the walk's thread and
 /// read by the loop.
 type Shared = Arc<Mutex<HashMap<RunId, Measured>>>;
 
-/// The walk of the moving runs and what the walks measured.
+/// The walk of the registered runs and what the walks measured.
 #[derive(Default)]
 pub(in crate::application::supervise) struct MovingSizes {
     measured: Shared,
@@ -92,7 +91,7 @@ pub(in crate::application::supervise) struct MovingSizes {
 }
 
 impl MovingSizes {
-    /// Reap the walk once it ended, forget the runs no longer moving, and
+    /// Reap the walk once it ended, forget the runs no longer registered, and
     /// start a walk of `moving` in a thread of its own when [`moving_walk`]
     /// says so (a run of `moving` has no measure of its present target
     /// when its measure is missing or of another target).
@@ -172,40 +171,48 @@ impl MovingSizes {
         }
     }
 
-    /// What the runs of `moving` are expected to take yet, together, at
-    /// `now` on the loop's monotonic clock: for each, `expected` less the
-    /// size the claims trust ([`trusted_size`]), unmeasured ones counted
-    /// whole ([`moving_remaining`]).
-    #[cfg(test)]
-    fn remaining(&self, moving: &[MovingTarget], expected: Option<u64>, now: Instant) -> u64 {
-        self.remaining_with_counts(moving, expected, now).0
+    /// Trusted current size for this exact run and target, without walking.
+    pub(in crate::application::supervise) fn current(
+        &self,
+        target: &MovingTarget,
+        now: Instant,
+    ) -> Option<u64> {
+        let measured = lock(&self.measured);
+        let measure = measured.get(&target.run).map(|m| SizeMeasure {
+            bytes: m.bytes,
+            age: now.saturating_duration_since(m.at),
+            same_target: m.target == *target,
+        });
+        trusted_size(
+            measure.as_ref(),
+            Duration::from_secs(MOVING_SIZE_INTERVAL_SECS),
+        )
     }
 
-    /// Sizes trusted by the loop for this pass, with each run's identity.
-    /// Neither remaining-space arithmetic nor exceedance recording may
-    /// consume a failed, stale or different target's measurement.
+    /// Trusted sizes shared by reservation and exceedance observations.
     pub(in crate::application::supervise) fn trusted_sizes(
         &self,
         moving: &[MovingTarget],
         now: Instant,
     ) -> Vec<(RunId, Option<u64>)> {
-        let measured = lock(&self.measured);
-        let interval = Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
         moving
             .iter()
-            .map(|target| {
-                let measure = measured.get(&target.run).map(|measured| SizeMeasure {
-                    bytes: measured.bytes,
-                    age: now.saturating_duration_since(measured.at),
-                    same_target: measured.target == *target,
-                });
-                (target.run.clone(), trusted_size(measure.as_ref(), interval))
-            })
+            .map(|target| (target.run.clone(), self.current(target, now)))
             .collect()
     }
 
+    /// What the runs of `moving` are expected to take yet, together, at
+    /// `now` on the loop's monotonic clock: for each, `expected` less the
+    /// size the claims trust ([`trusted_size`]), unmeasured ones counted
+    /// whole ([`crate::domain::disk::moving_remaining`]).
+    #[cfg(test)]
+    fn remaining(&self, moving: &[MovingTarget], expected: Option<u64>, now: Instant) -> u64 {
+        self.remaining_with_counts(moving, expected, now).0
+    }
+
     /// Remaining bytes and the counts using trusted sizes or the whole expectation.
-    pub(in crate::application::supervise) fn remaining_with_counts(
+    #[cfg(test)]
+    fn remaining_with_counts(
         &self,
         moving: &[MovingTarget],
         expected: Option<u64>,
@@ -213,10 +220,10 @@ impl MovingSizes {
     ) -> (u64, usize, usize) {
         let mut trusted = 0;
         let mut unmeasured = 0;
-        let sizes: Vec<_> = self
-            .trusted_sizes(moving, now)
-            .into_iter()
-            .map(|(_, size)| {
+        let sizes: Vec<_> = moving
+            .iter()
+            .map(|target| {
+                let size = self.current(target, now);
                 if size.is_some() {
                     trusted += 1;
                 } else {
@@ -225,7 +232,11 @@ impl MovingSizes {
                 size
             })
             .collect();
-        (moving_remaining(expected, sizes), trusted, unmeasured)
+        (
+            crate::domain::disk::moving_remaining(expected, sizes),
+            trusted,
+            unmeasured,
+        )
     }
 }
 

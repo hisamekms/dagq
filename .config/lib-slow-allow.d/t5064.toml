@@ -1,0 +1,29 @@
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_relaxation_recorded_while_a_claim_is_held_lets_it_go_on_the_next_pass"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、動いている run の間に記録した緩めが次の pass の claim_held と再開に効くことを確かめる。段階ごとの予約と各項の算術は domain::disk の unit test に分離済み。標本の1本・動く1本・控える1本と、緩める前後の1回ずつの判断がこの配線に必要な最小構成になる。"
+task = 5064
+
+[[test]]
+name = "compose::wiring_tests::human_disk::a_persons_integrate_measures_its_run_and_explains_the_stage_reservations"
+reason = "境界: 実際の supervisor・SQLite が作った着地待ちの run に、人の Integrator::approve から begin・check_disk_room を通して容量不足の拒否と承認を確かめる。worktree と2つの TMPDIR の計測が閾値と段階ごとの内訳に届き、拒否では承認を記録しないことを守る。間隔は1 msに縮め、前進の例外を避ける別の claim と候補の2 run が必要な最小構成になる。必要量の算術は domain::disk::tests::stage_reservations_keep_an_integration_slot_without_double_counting に分離済み。"
+task = 5064
+
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_relaxation_past_its_time_is_recorded_expired_once_and_relaxes_nothing"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、期限切れの緩めを1回だけ記録し、未測定の run と常設の着地枠を含む控えが保たれ、着地後に再開することを確かめる。期限と必要量の判断は domain::disk の unit test に分離済み。標本の1本・動く1本・控える1本がこの配線に必要な最小構成になる。"
+task = 5064
+
+[[test]]
+name = "compose::wiring_tests::disk_holds::below_the_reserve_a_landing_waits_and_with_room_it_lands"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、同じ候補の容量不足の控えと容量回復後の着地を確かめる。候補の必要量と可否は domain::disk の unit test に分離し、この test は1 run の控え・再開と実際の記録だけを扱う。"
+task = 5064
+
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_resolved_approved_resume_is_a_disk_candidate_while_still_needs_session"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、人が承認した着地の競合を resume が解消してから、状態が needs_session のままでも着地の disk 判定に入ることを確かめる。不足時の控えと予備だけでの再開、差分の再承認までを1 run で観測し、間隔は1 msに縮める。予約の算術は domain::disk の unit test に分離済み。"
+task = 5064
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、slot 外の run への land 回答が適用され、その worktree も計測され、既存の slot の着地後・次の claim 前に着地することを確かめる。順番を観測するため承認済み・slot を使う run・次の claim の3本が必要で、容量の判断自体は domain::disk の unit test に分離済み。"
+task = 5064

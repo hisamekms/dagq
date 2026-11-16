@@ -797,6 +797,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut disk_estimate_line = 0;
     // Defer reading the value until the method is known; recent ignores it.
     let mut disk_run_size: Option<(&str, usize)> = None;
+    let mut disk_landing_size: Option<(&str, usize)> = None;
     let mut resume_keys: Vec<String> = Vec::new();
     let mut retention_keys: Vec<String> = Vec::new();
     let mut exit_keys: Vec<String> = Vec::new();
@@ -2466,6 +2467,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
                             "{CONFIG_FILE_NAME}:{number}: value of {key}: expected \"recent\" or \"fixed\", not {text:?}"
                         ),
                     };
+                } else if key == "landing_size" {
+                    disk_landing_size = Some((rest.trim(), number));
                 } else {
                     disk_run_size = Some((rest.trim(), number));
                 }
@@ -2702,24 +2705,35 @@ pub fn parse_config(text: &str) -> Result<Config> {
         command,
         timeout: e2e_timeout.unwrap_or(crate::application::install::E2E_TIMEOUT),
     });
-    match config.disk.estimate {
-        DiskEstimate::Fixed => {
-            let (value, line) = disk_run_size.with_context(|| {
-                format!("{CONFIG_FILE_NAME}:{disk_estimate_line}: estimate = \"fixed\" requires run_size")
-            })?;
-            let with = || format!("{CONFIG_FILE_NAME}:{line}: value of run_size");
-            let text = parse_string(value).with_context(with)?;
-            let bytes = crate::domain::disk::parse_size(&text)
-                .ok()
-                .filter(|bytes| *bytes > 0)
-                .with_context(|| format!("{CONFIG_FILE_NAME}:{line}: value of run_size: expected a positive size such as \"20GiB\", not {text:?}"))?;
-            config.disk.run_size = Some(bytes);
-        }
-        DiskEstimate::Recent => {
-            if let Some((_, line)) = disk_run_size {
-                tracing::warn!(
-                    "{CONFIG_FILE_NAME}:{line}: [disk] run_size is ignored with estimate = \"recent\""
-                );
+    for (key, value) in [
+        ("run_size", disk_run_size),
+        ("landing_size", disk_landing_size),
+    ] {
+        match config.disk.estimate {
+            DiskEstimate::Fixed => {
+                let Some((value, line)) = value else {
+                    ensure!(
+                        key != "run_size",
+                        "{CONFIG_FILE_NAME}:{disk_estimate_line}: estimate = \"fixed\" requires run_size"
+                    );
+                    continue;
+                };
+                let text = parse_string(value)
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{line}: value of {key}"))?;
+                let bytes = crate::domain::disk::parse_size(&text).ok().filter(|n| *n > 0)
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{line}: value of {key}: expected a positive size such as \"20GiB\", not {text:?}"))?;
+                if key == "run_size" {
+                    config.disk.run_size = Some(bytes);
+                } else {
+                    config.disk.landing_size = Some(bytes);
+                }
+            }
+            DiskEstimate::Recent => {
+                if let Some((_, line)) = value {
+                    tracing::warn!(
+                        "{CONFIG_FILE_NAME}:{line}: [disk] {key} is ignored with estimate = \"recent\""
+                    );
+                }
             }
         }
     }
@@ -3154,6 +3168,11 @@ pub fn load_operational_rules(
 /// default ([`DiskConfig`] names each key, its type and default).
 /// `reserve` takes a share written as `"5%"`; a bad value is an error.
 /// `estimate` is `"recent"` (default) or `"fixed"`; unknown values are errors.
+/// Recent supplies W and I from the same recent run estimate.
+/// Fixed optionally reads `landing_size`, a positive size string for I;
+/// omission uses W from `run_size`. Invalid or zero values are
+/// line-numbered errors.
+/// Recent warns and ignores it, including unreadable values.
 /// Fixed requires `run_size`, a positive string size read by
 /// [`crate::domain::disk::parse_size`]; absent, invalid and zero values are
 /// errors with line numbers. Recent warns and ignores any `run_size` value,
@@ -7234,6 +7253,7 @@ LITERAL = 'no \n escapes # here'
         let fixed = DiskConfig {
             estimate: DiskEstimate::Fixed,
             run_size: Some(20 << 30),
+            landing_size: None,
             ..default
         };
         for text in [
@@ -7284,6 +7304,50 @@ LITERAL = 'no \n escapes # here'
             let output = captured.text();
             assert!(output.contains("run_size is ignored"), "{output}");
             assert!(output.contains("WARN"), "{output}");
+        }
+    }
+
+    #[test]
+    fn landing_size_defaults_to_worker_and_validates_or_warns_by_method() {
+        use crate::domain::disk::{landing_expectation, run_expectation};
+        use crate::infrastructure::telemetry::Telemetry;
+        let prefix = "[disk]\nestimate = \"fixed\"\nrun_size = \"20GiB\"\n";
+        let config = parse_config(prefix).unwrap().disk;
+        assert_eq!(
+            landing_expectation(&config, run_expectation(&config, &[], 0)),
+            Some(20 << 30)
+        );
+        let config = parse_config(&format!("{prefix}landing_size = \"30GiB\"\n"))
+            .unwrap()
+            .disk;
+        assert_eq!(
+            landing_expectation(&config, run_expectation(&config, &[], 0)),
+            Some(30 << 30)
+        );
+        for value in ["\"abc\"", "\"0GiB\"", "123"] {
+            let error = format!(
+                "{:#}",
+                parse_config(&format!("{prefix}landing_size = {value}")).unwrap_err()
+            );
+            assert!(error.contains("dagq.toml:4:"), "{error}");
+            assert!(error.contains("value of landing_size"), "{error}");
+        }
+        for value in ["\"30GiB\"", "\"abc\"", "\"0GiB\"", "123"] {
+            let (telemetry, captured) = Telemetry::capture();
+            let config = telemetry
+                .in_scope(|| {
+                    parse_config(&format!(
+                        "[disk]\nlanding_size = {value}\nestimate = \"recent\""
+                    ))
+                })
+                .unwrap();
+            assert_eq!(config.disk, DiskConfig::default());
+            assert!(captured.text().contains("WARN"));
+            assert!(
+                captured
+                    .text()
+                    .contains("dagq.toml:2: [disk] landing_size is ignored")
+            );
         }
     }
 

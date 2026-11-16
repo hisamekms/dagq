@@ -131,7 +131,7 @@ fn fixed_disk_configuration_reaches_the_supervisors_hold_without_samples() {
     )
     .with_repository_startup_file(std::sync::Arc::new(|| {
         let config = crate::infrastructure::run_env::parse_config(
-            "[disk]\nestimate = \"fixed\"\nrun_size = \"20GiB\"\n",
+            "[disk]\nestimate = \"fixed\"\nrun_size = \"20GiB\"\nlanding_size = \"30GiB\"\n",
         )?;
         Ok(
             crate::application::supervise::repository_config::StartupRules {
@@ -156,6 +156,10 @@ fn fixed_disk_configuration_reaches_the_supervisors_hold_without_samples() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0]["disk"]["estimate"], "fixed");
     assert_eq!(held[0]["disk"]["expected"], 20 * GIB);
+    assert_eq!(held[0]["disk"]["integrator_expected"], 30 * GIB);
+    assert_eq!(held[0]["disk"]["workers"], 0);
+    assert_eq!(held[0]["disk"]["waiting"], 0);
+    assert_eq!(held[0]["disk"]["integrators"], 0);
     assert_eq!(held[0]["disk"]["sample_count"], 0);
     assert!(
         held[0]["message"]
@@ -330,7 +334,7 @@ fn a_standing_disk_hold_shows_in_status_and_after_30_minutes_in_the_inboxs_atten
         items[0]["last_error"],
         "no new run claimed for 30 min: free 4.0 GiB below the 5.0 GiB a new run needs \
          (reserve 5.0 GiB, new run 0.0 GiB, remaining of 0 moving runs 0.0 GiB, \
-         waiting landing 0.0 GiB); ready tasks waiting: 1"
+         empty INTEGRATOR slot 0.0 GiB); ready tasks waiting: 1"
     );
     // Told, not asked: the only ask is the disk's own, opened by its own
     // condition (nothing moves below the reserve), not by this attention.
@@ -399,6 +403,11 @@ fn below_the_reserve_a_landing_waits_and_with_room_it_lands() {
     let held = queue_payloads(&queue, "landing_held");
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0]["reason"], "disk_space");
+    let candidates = held[0]["landing_candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["allowed"], false);
+    assert_eq!(candidates[0]["needed"], 5 * GIB);
+    assert_eq!(candidates[0]["waiting"], true);
     assert_eq!(held[0]["threshold"], serde_json::json!((5 * GIB) as f64));
     assert_eq!(held[0]["disk"]["reserve"], 5 * GIB);
     assert_eq!(held[0]["disk"]["moving"], 0);
@@ -418,12 +427,96 @@ fn below_the_reserve_a_landing_waits_and_with_room_it_lands() {
     assert!(held_at < first_id(&detail, "integration_started"));
 }
 
+/// A resolved approved resume waits for landing in needs_session. Its
+/// slot must still enter the shared disk decision: it holds below the
+/// reserve, then advances with exactly the reserve and no other active run.
+#[test]
+fn a_resolved_approved_resume_is_a_disk_candidate_while_still_needs_session() {
+    let wiring = Wiring::new(
+        "a_resolved_approved_resume_is_a_disk_candidate_while_still_needs_session",
+        Script {
+            receipts: vec![succeeded, succeeded],
+            verdicts: vec![verdict("concern", "a person must approve")],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1));
+    wiring
+        .git
+        .commit_files(&[("change.txt", "original")], &["change.txt"]);
+    let task = wiring.ready_task(&[]);
+    wiring.supervise_once();
+    wiring.git.conflict_at_next_rebase("change.txt", "resolved");
+    let parked = wiring.integrate_outcome(task);
+    assert_eq!(parked["outcome"], "needs_session", "{parked}");
+    let run = wiring.queue().show(task).unwrap().runs[0].id().clone();
+
+    wiring.free.store(ROOM, Ordering::SeqCst);
+    let free = wiring.free.clone();
+    wiring.agent.on_next_turn(Box::new(move || {
+        free.store(SHORT, Ordering::SeqCst);
+    }));
+    let mut held_status = None;
+    wiring.supervise_once_while(|queue| {
+        if queue_payloads(queue, "landing_held").is_empty() {
+            return false;
+        }
+        held_status = Some(queue.show(task).unwrap().runs[0].status());
+        wiring.free.store(5 * GIB, Ordering::SeqCst);
+        true
+    });
+    assert_eq!(held_status, Some(RunStatus::NeedsSession));
+    let mut queue = wiring.queue();
+    let held = queue_payloads(&queue, "landing_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["disk"]["workers"], 0);
+    assert_eq!(held[0]["disk"]["waiting"], 1);
+    assert_eq!(held[0]["disk"]["integrators"], 0);
+    assert_eq!(
+        held[0]["landing_candidates"],
+        serde_json::json!([{"run": run, "needed": 5 * GIB,
+                           "allowed": false, "waiting": true}])
+    );
+    assert_eq!(queue_payloads(&queue, "landing_resumed").len(), 1);
+    let detail = queue.show(task).unwrap();
+    let resumed: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|e| e.kind.as_str() == "resume_finished")
+        .collect();
+    assert_eq!(resumed.len(), 1, "{detail:?}");
+    assert_eq!(resumed[0].payload["approved"], true);
+    assert_eq!(resumed[0].payload["outcome"], "resolved");
+    let started = detail
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.kind.as_str() == "integration_started")
+        .unwrap();
+    assert!(resumed[0].id < started.id);
+    // The resolved diff still needs the person's approval again. Reaching
+    // that comparison proves the disk gate let its landing proceed.
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let compared = detail
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.kind.as_str() == "integration_compared")
+        .unwrap();
+    assert_eq!(compared.payload["matched"], false);
+    assert_eq!(compared.payload["reapproval"], "integrate");
+    wiring.integrate(task);
+    assert_eq!(
+        queue.show(task).unwrap().runs[0].status(),
+        RunStatus::Integrated
+    );
+}
+
 /// The expectation of the queue's one run size sample: 10 GiB.
 const EXPECTED: u64 = 10 * GIB;
-/// Room above the reserve (5 GiB) for one expectation and a half: with
+/// Room above the reserve (5 GiB) for two expectations and a half: with
 /// nothing moving one run is claimed; with one moving a second goes only
 /// once the first's size is measured at the expectation.
-const ONE_AND_A_HALF: u64 = 5 * GIB + EXPECTED + EXPECTED / 2;
+const ONE_AND_A_HALF: u64 = 5 * GIB + 2 * EXPECTED + EXPECTED / 2;
 
 /// A first task lands with no disk read, and its run gets a run size
 /// sample of [`EXPECTED`]; two more tasks are ready, the turn of the first
@@ -465,8 +558,7 @@ fn claimed(queue: &mut SqliteQueue, task: crate::domain::TaskId) -> bool {
 
 /// ADR-t4542-1: the size of the run moving, measured off the loop at the
 /// expectation, leaves it nothing to take yet: while its turn is held,
-/// the second task is claimed beside it, which room for one expectation
-/// above the reserve holds.
+/// the second task is claimed beside it, which room for W plus the empty integration slot above the reserve holds.
 #[test]
 fn a_moving_runs_measured_size_lets_the_next_claim_go_beside_it() {
     let mut wiring = Wiring::new(
@@ -511,8 +603,8 @@ fn a_moving_runs_measured_size_lets_the_next_claim_go_beside_it() {
 
 /// ADR-t4542-1: a moving run whose size cannot be measured counts the
 /// expectation whole: while its turn is held, the second task is not
-/// claimed and `claim_held` names the reserve and the expectation twice
-/// (the new run's and the moving run's remaining). Once the first run
+/// claimed and `claim_held` names the reserve and three expectations
+/// (new W, remaining W and the empty integration slot). Once the first run
 /// landed, the second is claimed and lands.
 #[test]
 fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_claim() {
@@ -528,13 +620,23 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
             ],
         },
     );
+    let (release, released) = std::sync::mpsc::channel();
+    let (second, third) = one_sample_and_two_ready(&wiring, released);
+    let ended = std::path::PathBuf::from(
+        wiring.queue().all_runs().unwrap()[0]
+            .worktree_path()
+            .unwrap(),
+    );
+    let ended_walked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_ended = ended_walked.clone();
     let measured = calls.clone();
-    wiring.moving_sizes = std::sync::Arc::new(move |_: &std::path::Path| {
+    wiring.moving_sizes = std::sync::Arc::new(move |path: &std::path::Path| {
+        if path == ended {
+            saw_ended.store(true, Ordering::SeqCst);
+        }
         measured.fetch_add(1, Ordering::SeqCst);
         Err(std::io::Error::from_raw_os_error(libc::EMFILE))
     });
-    let (release, released) = std::sync::mpsc::channel();
-    let (second, third) = one_sample_and_two_ready(&wiring, released);
     let mut after = None;
     let mut alone = false;
     wiring.supervise_once_while(|queue| {
@@ -558,6 +660,10 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
         true
     });
     assert!(alone);
+    assert!(
+        !ended_walked.load(Ordering::SeqCst),
+        "an ended run has no disk stage to measure"
+    );
     let mut queue = wiring.queue();
     let held = queue_payloads(&queue, "claim_held");
     assert!(
@@ -566,7 +672,7 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
     );
     assert_eq!(
         held[0]["threshold"],
-        serde_json::json!((5 * GIB + 2 * EXPECTED) as f64)
+        serde_json::json!((5 * GIB + 3 * EXPECTED) as f64)
     );
     let disk = &held[0]["disk"];
     assert_eq!(disk["expected"], EXPECTED);
@@ -576,7 +682,16 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
     assert_eq!(disk["measured"], 0);
     assert_eq!(disk["unmeasured"], 1);
     assert_eq!(disk["landing_waiting"], false);
-    assert_eq!(disk["landing_expected"], 0);
+    assert_eq!(disk["landing_expected"], EXPECTED);
+    assert_eq!(disk["workers"], 1);
+    assert_eq!(disk["waiting"], 0);
+    assert_eq!(disk["integrators"], 0);
+    assert_eq!(disk["integrator_expected"], EXPECTED);
+    assert!(
+        held[0]["message"].as_str().unwrap().contains(
+            "stages worker 1, waiting 0, integrator 0; W 10.0 GiB, I 10.0 GiB, U 10.0 GiB"
+        )
+    );
     assert_eq!(disk["claims_wait_reason"], Value::Null);
     let message = held[0]["message"].as_str().unwrap();
     assert!(
@@ -609,8 +724,8 @@ fn relax(wiring: &Wiring, expected: Option<u64>, no_remaining: bool, ago: u64) -
 }
 
 /// ADR-t4727-1: the supervisor reads a relaxation on its next pass, with no
-/// restart. Under one that overrides the expectation alone (8 GiB), the
-/// moving run not measured still counts the samples' whole, so the claim
+/// restart. Under one that overrides the expectation alone (9 GiB), the
+/// moving run not measured counts the overridden W, so the claim
 /// is held, and `claim_held` names the relaxation; a relaxation recorded
 /// while it is held that counts the moving runs' remaining 0 lets the
 /// second task be claimed beside the first, which the room above the
@@ -636,7 +751,7 @@ fn a_relaxation_recorded_while_a_claim_is_held_lets_it_go_on_the_next_pass() {
     });
     let (release, released) = std::sync::mpsc::channel();
     let (second, third) = one_sample_and_two_ready(&wiring, released);
-    let first_relax = relax(&wiring, Some(8 * GIB), false, 0);
+    let first_relax = relax(&wiring, Some(9 * GIB), false, 0);
     let mut relaxed = false;
     let mut beside = false;
     wiring.supervise_once_while(|queue| {
@@ -671,11 +786,11 @@ fn a_relaxation_recorded_while_a_claim_is_held_lets_it_go_on_the_next_pass() {
     assert!(!held.is_empty());
     assert_eq!(
         held[0]["threshold"],
-        serde_json::json!((5 * GIB + 8 * GIB + EXPECTED) as f64)
+        serde_json::json!((5 * GIB + 27 * GIB) as f64)
     );
     let disk = &held[0]["disk"];
-    assert_eq!(disk["expected"], 8 * GIB);
-    assert_eq!(disk["relaxed"]["expected_bytes"], 8 * GIB);
+    assert_eq!(disk["expected"], 9 * GIB);
+    assert_eq!(disk["relaxed"]["expected_bytes"], 9 * GIB);
     assert_eq!(disk["relaxed"]["no_remaining"], false);
     assert_eq!(disk["relaxed"]["event_id"], first_relax);
     let message = held[0]["message"].as_str().unwrap();
@@ -695,7 +810,7 @@ fn a_relaxation_recorded_while_a_claim_is_held_lets_it_go_on_the_next_pass() {
 /// one) relaxes nothing: the first pass records `disk_relax_expired` of it
 /// once, however many passes follow, and the claim beside the moving run
 /// not measured is held as with none (the reserve and the expectation
-/// twice) until the first run landed.
+/// three times) until the first run landed.
 #[test]
 fn a_relaxation_past_its_time_is_recorded_expired_once_and_relaxes_nothing() {
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -747,7 +862,7 @@ fn a_relaxation_past_its_time_is_recorded_expired_once_and_relaxes_nothing() {
     let held = queue_payloads(&queue, "claim_held");
     assert_eq!(
         held[0]["threshold"],
-        serde_json::json!((5 * GIB + 2 * EXPECTED) as f64)
+        serde_json::json!((5 * GIB + 3 * EXPECTED) as f64)
     );
     assert!(held[0]["disk"].get("relaxed").is_none(), "{held:?}");
     for task in [second, third] {

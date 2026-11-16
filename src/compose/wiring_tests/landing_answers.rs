@@ -117,7 +117,7 @@ fn running(queue: &mut SqliteQueue, task: TaskId) -> bool {
 #[test]
 fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim() {
     const LAND_WITH_A_REASON: &str = "land: review 3, the findings are docs only";
-    let wiring = Wiring::new(
+    let mut wiring = Wiring::new(
         "a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim",
         Script {
             receipts: vec![succeeded, succeeded, succeeded],
@@ -130,6 +130,16 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
     let mut queue = wiring.queue();
     let ask = landing_ask(&mut queue, first);
 
+    let target =
+        std::path::PathBuf::from(queue.show(first).unwrap().runs[0].worktree_path().unwrap());
+    let measured = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw = measured.clone();
+    wiring.moving_sizes = std::sync::Arc::new(move |path| {
+        if path == target {
+            saw.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(Some(0))
+    });
     let second = wiring.ready_task(&["true"]);
     let third = wiring.ready_task(&["true"]);
     // Task 2's turn holds the only slot until the answer is applied.
@@ -254,6 +264,10 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
             .all(|ask| ask.closed_at.is_some())
     );
     assert_eq!(wiring.agent.review_prompts().len(), 3);
+    assert!(
+        measured.load(std::sync::atomic::Ordering::SeqCst),
+        "the unleased run queued by land was measured"
+    );
 }
 
 /// `land` answers are applied while a `[run.env]` program is missing, but

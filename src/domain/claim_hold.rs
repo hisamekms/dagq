@@ -15,7 +15,7 @@
 //! ([`LANDINGS`]).
 
 use super::EventKind;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -339,6 +339,57 @@ pub fn transition_of(
     }
 }
 
+/// Landing hold transitions include a snapshot of the pass's candidates.
+/// Only blocked membership changes refresh this supervisor's existing hold;
+/// changed measurements, order and allowed/integrating candidates do not.
+/// Another live supervisor keeps ownership, as in [`transition_of`].
+pub fn landing_transition(
+    hold: Option<&ClaimHold>,
+    last: Option<&RunEvent>,
+    candidates: &[super::disk::LandingDecision],
+    token: &LeaseToken,
+    live: impl Fn(&str) -> bool,
+) -> Option<(EventKind, Value)> {
+    let membership_changed = last
+        .filter(|last| {
+            last.kind == LANDINGS.held && text(last, "supervisor") == Some(token.as_str())
+        })
+        .is_some_and(|last| {
+            let before: BTreeSet<_> = last.payload["landing_candidates"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|c| c["waiting"] == true && c["allowed"] == false)
+                .filter_map(|c| c["run"].as_str())
+                .collect();
+            let after: BTreeSet<_> = candidates
+                .iter()
+                .filter(|c| c.waiting && !c.allowed)
+                .map(|c| c.run.as_str())
+                .collect();
+            before != after
+        });
+    let (kind, mut payload) = transition_of(
+        LANDINGS,
+        hold,
+        if hold.is_some() && membership_changed {
+            None
+        } else {
+            last
+        },
+        token,
+        live,
+    )?;
+    payload["landing_candidates"] = json!(candidates);
+    if let Some(hold) = hold {
+        payload["message"] = json!(format!(
+            "disk holds the blocked landing candidates; {}",
+            hold.message_for(LANDINGS)
+        ));
+    }
+    Some((kind, payload))
+}
+
 /// The hold of `kinds` in place as `last`, the latest of its two events,
 /// leaves it: a `held` whose supervisor runs (`live` of its token). The rule
 /// [`transition_of`] reads the hold by, for the readers that record none
@@ -366,7 +417,9 @@ pub const DISK_HOLD_ATTENTION_SECS: i64 = 30 * 60;
 /// on the free disk space that has stood [`DISK_HOLD_ATTENTION_SECS`] or
 /// more while `candidates` ready tasks could be claimed. The text gives how
 /// long it stood, the free space, what a new run needs and its breakdown
-/// (the payload's `disk`, when recorded). None for no hold, a hold of
+/// (the payload's `disk`, when recorded). Its `landing_expected` is the empty
+/// INTEGRATOR slot term, regardless of whether any run waits to land.
+/// None for no hold, a hold of
 /// another reason (its own ask or attention tells of it), a younger one or
 /// one with no task to claim; a hold that ends ends the attention. It is
 /// told, never asked: the disk's ask keeps its own condition.
@@ -386,7 +439,7 @@ pub fn disk_hold_attention(
     let gib = |bytes: Option<f64>| bytes.map_or_else(|| "?".to_owned(), super::disk::gib);
     let disk = held.payload.get("disk").map_or_else(String::new, |disk| {
         format!(
-            " (reserve {}, new run {}, remaining of {} moving runs {}, waiting landing {})",
+            " (reserve {}, new run {}, remaining of {} moving runs {}, empty INTEGRATOR slot {})",
             gib(number(disk, "reserve")),
             gib(number(disk, "claim_expected")),
             disk.get("moving")
@@ -742,8 +795,19 @@ mod tests {
             free: Some(gib),
             total: 200 * gib,
             expected: Some(10 * gib),
+            integrator_expected: Some(10 * gib),
+            runs: vec![
+                super::super::disk::DiskRun {
+                    stage: super::super::disk::DiskStage::Worker,
+                    current: Some(4 * gib),
+                },
+                super::super::disk::DiskRun {
+                    stage: super::super::disk::DiskStage::Worker,
+                    current: None,
+                },
+            ],
             moving: 2,
-            remaining: 16 * gib,
+            landing_current: None,
             landing_waiting: true,
             relaxed: None,
         }
@@ -873,6 +937,109 @@ mod tests {
     }
 
     #[test]
+    fn landing_holds_ignore_measurements_and_record_only_blocked_membership_changes() {
+        use super::super::{RunId, disk::LandingDecision};
+        let me = LeaseToken::new("me");
+        let hold = disk(Some(1), Some(20), None).unwrap();
+        let mut candidates = vec![
+            LandingDecision {
+                run: RunId::new("blocked").unwrap(),
+                needed: 20,
+                allowed: false,
+                waiting: true,
+            },
+            LandingDecision {
+                run: RunId::new("ready").unwrap(),
+                needed: 2,
+                allowed: true,
+                waiting: true,
+            },
+            LandingDecision {
+                run: RunId::new("integrating").unwrap(),
+                needed: 6,
+                allowed: false,
+                waiting: false,
+            },
+        ];
+        let snapshot = json!([
+            {"run":"blocked","needed":20,"allowed":false,"waiting":true},
+            {"run":"ready","needed":2,"allowed":true,"waiting":true},
+            {"run":"integrating","needed":6,"allowed":false,"waiting":false}
+        ]);
+        let (kind, payload) =
+            landing_transition(Some(&hold), None, &candidates, &me, |_| true).unwrap();
+        assert_eq!(kind, EventKind::LandingHeld);
+        assert_eq!(payload["landing_candidates"], snapshot);
+        let last = event(
+            1,
+            LANDING_HELD,
+            json!({
+                "reason":"disk_space", "supervisor":"me", "landing_candidates":snapshot
+            }),
+            "00:00",
+        );
+        candidates[0].needed = 18;
+        candidates[1].needed = 1;
+        candidates[2].needed = 4;
+        candidates[2].allowed = true;
+        candidates.reverse();
+        candidates.push(LandingDecision {
+            run: RunId::new("another-ready").unwrap(),
+            needed: 3,
+            allowed: true,
+            waiting: true,
+        });
+        let remeasured = disk(Some(2), Some(18), None).unwrap();
+        assert!(
+            landing_transition(Some(&remeasured), Some(&last), &candidates, &me, |_| true)
+                .is_none()
+        );
+        // The blocked run changes, although the count stays one.
+        candidates
+            .iter_mut()
+            .find(|c| c.run.as_str() == "blocked")
+            .unwrap()
+            .allowed = true;
+        candidates.push(LandingDecision {
+            run: RunId::new("new-blocked").unwrap(),
+            needed: 18,
+            allowed: false,
+            waiting: true,
+        });
+        let (kind, payload) =
+            landing_transition(Some(&remeasured), Some(&last), &candidates, &me, |_| true).unwrap();
+        assert_eq!(kind, EventKind::LandingHeld);
+        assert_eq!(payload["landing_candidates"].as_array().unwrap().len(), 5);
+        let refreshed = event(2, LANDING_HELD, payload, "00:01");
+        assert!(
+            landing_transition(
+                Some(&remeasured),
+                Some(&refreshed),
+                &candidates,
+                &me,
+                |_| true
+            )
+            .is_none()
+        );
+        let mut other = last.clone();
+        other.payload["supervisor"] = json!("other");
+        assert!(
+            landing_transition(Some(&remeasured), Some(&other), &candidates, &me, |_| true)
+                .is_none()
+        );
+        assert!(
+            landing_transition(Some(&remeasured), Some(&other), &candidates, &me, |_| false)
+                .is_some()
+        );
+        assert!(landing_transition(None, Some(&other), &[], &me, |_| true).is_none());
+        let (kind, payload) =
+            landing_transition(None, Some(&refreshed), &[], &me, |_| true).unwrap();
+        assert_eq!(kind, EventKind::LandingResumed);
+        let resumed = event(3, LANDING_RESUMED, payload, "00:02");
+        assert!(landing_transition(None, Some(&resumed), &[], &me, |_| true).is_none());
+    }
+
+    #[test]
     fn landings_are_held_and_summed_by_their_own_kinds() {
         let hold = disk(Some(1), Some(2), None).unwrap();
         let (kind, payload) =
@@ -977,7 +1144,7 @@ mod tests {
             "supervisor": "s",
             "disk": {"reserve": 11 * GIB, "claim_expected": 12 * GIB,
                      "moving": 2, "claim_remaining": 13 * GIB,
-                     "landing_expected": 12 * GIB},
+                     "landing_expected": 12 * GIB, "landing_waiting": false},
         });
         let held = event(1, CLAIM_HELD, payload.clone(), "00:00");
         let at = |time: &str| timestamp_millis(&format!("2026-09-26T{time}.000Z")).unwrap();
@@ -986,7 +1153,7 @@ mod tests {
             told,
             "no new run claimed for 30 min: free 35.0 GiB below the 48.0 GiB a new run needs \
              (reserve 11.0 GiB, new run 12.0 GiB, remaining of 2 moving runs 13.0 GiB, \
-             waiting landing 12.0 GiB); ready tasks waiting: 2"
+             empty INTEGRATOR slot 12.0 GiB); ready tasks waiting: 2"
         );
         assert!(told.chars().count() <= 300, "{told}");
         assert_eq!(disk_hold_attention(Some(&held), 2, at("01:29:59")), None);

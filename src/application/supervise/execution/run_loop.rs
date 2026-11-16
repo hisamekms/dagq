@@ -479,50 +479,87 @@ impl Supervisor<'_> {
             self.on_observation(|observation, env| observation.resources_pass(env, held));
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
-            let landings: Vec<RunId> = self
-                .claim
-                .slots
+            use crate::domain::{disk::disk_usage, run_phase};
+            let mut moving = Vec::new();
+            // Read only current stages, never the queue's historical runs.
+            // A run may advance between these reads; keep its newer row once.
+            let mut disk_runs = self.queue.active_runs()?;
+            for status in [RunStatus::AwaitingIntegration, RunStatus::NeedsSession] {
+                for run in self.queue.runs_with_status(status)? {
+                    if let Some(previous) = disk_runs.iter_mut().find(|r| r.id() == run.id()) {
+                        *previous = run;
+                    } else {
+                        disk_runs.push(run);
+                    }
+                }
+            }
+            for run in disk_runs
+                .into_iter()
+                .filter(|run| run.status().is_unfinished())
+            {
+                let slot = self
+                    .claim
+                    .slots
+                    .iter()
+                    .find(|slot| slot.run.id() == run.id());
+                let events = if slot.is_none() {
+                    self.queue.run_events(run.id())?
+                } else {
+                    Vec::new()
+                };
+                let phase = if let Some(slot) = slot {
+                    let recorded = slot.recorded_phase();
+                    if matches!(
+                        recorded,
+                        run_phase::Phase::Waiting { .. }
+                            | run_phase::Phase::Returning
+                            | run_phase::Phase::LandingQueue
+                    ) {
+                        recorded
+                    } else {
+                        slot.phase.disk_phase()
+                    }
+                } else {
+                    run_phase::last_recorded(&events)
+                        .and_then(|p| run_phase::Phase::from_name(&p.phase))
+                        .unwrap_or_else(|| run_phase::Phase::for_disk_status(run.status()))
+                };
+                // An approved resume keeps needs_session until its landing
+                // starts. Its slot already waits to land after resolution,
+                // so status alone must not exclude it from this pass's gate.
+                let awaiting_slot = slot.is_some_and(|s| matches!(s.phase, Phase::AwaitingSlot));
+                let waiting = awaiting_slot
+                    || (run.status() == RunStatus::AwaitingIntegration
+                        && slot.is_none()
+                        && RunHistory::from_events(&events).queued_to_land().is_some());
+                moving.push(super::super::host_ops::disk::DiskTarget {
+                    target: super::super::host_ops::moving_sizes::MovingTarget::of(
+                        &run,
+                        &self.layout.runs_dir,
+                    ),
+                    usage: disk_usage(phase, !run.in_container(), true),
+                    candidate: awaiting_slot
+                        || run.status() == RunStatus::AwaitingIntegration
+                        || run.status() == RunStatus::Integrating,
+                    waiting,
+                });
+            }
+            let landings: Vec<_> = moving
                 .iter()
-                .filter(|slot| matches!(slot.phase, Phase::AwaitingSlot))
-                .map(|slot| slot.run.id().clone())
+                .filter(|r| r.waiting)
+                .map(|r| r.target.run.clone())
                 .collect();
             let held = self.cleanup_held();
-            // The runs that go on by themselves, whose end may make room:
-            // while one does, a shortage holds without asking. A run waiting
-            // for a person, for its landing turn or for a provider's hold
-            // does not.
-            let moving: Vec<_> = self
-                .claim
-                .slots
+            let in_flight = moving.iter().filter(|r| r.usage.active).count();
+            let landing = moving
                 .iter()
-                .filter(|slot| {
-                    !slot.out_of_slot()
-                        && !matches!(slot.phase, Phase::AwaitingSlot | Phase::ReviewHeld { .. })
-                })
-                .map(|slot| {
-                    super::super::host_ops::moving_sizes::MovingTarget::of(
-                        &slot.run,
-                        &self.layout.runs_dir,
-                    )
-                })
-                .collect();
-            let in_flight = moving.len();
-            // Of them, the landings under way: a landing's retry of its
-            // verification counts the runs moving besides itself.
-            let landing = self
-                .claim
-                .slots
-                .iter()
-                .filter(|slot| !slot.out_of_slot() && matches!(slot.phase, Phase::Landing(_)))
+                .filter(|r| r.usage.stage == crate::domain::disk::DiskStage::Integrator)
                 .count();
-            // A landing goes before the claims only when nothing but the
-            // disk holds it.
             let landing_waiting = !landings.is_empty() && self.landing_goes_but_for_disk();
             self.on_host(|host, env| {
                 host.check_disk(
                     env,
                     options.disk_cleanup_interval,
-                    &landings,
                     &held,
                     super::super::host_ops::disk::DiskMoves {
                         in_flight,

@@ -1,9 +1,9 @@
 //! The free disk space a claim and a landing need (ADR-0047 decision 44,
 //! ADR-t4473-1, ADR-t4542-1): on every pass the supervisor reads the free
 //! and total bytes of the queue's directory and, from the recent runs'
-//! samples, the runs moving, their sizes measured off the loop
-//! ([`super::moving_sizes`]) and whether a landing waits, what a claim and
-//! a landing need ([`crate::domain::disk::DiskState::needs`]). Short of either, it cleans what the ended runs
+//! samples, unfinished disk-owning runs, their sizes measured off the loop
+//! ([`super::moving_sizes`]) and phase properties, one decision for claims and
+//! landing candidates ([`crate::domain::disk::DiskState::decide`]). Short of either, it cleans what the ended runs
 //! left ([`HostOpsState::request_cleanup`] and `git worktree prune`,
 //! off the loop: task 405) and reads again once that is done, recording
 //! `auto_repaired` (`repair: disk_cleanup`) when it freed something; the
@@ -25,8 +25,9 @@ use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     disk::{
-        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskRelaxed, DiskState, RELAX_KINDS,
-        RelaxState, RunSample, expected_run_estimate, gib, relax_state, run_expectation,
+        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskDecision, DiskNeeds, DiskRelaxed, DiskRun,
+        DiskStage, DiskState, DiskUsage, LandingCandidate, RELAX_KINDS, RelaxState, RunSample,
+        expected_run_estimate, gib, landing_expectation, relax_state, run_expectation,
         size_exceeded_expected,
     },
 };
@@ -41,12 +42,12 @@ pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "With no run moving, the free disk space of the queue's directory is below the reserve, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected}, from the sizes of the recent runs, for each run while others move). No new run is claimed and no run lands below the reserve. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "With no run moving, the free disk space of the queue's directory is below the reserve, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected}, with unused reservations for each stage). No new run is claimed and no run lands below the reserve. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
-/// What moves at a pass's reading of the disk: `in_flight`, the runs the
-/// slots hold that go on by themselves, `landing`, how many of them are
-/// landings under way, and `landing_waiting`, whether a run awaits its
-/// landing that nothing but the disk holds.
+/// Activity in this pass's unfinished-run registry, independent of slots.
+/// `in_flight` counts entries whose `DiskUsage::active` is true; `landing`
+/// counts the INTEGRATOR entries. `landing_waiting` says a queued candidate
+/// could advance but for the disk. Activity controls idle progress and asks.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::application::supervise) struct DiskMoves {
     pub(in crate::application::supervise) in_flight: usize,
@@ -55,12 +56,20 @@ pub(in crate::application::supervise) struct DiskMoves {
 }
 
 impl DiskMoves {
-    /// The runs a landing's retry of its verification counts as moving:
-    /// those besides the landings under way, so that the retry needs what
-    /// the landing needed at its start, when its slot was not counted.
+    /// Other active runs used by the shared landing requirement. The
+    /// candidate itself is excluded at start and retry alike, preserving
+    /// reserve-only progress when no other run is active.
     pub(in crate::application::supervise) const fn besides_the_landing(self) -> usize {
         self.in_flight.saturating_sub(self.landing)
     }
+}
+
+/// Registry entry, independent of slot ownership or approval source.
+pub(in crate::application::supervise) struct DiskTarget {
+    pub target: super::moving_sizes::MovingTarget,
+    pub usage: DiskUsage,
+    pub candidate: bool,
+    pub waiting: bool,
 }
 
 /// What the supervisor knows of the disk between passes.
@@ -68,9 +77,11 @@ impl DiskMoves {
 pub(in crate::application::supervise) struct DiskWatch {
     /// The recent runs' samples and when they were read.
     samples: Option<(Instant, Vec<RunSample>)>,
-    /// Successful exceedance observations for this supervisor process.
+    /// Successfully recorded exceedances for this supervisor process.
     /// Retained across waits/resumes; restart allows one further event.
     exceeded: std::collections::HashSet<RunId>,
+    /// Immutable pass result shared with landing/retry gates and status.
+    pub(super) decision: std::sync::Arc<std::sync::Mutex<Option<DiskDecision>>>,
     /// What this pass read of the disk: what a claim and a landing need.
     pub(super) needs: DiskNeeds,
     /// How many new runs this pass may claim ([`DiskState::claims`]);
@@ -88,8 +99,6 @@ pub(in crate::application::supervise) struct DiskWatch {
     asked: bool,
     /// The runs added to the disk ask.
     joined: Vec<RunId>,
-    /// There is not room for a landing's verification.
-    pub(super) landing_short: bool,
     /// A cleanup for room runs or waits to: nothing is held or asked for
     /// until it is done.
     pub(super) cleaning: bool,
@@ -160,22 +169,21 @@ impl CleanupEpoch {
 }
 
 impl HostOpsState {
-    /// Check the free disk space for this pass (see the module): clean
-    /// and ask when short, close the disk ask when there is room, and
-    /// record the landings' hold. `landings` are the runs the slots hold
-    /// waiting for their landing turn, `held` every run a slot holds,
-    /// which a cleanup leaves alone, and `in_flight` how many of them go
-    /// on by themselves (neither waiting for a person nor for their
-    /// landing turn), whose end may make room. The claims' hold is judged
-    /// when the supervisor claims, from the same reading.
+    /// Freeze one `DiskDecision` from this pass's free space, expectations,
+    /// cached trusted sizes and `moving`, the unfinished-run registry with
+    /// stage facts regardless of slots or approval source.
+    /// `moves` summarizes registry activity and landing priority; `held`
+    /// carries cleanup protection and eligible waiting-run candidates.
+    /// The stored result supplies claim and candidate landing/retry gates;
+    /// its blocked candidates drive landing holds and disk ask membership.
+    /// Cleanup and ask transitions use the same pass's reading.
     pub(in crate::application::supervise) fn check_disk(
         &mut self,
         env: &mut HostEnv<'_>,
         interval: Duration,
-        landings: &[RunId],
         held: &super::cleanup::Held,
         moves: DiskMoves,
-        moving: &[super::moving_sizes::MovingTarget],
+        moving: &[DiskTarget],
     ) -> Result<()> {
         let DiskMoves {
             in_flight,
@@ -192,53 +200,77 @@ impl HostOpsState {
         let (expected, sample_count) = self.expected_run_size(env)?;
         let relaxed = self.relaxation(env)?;
         let free = self.free_bytes(env);
-        // The moving runs' remaining, from their sizes measured off the
-        // loop; one with no size to trust counts the expectation whole
-        // (ADR-t4542-1). This pass's runs are walked for the next.
+        // Stage reservations and exceedances share trusted sizes measured
+        // off the loop. An unknown size reserves the stage's whole budget.
+        // This pass's registered targets are walked for the next.
         let now = env.generators.clock.monotonic();
-        let (remaining, measured, unmeasured) = self
-            .moving_sizes
-            .remaining_with_counts(moving, expected, now);
-        for (run_id, size) in self.moving_sizes.trusted_sizes(moving, now) {
+        let sizes = self.moving_sizes.trusted_sizes(
+            &moving.iter().map(|r| r.target.clone()).collect::<Vec<_>>(),
+            now,
+        );
+        let runs = moving
+            .iter()
+            .zip(&sizes)
+            .map(|(r, (_, current))| DiskRun {
+                stage: r.usage.stage,
+                current: *current,
+            })
+            .collect();
+        for (r, (run_id, size)) in moving.iter().zip(&sizes).filter(|(r, _)| r.usage.active) {
             if let Some((bytes, expected)) =
-                size_exceeded_expected(size, expected, self.disk.exceeded.contains(&run_id))
+                size_exceeded_expected(*size, expected, self.disk.exceeded.contains(run_id))
             {
-                let task_id = env.queue.run(&run_id)?.task_id();
-                env.queue.record_runtime_event(
-                    &run_id,
-                    EventKind::RunSizeExceededExpected,
-                    serde_json::json!({
-                        "run_id": run_id,
-                        "task_id": task_id,
-                        "bytes": bytes,
-                        "expected": expected,
-                        "estimate": self.disk_config.estimate,
-                    }),
-                )?;
-                self.disk.exceeded.insert(run_id);
+                let task_id = env.queue.run(run_id)?.task_id();
+                env.queue.record_runtime_event(run_id, EventKind::RunSizeExceededExpected,
+                    serde_json::json!({"run_id":run_id,"task_id":task_id,"bytes":bytes,"expected":expected,"estimate":self.disk_config.estimate}))?;
+                self.disk.exceeded.insert(r.target.run.clone());
             }
         }
-        self.moving_sizes
-            .pass(moving, &self.measure_tree, &env.generators.clock, now);
+        let candidates: Vec<_> = moving
+            .iter()
+            .zip(&sizes)
+            .filter(|(r, _)| r.candidate)
+            .map(|(r, (_, current))| LandingCandidate {
+                run: r.target.run.clone(),
+                current: *current,
+                integrating: r.usage.stage == DiskStage::Integrator,
+                waiting: r.waiting,
+            })
+            .collect();
         let state = DiskState {
             free,
             total: self.total_bytes(env).unwrap_or(0),
             expected,
+            integrator_expected: landing_expectation(&self.disk_config, expected),
+            runs,
             moving: in_flight,
-            remaining,
+            landing_current: None,
             landing_waiting,
             relaxed,
         };
-        let mut needs = state.needs(self.disk_config.reserve);
-        needs.estimate = self.disk_config.estimate;
-        needs.sample_count = sample_count;
-        needs.measured = measured;
-        needs.unmeasured = unmeasured;
+        let decision = state.decide(
+            self.disk_config.reserve,
+            &candidates,
+            self.disk_config.estimate,
+            sample_count,
+        );
+        let needs = decision.needs;
         self.disk.needs = needs;
-        self.disk.claims = state.claims(self.disk_config.reserve);
+        self.disk.claims = decision.claims;
         self.disk.moving.store(
             moves.besides_the_landing(),
             std::sync::atomic::Ordering::SeqCst,
+        );
+        *self
+            .disk
+            .decision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(decision.clone());
+        self.moving_sizes.pass(
+            &moving.iter().map(|r| r.target.clone()).collect::<Vec<_>>(),
+            &self.measure_tree,
+            &env.generators.clock,
+            now,
         );
         let cleanup = self.disk.cleanup_epoch.read(in_flight);
         self.disk.cleanup_epoch = cleanup.next;
@@ -248,34 +280,25 @@ impl HostOpsState {
         if cleanup.retry_now {
             self.disk.cleaned = None;
         }
-        let most = Some(needs.claim.max(needs.landing));
-        if short_of(free, most) {
+        let most = Some(
+            decision
+                .landings
+                .iter()
+                .filter(|d| d.waiting)
+                .fold(needs.claim, |n, d| n.max(d.needed)),
+        );
+        if decision.short {
             self.clean_for_disk(env, held, free, most, interval);
         }
-        self.free = free;
-        let reading = read_disk(free, &needs, self.cleanup.for_disk());
-        self.disk.short = reading.short;
-        self.disk.cleaning = reading.cleaning;
-        if reading.cleaning {
-            info!(
-                "the free disk space {} is short (claim {}, landing {}): waiting for cleanup; {}",
-                free.map_or_else(|| "unknown".into(), |bytes| gib(bytes as f64)),
-                gib(needs.claim as f64),
-                gib(needs.landing as f64),
-                needs.message()
-            );
+        self.disk.short = decision.short;
+        self.disk.cleaning = cleaning(decision.short, self.cleanup.for_disk());
+        if self.disk.cleaning {
+            info!("waiting for disk cleanup; {}", needs.message());
         }
-        self.disk.landing_short = reading.landing_short;
-        let judged = judge_reading(reading, free, &needs, !landings.is_empty());
-        let waiting: &[RunId] = if self.disk.landing_short {
-            landings
-        } else {
-            &[]
-        };
+        let waiting: Vec<RunId> = decision.blocked().map(|d| d.run.clone()).collect();
         let open = unclosed.iter().any(|ask| ask.is_open());
         let condition = disk_ask_condition(&ShortageReading {
-            free,
-            need: Some(needs.reserve),
+            reserve: decision.reserve,
             cleaned: self.disk.cleanup_epoch.ready(
                 self.disk.breakdown.is_some(),
                 self.cleanup.for_disk(),
@@ -283,10 +306,16 @@ impl HostOpsState {
             ),
             in_flight,
             open,
-            cleaning: reading.cleaning,
+            cleaning: self.disk.cleaning,
         });
-        let step = disk_ask_step(condition, self.disk.asked, open, &self.disk.joined, waiting);
-        if forgets_cleanup(&step, reading.short) {
+        let step = disk_ask_step(
+            condition,
+            self.disk.asked,
+            open,
+            &self.disk.joined,
+            &waiting,
+        );
+        if forgets_cleanup(&step, decision.short) {
             self.disk.cleaned = None;
         }
         match step {
@@ -305,8 +334,9 @@ impl HostOpsState {
             }
             AskStep::Forget => {}
         }
-        if let Judged::Recorded { landings: hold, .. } = judged {
-            env.record_hold(claim_hold::LANDINGS, hold.as_deref())?;
+        if !self.disk.cleaning {
+            let hold = decision.landing_hold();
+            env.record_disk_landings(hold.as_ref(), &decision.landings)?;
         }
         Ok(())
     }
@@ -496,101 +526,9 @@ impl HostOpsState {
     }
 }
 
-/// Free bytes short of a need; neither unknown is short.
-fn short_of(free: Option<u64>, need: Option<u64>) -> bool {
-    matches!((free, need), (Some(free), Some(need)) if free < need)
-}
-
-/// What a pass reads of the disk ([`read_disk`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::application::supervise) struct Reading {
-    /// Short of what a claim or a landing needs.
-    pub(super) short: bool,
-    /// Short of what a landing's verification needs.
-    pub(super) landing_short: bool,
-    /// Short while a cleanup for room runs or waits to ([`cleaning`]):
-    /// nothing is held or asked for yet.
-    pub(super) cleaning: bool,
-}
-
-/// Read the free bytes against what a claim and a landing need, with
-/// `for_disk` whether a cleanup for room (or the rest of one another job
-/// took on) runs or waits to. Short and not cleaning, the pass asks (the
-/// disk ask) and records the landings' hold; with room it closes the ask.
-pub(in crate::application::supervise) fn read_disk(
-    free: Option<u64>,
-    needs: &DiskNeeds,
-    for_disk: bool,
-) -> Reading {
-    let short = short_of(free, Some(needs.claim.max(needs.landing)));
-    Reading {
-        short,
-        landing_short: short_of(free, Some(needs.landing)),
-        cleaning: cleaning(short, for_disk),
-    }
-}
-
-/// Short while the cleanup for room runs, or the rest of one another job
-/// took on (task 1478): the claims and landings short of room wait for
-/// it, and nothing is held or asked for until it is done.
+/// Cleanup is a scheduling wait on the already computed pass result.
 const fn cleaning(short: bool, for_disk: bool) -> bool {
     short && for_disk
-}
-
-/// What a pass records of its [`Reading`] ([`judge_reading`]).
-#[derive(Debug, Clone, PartialEq)]
-pub(in crate::application::supervise) enum Judged {
-    /// Short while a cleanup for room runs or waits to: nothing is asked
-    /// for or held until it is done (task 1478).
-    Cleaning,
-    /// Judged: the disk ask is opened (or joined) when `ask`, and closed
-    /// once there is room otherwise; `landings` is the hold recorded on the
-    /// landings (`landing_held` / `landing_resumed`).
-    Recorded {
-        ask: bool,
-        landings: Option<Box<ClaimHold>>,
-    },
-}
-
-/// Judge a pass's reading: nothing while cleaning; otherwise ask when
-/// short, and hold the landings that wait (`landings_waiting`) while the
-/// free bytes are short of what a landing needs.
-pub(in crate::application::supervise) fn judge_reading(
-    reading: Reading,
-    free: Option<u64>,
-    needs: &DiskNeeds,
-    landings_waiting: bool,
-) -> Judged {
-    if reading.cleaning {
-        return Judged::Cleaning;
-    }
-    let landings = if landings_waiting {
-        ClaimHold::judge(&HoldInputs {
-            free_bytes: free,
-            needed_bytes: Some(needs.landing),
-            disk: Some(*needs),
-            ..HoldInputs::default()
-        })
-        .map(Box::new)
-    } else {
-        None
-    };
-    Judged::Recorded {
-        ask: reading.short,
-        landings,
-    }
-}
-
-/// Whether the claims wait for a cleanup for room without a hold (task
-/// 405): it runs (`cleaning`) and the free bytes are short of what a claim
-/// needs. A claim there is room for goes on without waiting for it (task
-/// 1478).
-pub(in crate::application::supervise) fn claims_wait_for_cleanup(
-    cleaning: bool,
-    free: Option<u64>,
-    need: Option<u64>,
-) -> bool {
-    cleaning && short_of(free, need)
 }
 
 /// The payload of `auto_repaired` (`repair: disk_cleanup`) for a cleanup
@@ -653,9 +591,7 @@ pub(in crate::application::supervise) enum AskCondition {
 /// A judged pass's reading for [`disk_ask_condition`].
 #[derive(Debug, Clone, Copy)]
 pub(in crate::application::supervise) struct ShortageReading {
-    pub(super) free: Option<u64>,
-    /// The reserve, independent of what claims and landings need.
-    pub(super) need: Option<u64>,
+    pub(super) reserve: crate::domain::disk::ReserveDecision,
     /// A cleanup for room started and finished in the current idle epoch,
     /// and no cleanup job is pending or running.
     pub(super) cleaned: bool,
@@ -674,14 +610,8 @@ pub(in crate::application::supervise) struct ShortageReading {
 pub(in crate::application::supervise) fn disk_ask_condition(
     reading: &ShortageReading,
 ) -> AskCondition {
-    let short = short_of(reading.free, reading.need);
-    if reading.open
-        && clear_above(
-            reading.free,
-            reading.need,
-            crate::domain::disk::DISK_CLOSE_MARGIN,
-        )
-    {
+    let short = reading.reserve.below;
+    if reading.open && reading.reserve.recovered {
         return AskCondition::Room;
     }
     if !reading.open && !short {
@@ -691,15 +621,6 @@ pub(in crate::application::supervise) fn disk_ask_condition(
         AskCondition::Ask
     } else {
         AskCondition::Keep
-    }
-}
-
-/// Free bytes above `need` by `margin` of it; either unknown is room, as
-/// it is no shortage.
-fn clear_above(free: Option<u64>, need: Option<u64>, margin: f64) -> bool {
-    match (free, need) {
-        (Some(free), Some(need)) => free >= need && (free - need) as f64 >= need as f64 * margin,
-        _ => true,
     }
 }
 
@@ -803,7 +724,10 @@ pub(in crate::application::supervise) fn disk_question(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    format!("{question}\n\nLargest directories after cleanup:\n{details}")
+    format!(
+        "{question}\n{}\n\nLargest directories after cleanup:\n{details}",
+        needs.message()
+    )
 }
 
 /// The queue's `cost` ask about the disk.
@@ -849,7 +773,6 @@ fn samples_fresh(since: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::claim_hold::HoldReason;
 
     /// A landing's retry counts the runs moving besides the landing under
     /// way: with the landing alone in flight, none, as at its start.
@@ -875,7 +798,6 @@ mod tests {
         assert!(samples_fresh(SAMPLES_INTERVAL - ms));
         assert!(!samples_fresh(SAMPLES_INTERVAL));
     }
-    use crate::domain::landing_hold::{self, LandingHold, LandingHoldInputs};
 
     const GIB: u64 = 1 << 30;
 
@@ -892,6 +814,10 @@ mod tests {
         sample_count: 0,
         estimate: crate::domain::disk::DiskEstimate::Recent,
         moving: 0,
+        workers: 0,
+        waiting: 0,
+        integrators: 0,
+        integrator_expected: None,
         remaining: 0,
         measured: 0,
         unmeasured: 0,
@@ -902,133 +828,6 @@ mod tests {
         claims_wait_reason: None,
         relaxed: None,
     };
-
-    /// What a pass does with `free` free bytes while a cleanup for room
-    /// runs or waits (`for_disk`) or not, through the functions
-    /// `check_disk` and `hold_claims` call: whether the claims wait for it
-    /// without a hold, whether a claim is held (`claim_held`), how a
-    /// landing waiting outside a drain goes, whether its hold is recorded
-    /// (`landing_held`), and whether the disk ask is opened.
-    fn pass(free: u64, for_disk: bool) -> (bool, bool, LandingHold, bool, bool) {
-        let reading = read_disk(Some(free), &NEEDS, for_disk);
-        let waits = claims_wait_for_cleanup(reading.cleaning, Some(free), Some(NEEDS.claim));
-        let claim_held = !waits
-            && ClaimHold::judge(&HoldInputs {
-                free_bytes: Some(free),
-                needed_bytes: Some(NEEDS.claim),
-                ..HoldInputs::default()
-            })
-            .is_some();
-        let landing = landing_hold::judge(LandingHoldInputs {
-            landing_short: reading.landing_short,
-            disk_cleaning: reading.cleaning,
-            ..LandingHoldInputs::default()
-        });
-        let (landing_held, asks) = match judge_reading(reading, Some(free), &NEEDS, true) {
-            Judged::Cleaning => (false, false),
-            Judged::Recorded { ask, landings } => (landings.is_some(), ask),
-        };
-        (waits, claim_held, landing, landing_held, asks)
-    }
-
-    /// Task 1478: while the rest of a cleanup for room another job took on
-    /// waits or runs, a disk short of what a claim or a landing needs opens
-    /// no disk ask and records no `claim_held` or `landing_held`; a claim
-    /// waits only while short of what a claim needs, a landing only while
-    /// short of what a landing needs, and the side there is room for goes
-    /// on. Once it is done the next reading decides: with room, nothing is
-    /// held or asked; still short, the disk ask opens and the side short of
-    /// room is held.
-    #[test]
-    fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
-        use LandingHold::{Proceed, Wait};
-        let (short, landing_room, room) = (1, 4 * GIB, 1 << 40);
-        // While it runs.
-        assert_eq!(pass(short, true), (true, false, Wait, false, false));
-        assert_eq!(
-            pass(landing_room, true),
-            (true, false, Proceed, false, false)
-        );
-        assert_eq!(pass(room, true), (false, false, Proceed, false, false));
-        // Once done: enough, or still short.
-        assert_eq!(pass(room, false), (false, false, Proceed, false, false));
-        assert_eq!(pass(short, false), (false, true, Wait, true, true));
-        assert_eq!(
-            pass(landing_room, false),
-            (false, true, Proceed, false, true)
-        );
-    }
-
-    #[test]
-    fn a_reading_is_short_of_the_larger_need_and_cleaning_only_while_short() {
-        for (free, for_disk, short, landing_short, cleaning) in [
-            (None, true, false, false, false),
-            (Some(1), false, true, true, false),
-            (Some(1), true, true, true, true),
-            (Some(GIB - 1), true, true, true, true),
-            (Some(GIB), true, true, false, true),
-            (Some(100 * GIB - 1), false, true, false, false),
-            (Some(100 * GIB), true, false, false, false),
-        ] {
-            assert_eq!(
-                read_disk(free, &NEEDS, for_disk),
-                Reading {
-                    short,
-                    landing_short,
-                    cleaning
-                },
-                "{free:?} {for_disk}"
-            );
-        }
-        assert!(!claims_wait_for_cleanup(true, Some(1), None));
-        assert!(!claims_wait_for_cleanup(true, None, Some(1)));
-        assert!(!claims_wait_for_cleanup(false, Some(1), Some(2)));
-        assert!(claims_wait_for_cleanup(true, Some(1), Some(2)));
-    }
-
-    /// While cleaning nothing is recorded; judged, a short reading asks,
-    /// and the landings are held only while some wait and the free bytes
-    /// are short of what a landing needs.
-    #[test]
-    fn a_reading_is_recorded_only_once_no_cleanup_for_room_runs() {
-        let short = read_disk(Some(1), &NEEDS, true);
-        assert_eq!(
-            judge_reading(short, Some(1), &NEEDS, true),
-            Judged::Cleaning
-        );
-        let short = read_disk(Some(1), &NEEDS, false);
-        let Judged::Recorded { ask, landings } = judge_reading(short, Some(1), &NEEDS, true) else {
-            panic!("judged while cleaning");
-        };
-        assert!(ask);
-        assert_eq!(
-            landings.map(|hold| hold.reason),
-            Some(HoldReason::DiskSpace)
-        );
-        assert_eq!(
-            judge_reading(short, Some(1), &NEEDS, false),
-            Judged::Recorded {
-                ask: true,
-                landings: None
-            }
-        );
-        let landing_room = read_disk(Some(4 * GIB), &NEEDS, false);
-        assert_eq!(
-            judge_reading(landing_room, Some(4 * GIB), &NEEDS, true),
-            Judged::Recorded {
-                ask: true,
-                landings: None
-            }
-        );
-        let room = read_disk(Some(1 << 40), &NEEDS, true);
-        assert_eq!(
-            judge_reading(room, Some(1 << 40), &NEEDS, true),
-            Judged::Recorded {
-                ask: false,
-                landings: None
-            }
-        );
-    }
 
     /// `auto_repaired` of a cleanup for room: the reading it was asked
     /// at, the one after, and the bytes and runs it removed (each run
@@ -1172,8 +971,7 @@ mod tests {
 
     fn reading(free: u64, cleaned: bool, in_flight: usize, open: bool) -> AskCondition {
         disk_ask_condition(&ShortageReading {
-            free: Some(free),
-            need: Some(100 * GIB),
+            reserve: crate::domain::disk::reserve_decision(Some(free), Some(100 * GIB)),
             cleaned,
             in_flight,
             open,
@@ -1282,15 +1080,14 @@ mod tests {
         let condition = condition(99 * GIB, false, 1, true);
         assert_eq!(condition, AskCondition::Ask);
         let mut cleaning = ShortageReading {
-            free: Some(99 * GIB),
-            need: Some(100 * GIB),
+            reserve: crate::domain::disk::reserve_decision(Some(99 * GIB), Some(100 * GIB)),
             cleaned: false,
             in_flight: 1,
             open: true,
             cleaning: true,
         };
         assert_eq!(disk_ask_condition(&cleaning), AskCondition::Keep);
-        cleaning.free = Some(105 * GIB);
+        cleaning.reserve = crate::domain::disk::reserve_decision(Some(105 * GIB), Some(100 * GIB));
         assert_eq!(disk_ask_condition(&cleaning), AskCondition::Room);
         assert_eq!(
             disk_ask_step(
@@ -1350,8 +1147,7 @@ mod tests {
         for (free, need) in [(None, Some(GIB)), (Some(1), None)] {
             assert_eq!(
                 disk_ask_condition(&ShortageReading {
-                    free,
-                    need,
+                    reserve: crate::domain::disk::reserve_decision(free, need),
                     cleaned: true,
                     in_flight: 0,
                     open: true,

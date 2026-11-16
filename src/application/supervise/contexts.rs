@@ -143,6 +143,23 @@ impl<Q: SupervisorReads + RunLog + ?Sized, R: ?Sized> PassEnv<'_, Q, R> {
         kinds: claim_hold::HoldKinds,
         hold: Option<&ClaimHold>,
     ) -> Result<bool> {
+        self.record_hold_candidates(kinds, hold, None)
+    }
+
+    pub(super) fn record_disk_landings(
+        &mut self,
+        hold: Option<&ClaimHold>,
+        candidates: &[crate::domain::disk::LandingDecision],
+    ) -> Result<bool> {
+        self.record_hold_candidates(claim_hold::LANDINGS, hold, Some(candidates))
+    }
+
+    fn record_hold_candidates(
+        &mut self,
+        kinds: claim_hold::HoldKinds,
+        hold: Option<&ClaimHold>,
+        candidates: Option<&[crate::domain::disk::LandingDecision]>,
+    ) -> Result<bool> {
         let last = self.queue.latest_queue_event(&kinds.kinds())?;
         // The supervisors running now: a hold another one recorded is in
         // place only while it runs (its registration's heartbeat is fresh).
@@ -159,11 +176,14 @@ impl<Q: SupervisorReads + RunLog + ?Sized, R: ?Sized> PassEnv<'_, Q, R> {
             })
             .map(|registration| registration.token)
             .collect();
-        if let Some((kind, payload)) =
-            claim_hold::transition_of(kinds, hold, last.as_ref(), self.token, |holder| {
-                live.iter().any(|token| token.as_str() == holder)
-            })
-        {
+        let is_live = |holder: &str| live.iter().any(|token| token.as_str() == holder);
+        let transition = match candidates {
+            Some(candidates) => {
+                claim_hold::landing_transition(hold, last.as_ref(), candidates, self.token, is_live)
+            }
+            None => claim_hold::transition_of(kinds, hold, last.as_ref(), self.token, is_live),
+        };
+        if let Some((kind, payload)) = transition {
             self.queue.record_queue_event(kind, payload)?;
             match (hold, kinds == claim_hold::LANDINGS) {
                 (Some(hold), _) => warn!("{}", hold.message_for(kinds)),

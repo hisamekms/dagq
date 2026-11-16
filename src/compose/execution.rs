@@ -758,6 +758,7 @@ impl OneShot {
                 free: &read_free,
                 total,
                 moving: None,
+                decision: None,
             }),
             sccache: Some(&sccache),
             verification_tokens: &crate::infrastructure::queue_broker::SystemVerificationTokens {

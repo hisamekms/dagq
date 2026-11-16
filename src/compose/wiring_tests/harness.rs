@@ -371,6 +371,16 @@ impl Wiring {
     /// A person's `integrate` of `task`'s run awaiting integration, with
     /// what its landing came to.
     pub(super) fn integrate_outcome(&self, task: TaskId) -> Value {
+        self.try_integrate_outcome(task, None)
+            .expect("integrate the run")
+    }
+
+    /// The same human entry point, retaining disk refusals for assertions.
+    pub(super) fn try_integrate_outcome(
+        &self,
+        task: TaskId,
+        disk: Option<crate::application::integrate::DiskRoom>,
+    ) -> Result<Value> {
         use crate::application::integrate::{IntegrateTarget, Integration, Integrator};
         let mut queue = self.queue();
         let mut ctx = Integration {
@@ -386,7 +396,7 @@ impl Wiring {
             processes: &*self.processes,
             pid: self.pid,
             load_average: || None,
-            disk: None,
+            disk,
             retry_disk: None,
             sccache: None,
             verification_tokens: &MemoryVerificationTokens::default(),
@@ -404,11 +414,10 @@ impl Wiring {
                 &ActorContext::user(),
                 IntegrateTarget::Task(task),
                 Path::new(CHECKOUT),
-            )
-            .expect("approve the landing")
+            )?
             .expect("a run awaits integration");
-        let outcome = integrator.land(&mut ctx, &request).expect("land the run");
-        serde_json::to_value(outcome).unwrap()
+        let outcome = integrator.land(&mut ctx, &request)?;
+        Ok(serde_json::to_value(outcome)?)
     }
 
     /// The repository rules table read by each pass of the real supervisor.

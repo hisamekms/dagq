@@ -574,29 +574,26 @@ impl Supervisor<'_> {
     /// the answer differs from the hold in place on the queue (task 327).
     /// Returns whether they are held.
     pub(super) fn hold_claims(&mut self) -> Result<bool> {
-        let needs = self.host.disk_needs();
-        let needed = Some(needs.claim);
-        // Short while a cleanup for room runs: wait for it without a hold
-        // (task 405).
-        if disk::claims_wait_for_cleanup(self.host.disk_cleaning(), self.host.free(), needed) {
+        let decision = self.host.disk_decision();
+        if self.host.disk_cleaning() && decision.as_ref().is_some_and(|d| d.claim_short) {
             return Ok(true);
         }
-        let hold = ClaimHold::judge(&HoldInputs {
-            load_average: (self.host.load_average())(),
-            max_load: self.host.max_load(),
-            free_bytes: self.host.free(),
-            needed_bytes: needed,
-            disk: Some(needs),
-            // Claude's hold ask holds the claims only while no worker can
-            // run on the other provider either (ADR-t813-2 decision 6).
+        let authentication = ClaimHold::judge(&HoldInputs {
             queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
+            ..HoldInputs::default()
+        });
+        let disk = decision.as_ref().and_then(|d| d.claim_hold());
+        let hold = authentication.or(disk).or_else(|| {
+            ClaimHold::judge(&HoldInputs {
+                load_average: (self.host.load_average())(),
+                max_load: self.host.max_load(),
+                ..HoldInputs::default()
+            })
         });
         let held = self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))?;
-        // A landing that waits with no run moving goes first, and a project
-        // with no samples runs one at a time: the claims wait this pass,
-        // with no hold, as there is room (ADR-t4473-1).
-        Ok(held || (self.host.free().is_some() && needs.claims_wait))
+        Ok(held || decision.is_some_and(|d| !d.claim_allowed))
     }
+
     /// Check the programs `[run.env]` names on this process's PATH
     /// (ADR-0049 decision 9) and record `run_env_program_missing` or
     /// `run_env_program_found` when the answer differs from the latest one
@@ -688,14 +685,14 @@ impl Supervisor<'_> {
     /// What becomes of a run awaiting the landing slot now
     /// ([`crate::domain::landing_hold::judge`]): the holds are this
     /// supervisor's, not the run's.
-    pub(super) fn landing_hold(&self) -> crate::domain::landing_hold::LandingHold {
+    pub(super) fn landing_hold(&self, run: &RunId) -> crate::domain::landing_hold::LandingHold {
         crate::domain::landing_hold::judge(crate::domain::landing_hold::LandingHoldInputs {
             run_env_missing: self.landing.run_env_missing,
             container_held: self.verification_container_held(),
             ci_held: self.observation.ci().held(),
             ci_unreadable: self.observation.ci().unreadable(),
             landing_unresolved: self.landing.unresolved,
-            landing_short: self.host.landing_short(),
+            landing_short: self.host.landing_short_for(run),
             disk_cleaning: self.host.disk_cleaning(),
             draining: self.registration.draining(),
             handing_off: self.registration.handing_off(),

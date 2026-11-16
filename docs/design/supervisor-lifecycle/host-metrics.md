@@ -111,11 +111,10 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 
 ## 動いているrunの大きさ
 
-claimの空き容量の判断が、動いているrunの残りの見込み（[claim-hold](claim-hold.md#空き容量)）を読むために、動いているrunの今の大きさを量る（[ADR-t4542-1](../../adr/2026-11-09-t4542-1-moving-runs-are-measured-off-the-loop-for-their-remaining.md)）。
+claimと着地の空き容量の判断が、段階ごとの未使用の予約（[claim-hold](claim-hold.md#空き容量)）を読むために、diskを持つrunの今の大きさを量る（[ADR-t4542-1](../../adr/2026-11-09-t4542-1-moving-runs-are-measured-off-the-loop-for-their-remaining.md)）。
 記録の行には書かず、hostの負荷のsampleとは別に動く（[待つrunのビルド成果物](#待つrunのビルド成果物)と同じ形）。
 
-- **対象**: `check_disk`が動いているrunと数えるslotのrun。
-  containerのrunはworktreeを量らず、量っていない値になる。
+- **対象**: runの選び方は`moving_sizes`のmoduleのdoc commentが持つ。
 - **数え方**: 何を足して量るかと量れないときの扱いは`moving_sizes`のmoduleと`MovingTarget::measure`のdoc commentが持つ。
 - **取り方**: loopは量らず、loopの外のthreadが置いた値を読むだけで、その値は古いことがある（古い値の扱いは[claim-hold](claim-hold.md#空き容量)）。
   仕組みは`moving_sizes`のmoduleのdoc commentが持つ。

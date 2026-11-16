@@ -76,8 +76,6 @@ pub(super) struct HostOpsState {
     measure_tree: moving_sizes::MeasureTree,
     /// The sizes of the runs moving, measured off the loop (ADR-t4542-1).
     moving_sizes: moving_sizes::MovingSizes,
-    /// The free bytes of the queue's directory read this pass.
-    free: Option<u64>,
     /// The cleanup of ended runs' worktrees off the loop (task 405).
     cleanup: cleanup::CleanupWatch,
     /// The sweep of the session wrappers ended runs left running.
@@ -102,6 +100,8 @@ pub(super) struct DiskReader {
     /// pass's reading, read when it is needed (a retry comes minutes after
     /// the landing started).
     pub(super) moving: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) decision:
+        std::sync::Arc<std::sync::Mutex<Option<crate::domain::disk::DiskDecision>>>,
 }
 
 impl HostOpsState {
@@ -129,7 +129,6 @@ impl HostOpsState {
             disk: disk::DiskWatch::default(),
             measure_tree: ports.measure_tree.clone(),
             moving_sizes: moving_sizes::MovingSizes::default(),
-            free: None,
             cleanup: cleanup::CleanupWatch::counting(settings.cleanup_jobs.clone()),
             sweep: sweep::SweepWatch::default(),
             max_load: settings.max_load,
@@ -290,19 +289,29 @@ impl HostOpsState {
         self.host_versions
     }
 
-    /// The free bytes of the queue's directory read this pass.
-    pub(super) const fn free(&self) -> Option<u64> {
-        self.free
-    }
-
     /// The disk is short and a cleanup for room runs: claims wait for it.
     pub(super) const fn disk_cleaning(&self) -> bool {
         self.disk.cleaning
     }
 
-    /// The disk is short of what a landing needs.
-    pub(super) const fn landing_short(&self) -> bool {
-        self.disk.landing_short
+    /// Clone the immutable pass result for claim/landing consumers.
+    pub(super) fn disk_decision(&self) -> Option<crate::domain::disk::DiskDecision> {
+        self.disk
+            .decision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Candidate-specific landing gate; a missing trusted size reserves all I.
+    pub(super) fn landing_short_for(&self, run: &RunId) -> bool {
+        self.disk
+            .decision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|d| d.landing(run))
+            .is_none_or(|d| !d.allowed)
     }
 
     /// Install a local pass's settings or the first deployment snapshot before
@@ -318,12 +327,8 @@ impl HostOpsState {
             free_space: self.free_space,
             total_space: self.total_space,
             moving: self.disk.moving.clone(),
+            decision: self.disk.decision.clone(),
         }
-    }
-
-    /// What a claim and a landing need, as this pass read the disk.
-    pub(super) const fn disk_needs(&self) -> crate::domain::disk::DiskNeeds {
-        self.disk.needs
     }
 
     /// How many new runs this pass may claim for the disk; `None` for no

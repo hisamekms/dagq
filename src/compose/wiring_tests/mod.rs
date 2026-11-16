@@ -25,6 +25,7 @@ mod disk_holds;
 mod eval_isolation;
 mod fresh_session_decisions;
 mod full_disk;
+mod human_disk;
 mod landing_answers;
 mod landing_binding;
 mod main_log;

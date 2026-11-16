@@ -215,6 +215,12 @@ impl Supervisor<'_> {
             let total =
                 (disk.total_space)(&runs_dir).or_else(|| db.parent().and_then(disk.total_space));
             let moving = || disk.moving.load(std::sync::atomic::Ordering::SeqCst);
+            let decision = || {
+                disk.decision
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            };
             integrator.land(
                 &mut Integration {
                     queue: &mut *queue,
@@ -235,6 +241,7 @@ impl Supervisor<'_> {
                         free: &free,
                         total,
                         moving: Some(&moving),
+                        decision: Some(&decision),
                     }),
                     sccache: sccache.as_ref().map(|SccachePort(server)| {
                         &**server as &dyn crate::application::SccacheServer
@@ -3107,8 +3114,7 @@ impl Supervisor<'_> {
         let held = self.landing.run_env_missing
             || self.verification_container_held()
             || self.observation.ci().held()
-            || self.landing.unresolved
-            || self.host.landing_short();
+            || self.landing.unresolved;
         if approved_landing_waits(held, self.used_slots(), parallel, || {
             Ok(!self
                 .queue
@@ -3145,6 +3151,9 @@ impl Supervisor<'_> {
         let Some(run) = first_to_land(queued) else {
             return Ok(());
         };
+        if self.host.landing_short_for(run.id()) {
+            return Ok(());
+        }
         let e2e = self.e2e_due(&run)?.is_some();
         // Its verification takes turns with the automatic update's build
         // and e2e (ADR-t2719-1); its e2e has a lock of its own. Only looked

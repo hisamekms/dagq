@@ -99,16 +99,17 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ### 閾値
 
-控えのlogとeventは必要量の内訳を持ち、掃除を待つ間のeventのない控えも同じ内訳をlogに残す。
+控えのlogとeventは必要量の内訳を持ち、掃除中もlogに残す。
 
-- 予測方式の必要量は`domain::disk::DiskState::needs`が直近の標本で決める（ADR-t5059-1）。
-- run 1本の想定は既定で直近の標本、`[disk]`の固定枠なら設定値を使い、共に係数なし。
-- 想定の方式の入口は`domain::disk::run_expectation`。
-- 動いているrun（`check_disk`の`in_flight`）が0本なら最低ラインだけを要り、0本で着地待ちがあれば着地が先に始まり、claimは控えのeventなしにそのpassを待つ。
+- phaseの性質・候補ごとの必要量と可否を一度決め、開始・控え・askが同じ結果を読む入口は`domain::disk::DiskState::decide`。
+- 方式の違いはWとIの出どころだけで、係数を掛けない。
+  方式の入口は`domain::disk::run_expectation`。
+- 動くrunが0本なら最低ラインだけで進め、着地待ちがあればclaimより着地が先に進む。
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
-- 動いているrunの残りの見込みは想定から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いた和で、信頼できない値（量れない・古い・別のrun）は想定のまま数える。
-- 動いているrunの信頼できる今の大きさが想定を初めて超えたとき、runごとに1回eventを残す（supervisorの再起動後は再度1回を許す）。
-- 記録するかの判断の入口は`domain::disk::size_exceeded_expected`。
+- 予約はbuildするか・着地のレーンにいるかで付け替え、残りは予約量から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いて数える。
+  待ちのrunは予約を持たず今の大きさだけを占め、INTEGRATORの枠は着地待ちの有無によらず常に取る。
+  不明な大きさは予約量のまま数える。
+- 動いているrunが想定を初めて超えたときの記録は`domain::disk::size_exceeded_expected`が判断する（再起動後は再度1回を許す）。
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はlocalのsupervisorが各passの資源の読みの前にmain checkoutから読み直す（[Run environment](run-environment.md)）。
 - 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。
@@ -127,11 +128,10 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 - 走っている通常の掃除jobに乗ったときは、そのjobと続く残りのjobの両方を空き容量の掃除とし、残りのjobが終わるまで待つ（`CleanupWatch::for_disk`）。
   掃除の連なりは「乗った通常のjob → 残りのjob」の1回までで、次の頼みは回収から一定の間隔が経つまで出さない（`asks_for_cleanup`）。
   頼みが受けられなかったとき（drainのあいだ）は間隔に数えない。
-- claim: 空きとclaimの閾値を`ClaimHold::judge`に渡し、足りなければ理由`disk_space`で控える。
 - 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、leaseを持ったままrebaseも検証もしない。
   `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べ、列の着地の開始（`start_approved_landings`）だけが待つ（[Review](review.md#review-supervisor)）。
 - resume: workerのsessionが容量不足で落ちたrunは、claimが控える間は復旧jobもaskも無しに`failed`か`interrupted`のまま待ち、控えが解けたpassで同じrunでresumeする（[Triage](triage.md)）。
-- 落とし穴: 着地の控えはhostのものでなく記録したsupervisorのslotのものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
+- 落とし穴: 着地の控えはhostのものでなく記録したsupervisorの候補のものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
 - 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返し[拾い直し](supervise.md#leaseの解放)に任せる。
   待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。
   provisioningの失敗のdrainは掃除をdrainの扱いにしないが、同じく残りのjobが終わるまで待つ。

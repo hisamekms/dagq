@@ -4,8 +4,8 @@
 //! run worktrees are) is short of what one needs. What one needs follows
 //! from a reserve of the volume ([`reserve_bytes`]) and the size a new run
 //! is expected to take from the configured method ([`run_expectation`]),
-//! with no factor; [`DiskState::needs`] and
-//! [`DiskState::claims`] give them for a pass, and the queue always moves
+//! with no factor; [`DiskState::decide`] freezes them for every pass
+//! consumer, and the queue always moves
 //! on above the reserve with no run moving. The `[disk]` table of
 //! `dagq.toml` sets the reserve's share and expectation method.
 
@@ -43,7 +43,9 @@ pub enum DiskEstimate {
 /// a positive size string read by [`parse_size`] (for example `"20GiB"`),
 /// with no runtime default. Missing, unreadable or zero sizes are read errors
 /// with a line number, like invalid `reserve`. In recent mode a supplied
-/// `run_size` is warned of and ignored, even if its value cannot be read.
+/// `run_size` and `landing_size` are warned of and ignored, even if unreadable.
+/// W and I default to the same recent estimate. Fixed mode takes W from
+/// `run_size` and I from `landing_size`, falling back to W when omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DiskConfig {
     /// `reserve` (a share of the volume written as `"5%"`, default
@@ -56,6 +58,9 @@ pub struct DiskConfig {
     /// The fixed expectation in bytes; validated as positive for `Fixed`,
     /// absent for `Recent` by the configuration reader.
     pub run_size: Option<u64>,
+    /// Fixed INTEGRATOR reservation I: positive size string `landing_size`.
+    /// Omitted means `run_size`; recent mode warns and ignores it.
+    pub landing_size: Option<u64>,
 }
 
 impl Default for DiskConfig {
@@ -64,13 +69,14 @@ impl Default for DiskConfig {
             reserve: DEFAULT_RESERVE_SHARE,
             estimate: DiskEstimate::Recent,
             run_size: None,
+            landing_size: None,
         }
     }
 }
 
 impl DiskConfig {
     /// The setting names of the `[disk]` table.
-    pub const KEYS: [&str; 3] = ["reserve", "estimate", "run_size"];
+    pub const KEYS: [&str; 4] = ["reserve", "estimate", "run_size", "landing_size"];
     /// The settings of an older `[disk]` that are read no more: the
     /// thresholds follow the reserve and the configured expectation with no
     /// factor (ADR-t4473-1), so a `dagq.toml` that still has them is
@@ -325,25 +331,204 @@ pub fn reserve_bytes(total: u64, share: f64) -> u64 {
     MIN_RESERVE_BYTES.max((total as f64 * share).ceil() as u64)
 }
 
-/// What the disk says of a claim and a landing now.
+/// An unfinished run's reservation stage, reassigned on every pass.
+/// Ended runs have no entry in the registry. WORKER covers claim
+/// through receipt, including revise/resume/rebuild; review, landing queue,
+/// human and provider waits reserve no growth. The single `disk_usage`
+/// decision derives this stage from build/location and landing-lane facts,
+/// rather than worker/integrator roles. INTEGRATOR covers landing
+/// verification, including retries. Waiting bytes already reduce statvfs free.
+/// One immutable `DiskDecision` per pass supplies all gates, holds and asks;
+/// consumers do not reclassify phases or recalculate candidate requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskStage {
+    Worker,
+    Waiting,
+    Integrator,
+}
+
+/// Phase facts used by every disk reader. New phases must supply all facts;
+/// the exhaustive match deliberately has no wildcard. Host e2e (including
+/// its queued build) uses W; reviews and agent evaluation do not build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DiskState {
-    /// The free bytes of the volume of the queue's directory; `None` when
-    /// they could not be read.
+pub struct DiskUsage {
+    pub stage: DiskStage,
+    pub active: bool,
+}
+
+/// Build placement is explicit: worker/container placement and the e2e
+/// engine's placement are independent (the current e2e engine is on host).
+pub fn disk_usage(
+    phase: super::run_phase::Phase,
+    builds_on_host: bool,
+    e2e_on_host: bool,
+) -> DiskUsage {
+    use super::run_phase::Phase as P;
+    let (builds, landing_lane, active) = match phase {
+        P::Provisioning
+        | P::Environment(_)
+        | P::Worker
+        | P::Revise
+        | P::Resume
+        | P::Recovery
+        | P::Verifying => (builds_on_host, false, true),
+        P::AwaitingE2e | P::E2e => (e2e_on_host, false, true),
+        P::Landing => (false, true, true),
+        P::Validating | P::Review | P::Exiting | P::AgentEval => (false, false, true),
+        P::ReviewHeld
+        | P::Waiting { .. }
+        | P::ClaimAnswer
+        | P::ClaimHeld
+        | P::Returning
+        | P::AwaitingSlot
+        | P::LandingQueue
+        | P::LandingAnswer
+        | P::NeedsSession
+        | P::Held
+        | P::Push { .. }
+        | P::PushPending
+        | P::Ended => (false, false, false),
+    };
+    DiskUsage {
+        stage: if landing_lane {
+            DiskStage::Integrator
+        } else if builds {
+            DiskStage::Worker
+        } else {
+            DiskStage::Waiting
+        },
+        active,
+    }
+}
+
+/// The single landing requirement, at start and after disk-full alike.
+/// `others` excludes the candidate if it is already in the landing lane;
+/// with no other active run, the reserve alone guarantees progress.
+pub fn landing_need(reserve: u64, budget: Option<u64>, current: Option<u64>, others: usize) -> u64 {
+    reserve.saturating_add(if others == 0 {
+        0
+    } else {
+        budget.unwrap_or(0).saturating_sub(current.unwrap_or(0))
+    })
+}
+
+/// Candidate inputs from one pass's run registry, including queued runs
+/// outside slots and the active integrator (whose decision also gates retry).
+#[derive(Debug, Clone)]
+pub struct LandingCandidate {
+    pub run: super::RunId,
+    pub current: Option<u64>,
+    pub integrating: bool,
+    pub waiting: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LandingDecision {
+    pub run: super::RunId,
+    pub needed: u64,
+    pub allowed: bool,
+    pub waiting: bool,
+}
+/// Reserve policy flags in the same disk decision, including the existing
+/// ask-close margin. An unavailable reading holds nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ReserveDecision {
+    pub below: bool,
+    pub recovered: bool,
+}
+pub fn reserve_decision(free: Option<u64>, need: Option<u64>) -> ReserveDecision {
+    match (free, need) {
+        (Some(f), Some(n)) => ReserveDecision {
+            below: f < n,
+            recovered: f >= n && (f - n) as f64 >= n as f64 * DISK_CLOSE_MARGIN,
+        },
+        _ => ReserveDecision {
+            below: false,
+            recovered: true,
+        },
+    }
+}
+
+/// One immutable decision for a pass. Gates, hold records, disk asks and
+/// status consume this result; they never compare free bytes again.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DiskDecision {
+    pub reserve: ReserveDecision,
     pub free: Option<u64>,
-    /// The size of that volume.
+    pub needs: DiskNeeds,
+    pub claim_allowed: bool,
+    pub claims: Option<usize>,
+    pub claim_short: bool,
+    pub landings: Vec<LandingDecision>,
+    pub short: bool,
+}
+impl DiskDecision {
+    pub fn landing(&self, run: &super::RunId) -> Option<&LandingDecision> {
+        self.landings.iter().find(|d| d.run == *run)
+    }
+    pub fn blocked(&self) -> impl Iterator<Item = &LandingDecision> {
+        self.landings.iter().filter(|d| d.waiting && !d.allowed)
+    }
+    pub fn claim_hold(&self) -> Option<super::claim_hold::ClaimHold> {
+        if !self.claim_short {
+            return None;
+        }
+        Some(super::claim_hold::ClaimHold {
+            reason: super::claim_hold::HoldReason::DiskSpace,
+            value: self.free? as f64,
+            threshold: self.needs.claim as f64,
+            ask_id: None,
+            disk: Some(self.needs),
+        })
+    }
+    pub fn landing_hold(&self) -> Option<super::claim_hold::ClaimHold> {
+        let blocked = self.blocked().max_by_key(|d| d.needed)?;
+        let mut needs = self.needs;
+        needs.landing = blocked.needed;
+        Some(super::claim_hold::ClaimHold {
+            reason: super::claim_hold::HoldReason::DiskSpace,
+            value: self.free? as f64,
+            threshold: blocked.needed as f64,
+            ask_id: None,
+            disk: Some(needs),
+        })
+    }
+}
+
+/// A run's stage and trusted current size; unknown sizes reserve the whole
+/// stage budget. Waiting reserves zero even when its size is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskRun {
+    pub stage: DiskStage,
+    pub current: Option<u64>,
+}
+
+/// Fixed uses `landing_size` or W; recent temporarily shares W's estimate
+/// until separate stage samples exist. Both methods use the same formulas.
+pub fn landing_expectation(config: &DiskConfig, worker: Option<u64>) -> Option<u64> {
+    match config.estimate {
+        DiskEstimate::Fixed => config.landing_size.or(worker),
+        DiskEstimate::Recent => worker,
+    }
+}
+
+/// Inputs to the pure reservation formula, one entry per unfinished run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskState {
+    pub free: Option<u64>,
     pub total: u64,
-    /// What a new run is expected to take ([`run_expectation`]).
+    /// WORKER budget W, from the configured estimation method.
     pub expected: Option<u64>,
-    /// How many runs move now (a session open or a landing's verification
-    /// running).
+    /// INTEGRATOR budget I, from the same method.
+    pub integrator_expected: Option<u64>,
+    pub runs: Vec<DiskRun>,
+    /// Runs going on by themselves (DiskMoves), including review jobs.
+    /// Activity controls idle progress/NoSamples; a review still has a waiting
+    /// reservation of zero growth, even while its job is active.
     pub moving: usize,
-    /// What the moving runs are expected to take yet, together.
-    pub remaining: u64,
-    /// Whether a run waits for its landing.
+    /// Trusted current size of the run whose landing is being considered.
+    pub landing_current: Option<u64>,
     pub landing_waiting: bool,
-    /// The relaxation of the needs in effect now ([`relax_state`]); `None`
-    /// outside one.
     pub relaxed: Option<DiskRelaxed>,
 }
 
@@ -368,11 +553,17 @@ pub struct DiskNeeds {
     pub sample_count: usize,
     /// Runs moving at this reading, including landing verifications.
     pub moving: usize,
-    /// Sum of the moving runs' remaining estimates, before the idle rule.
+    /// Unfinished runs by stage (review and all other waits are waiting).
+    pub workers: usize,
+    pub waiting: usize,
+    pub integrators: usize,
+    /// Effective INTEGRATOR budget I, after expected relaxation.
+    pub integrator_expected: Option<u64>,
+    /// U: sum of unused stage reservations, before no_remaining relaxation.
     pub remaining: u64,
-    /// Moving runs counted from a trusted measured size, including measured zero.
+    /// WORKER/INTEGRATOR runs with a trusted size, including measured zero.
     pub measured: usize,
-    /// Moving runs counted at the whole expectation because no size is trusted.
+    /// WORKER/INTEGRATOR runs reserving the whole budget (no trusted size).
     pub unmeasured: usize,
     /// Whether a landing waits, even when the idle rule adds no expectation.
     pub landing_waiting: bool,
@@ -380,7 +571,7 @@ pub struct DiskNeeds {
     pub claim_expected: u64,
     /// Remaining bytes added to the claim; zero under the idle/no-sample rule.
     pub claim_remaining: u64,
-    /// Bytes added for a waiting landing; at most one expectation.
+    /// Empty INTEGRATOR slot term; zero when occupied or relaxed (or idle).
     pub landing_expected: u64,
     /// Why claims wait regardless of free space; None when space alone decides.
     pub claims_wait_reason: Option<ClaimsWaitReason>,
@@ -388,12 +579,11 @@ pub struct DiskNeeds {
     pub reserve: u64,
     /// What a new run is expected to take ([`run_expectation`]).
     pub expected: Option<u64>,
-    /// What a claim needs free: the reserve with no run moving or no
-    /// expectation, else the reserve, the expectation, the moving runs'
-    /// remaining and, with a landing waiting, the expectation once more.
+    /// Claim threshold: reserve + W + U + empty-slot I; reserve alone
+    /// for idle progress, or without samples (NoSamples prevents claims).
     pub claim: u64,
     /// What a landing's verification needs free: the reserve with no run
-    /// moving or no expectation, else the reserve and the expectation.
+    /// moving or no expectation, else reserve + max(0, I - candidate size).
     pub landing: u64,
     /// The claims wait this pass whatever is free, with no hold: a landing
     /// waits with no run moving (it goes first), or runs move with no
@@ -419,7 +609,7 @@ impl DiskNeeds {
     pub fn message(&self) -> String {
         let show = |bytes: u64| gib(bytes as f64);
         format!(
-            "reserve {} (volume {}, share {:.2}%); expected {} ({}); moving {}, remaining {} (measured {}, unmeasured {}); landing_waiting {}, landing_expected {}; claim additions: expected {}, remaining {}; claims_wait {}",
+            "reserve {} (volume {}, share {:.2}%); expected {} ({}); moving {}, remaining {} (measured {}, unmeasured {}); landing_waiting {}, landing_expected {}; claim additions: expected {}, remaining {}; claims_wait {}; stages worker {}, waiting {}, integrator {}; W {}, I {}, U {}",
             show(self.reserve),
             show(self.volume),
             self.reserve_share * 100.0,
@@ -441,6 +631,13 @@ impl DiskNeeds {
                 Some(ClaimsWaitReason::NoSamples) => "no samples; one run at a time",
                 None => "none",
             },
+            self.workers,
+            self.waiting,
+            self.integrators,
+            self.expected.map_or_else(|| "none yet".into(), show),
+            self.integrator_expected
+                .map_or_else(|| "none yet".into(), show),
+            show(self.remaining),
         ) + &self
             .relaxed
             .map_or_else(String::new, |relaxed| format!("; {}", relaxed.message()))
@@ -448,93 +645,149 @@ impl DiskNeeds {
 }
 
 impl DiskState {
-    /// What a claim and a landing need free now, with the reserve `share`
-    /// of the volume ([`reserve_bytes`]). No factor is applied: a run
-    /// larger than expected may fail for want of space and is retried.
-    ///
-    /// Under a relaxation ([`Self::relaxed`], ADR-t4727-1) only the terms
-    /// it names are loosened: `expected` stands for the configured
-    /// expectation, of a new run and of a landing, while there is one (a
-    /// recent estimate with no sample still runs one at a time); the waiting
-    /// landing's expectation is not added to a claim; the moving runs'
-    /// remaining counts 0. The reserve, a run with none moving and the
-    /// landing first with none moving are kept.
+    /// Pure stage reservation formula. U = sum(max(0, stage budget - current));
+    /// unknown current uses the whole budget. Waiting contributes zero.
+    /// Each occupied integration slot is already in U; the one empty slot
+    /// contributes I separately. Claim = reserve + U + W + empty-slot I.
+    /// Landing = reserve + max(0, I - candidate current).
+    /// With no moving run the reserve alone allows one run to progress;
+    /// LandingFirst and NoSamples retain their ordering. Relax expected
+    /// overrides both W/I, no_remaining clears U, no_landing_expectation
+    /// clears only the empty-slot term. Nothing relaxes the reserve.
     pub fn needs(&self, share: f64) -> DiskNeeds {
         let reserve = reserve_bytes(self.total, share);
-        let moving = self.moving > 0;
-        let relax = self
-            .relaxed
-            .map(|relaxed| relaxed.relax)
-            .unwrap_or_default();
-        let expected = self
-            .expected
-            .map(|sampled| relax.expected.unwrap_or(sampled));
-        let remaining = if relax.no_remaining {
+        let relax = self.relaxed.map(|r| r.relax).unwrap_or_default();
+        let expected = self.expected.map(|w| relax.expected.unwrap_or(w));
+        let integrator_expected = self
+            .integrator_expected
+            .map(|i| relax.expected.unwrap_or(i));
+        let workers = self
+            .runs
+            .iter()
+            .filter(|r| r.stage == DiskStage::Worker)
+            .count();
+        let integrators = self
+            .runs
+            .iter()
+            .filter(|r| r.stage == DiskStage::Integrator)
+            .count();
+        let waiting = self.runs.len() - workers - integrators;
+        let moving = self.moving;
+        let remaining = self.runs.iter().fold(0u64, |sum, run| {
+            let budget = match run.stage {
+                DiskStage::Worker => expected,
+                DiskStage::Integrator => integrator_expected,
+                DiskStage::Waiting => Some(0),
+            }
+            .unwrap_or(0);
+            sum.saturating_add(budget.saturating_sub(run.current.unwrap_or(0)))
+        });
+        let measured = self
+            .runs
+            .iter()
+            .filter(|r| r.stage != DiskStage::Waiting && r.current.is_some())
+            .count();
+        let claim_remaining = if moving == 0 || relax.no_remaining {
             0
         } else {
-            self.remaining
+            remaining
         };
-        let adds_landing = self.landing_waiting && !relax.no_landing_expectation;
-        let landing = match (moving, expected) {
-            (true, Some(expected)) => reserve.saturating_add(expected),
-            _ => reserve,
+        let landing_expected = if moving == 0 || integrators > 0 || relax.no_landing_expectation {
+            0
+        } else {
+            integrator_expected.unwrap_or(0)
         };
-        let claim = match (moving, expected) {
-            (true, Some(expected)) => reserve
-                .saturating_add(expected)
-                .saturating_add(remaining)
-                .saturating_add(if adds_landing { expected } else { 0 }),
-            _ => reserve,
+        let claim_expected = if moving == 0 {
+            0
+        } else {
+            expected.unwrap_or(0)
+        };
+        let claims_wait_reason = if moving == 0 && self.landing_waiting {
+            Some(ClaimsWaitReason::LandingFirst)
+        } else if moving > 0 && expected.is_none() {
+            Some(ClaimsWaitReason::NoSamples)
+        } else {
+            None
         };
         DiskNeeds {
             volume: self.total,
             reserve_share: share,
-            moving: self.moving,
-            remaining: self.remaining,
-            landing_waiting: self.landing_waiting,
-            claim_expected: if moving { expected.unwrap_or(0) } else { 0 },
-            claim_remaining: if moving && expected.is_some() {
-                remaining
-            } else {
-                0
-            },
-            landing_expected: if moving && adds_landing {
-                expected.unwrap_or(0)
-            } else {
-                0
-            },
-            claims_wait_reason: if moving && expected.is_none() {
-                Some(ClaimsWaitReason::NoSamples)
-            } else if !moving && self.landing_waiting {
-                Some(ClaimsWaitReason::LandingFirst)
-            } else {
-                None
-            },
             reserve,
             expected,
-            claim,
-            landing,
-            claims_wait: if moving {
-                expected.is_none()
-            } else {
-                self.landing_waiting
-            },
+            integrator_expected,
+            workers,
+            waiting,
+            integrators,
+            moving,
+            remaining,
+            measured,
+            unmeasured: workers + integrators - measured,
+            landing_waiting: self.landing_waiting,
+            claim_expected,
+            claim_remaining,
+            landing_expected,
+            claim: reserve
+                .saturating_add(claim_expected)
+                .saturating_add(claim_remaining)
+                .saturating_add(landing_expected),
+            landing: landing_need(reserve, integrator_expected, self.landing_current, moving),
+            claims_wait_reason,
+            claims_wait: claims_wait_reason.is_some(),
             relaxed: self.relaxed,
             ..DiskNeeds::default()
         }
     }
 
-    /// Whether a claim and a landing may go ([`Self::needs`]). Unread free
-    /// space holds nothing; below the reserve both are held. Above it, the
-    /// queue always moves on: a landing goes with no run moving or no
-    /// expectation, and otherwise when what is free above the reserve
-    /// holds the expectation. A claim with no run moving goes unless a
-    /// landing waits (the landing goes first, and frees the worktree; the
-    /// next pass decides the claim); with runs moving and no expectation
-    /// it is held (a project with no records runs one at a time);
-    /// otherwise it goes when what is free above the reserve holds the
-    /// expectation, the moving runs' remaining and, with a landing
-    /// waiting, the expectation once more.
+    /// Freeze every candidate and claim decision once for all pass consumers.
+    pub fn decide(
+        &self,
+        share: f64,
+        candidates: &[LandingCandidate],
+        estimate: DiskEstimate,
+        sample_count: usize,
+    ) -> DiskDecision {
+        let mut needs = self.needs(share);
+        needs.estimate = estimate;
+        needs.sample_count = sample_count;
+        let landings: Vec<_> = candidates
+            .iter()
+            .map(|c| {
+                let needed = landing_need(
+                    needs.reserve,
+                    needs.integrator_expected,
+                    c.current,
+                    self.moving.saturating_sub(usize::from(c.integrating)),
+                );
+                LandingDecision {
+                    run: c.run.clone(),
+                    needed,
+                    allowed: self.free.is_none_or(|free| free >= needed),
+                    waiting: c.waiting,
+                }
+            })
+            .collect();
+        needs.landing = landings
+            .iter()
+            .map(|d| d.needed)
+            .max()
+            .unwrap_or(needs.reserve);
+        let claim_short = self.free.is_some_and(|f| f < needs.claim);
+        let claims = self.claim_count(&needs);
+        let claim_allowed = claims != Some(0);
+        let short = claim_short || landings.iter().any(|d| d.waiting && !d.allowed);
+        DiskDecision {
+            reserve: reserve_decision(self.free, Some(needs.reserve)),
+            free: self.free,
+            needs,
+            claims,
+            claim_allowed,
+            claim_short,
+            landings,
+            short,
+        }
+    }
+
+    /// Unread free space holds nothing. The reserve is a hard floor.
     pub fn verdict(&self, share: f64) -> DiskVerdict {
         let Some(free) = self.free else {
             return DiskVerdict {
@@ -549,31 +802,41 @@ impl DiskState {
         }
     }
 
-    /// How many new runs may be claimed this pass ([`Self::verdict`]);
-    /// `None` for no limit (unread free space, or an expectation of 0).
-    /// With no run moving the first goes whatever it is expected to take,
-    /// and more only as the room above the reserve holds the expectation
-    /// for each; with runs moving, each claim needs the expectation above
-    /// what the moving runs and a waiting landing need.
+    /// floor((free - reserve - U - empty-slot I) / W). The caller combines
+    /// this with the configured parallel/available-slot upper bound as before.
+    /// Idle progress allows at least one even when the empty slot consumes
+    /// the room. Unknown free space or W=0 imposes no numeric limit.
     pub fn claims(&self, share: f64) -> Option<usize> {
+        self.claim_count(&self.needs(share))
+    }
+
+    fn claim_count(&self, needs: &DiskNeeds) -> Option<usize> {
         let free = self.free?;
-        if !self.verdict(share).claim {
+        if free < needs.claim || needs.claims_wait {
             return Some(0);
         }
-        let needs = self.needs(share);
-        let Some(expected) = needs.expected else {
+        let Some(w) = needs.expected else {
             return Some(1);
         };
-        if expected == 0 {
+        if w == 0 {
             return None;
         }
-        let each = |room: u64| usize::try_from(room / expected).unwrap_or(usize::MAX);
-        if self.moving == 0 {
-            return Some(each(free - needs.reserve).max(1));
-        }
-        // What the moving runs and a waiting landing need: what a claim
-        // needs less the expectation of the first new run.
-        Some(each(free - (needs.claim - expected)))
+        let relax = self.relaxed.map(|r| r.relax).unwrap_or_default();
+        let empty = if needs.integrators == 0 && !relax.no_landing_expectation {
+            needs.integrator_expected.unwrap_or(0)
+        } else {
+            0
+        };
+        let room = free
+            .saturating_sub(needs.reserve)
+            .saturating_sub(needs.claim_remaining)
+            .saturating_sub(empty);
+        let claims = usize::try_from(room / w).unwrap_or(usize::MAX);
+        Some(if needs.moving == 0 {
+            claims.max(1)
+        } else {
+            claims
+        })
     }
 }
 
@@ -673,7 +936,7 @@ pub fn size_exceeded_expected(
 }
 
 /// What the moving runs are expected to take yet, together
-/// ([`DiskState::remaining`]): for each, the expectation less its size now
+/// ([`DiskNeeds::remaining`]): for each, the expectation less its size now
 /// ([`trusted_size`]; `None` counts as 0), or 0 for a run past it. With no
 /// expectation it is 0: a project with no samples runs one at a time.
 pub fn moving_remaining(
@@ -712,13 +975,15 @@ pub const MAX_RELAX_SECS: u64 = 24 * 60 * 60;
 /// never one of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct DiskRelax {
-    /// The expectation of a new run, and of a landing, in place of the
-    /// samples'; `None` keeps the samples'.
+    /// Override both WORKER W and INTEGRATOR I from the configured method;
+    /// `None` keeps those budgets. Recent with no samples stays unsampled.
     #[serde(rename = "expected_bytes")]
     pub expected: Option<u64>,
-    /// A claim adds no expectation for a waiting landing.
+    /// A claim adds no reservation for an empty INTEGRATOR slot, whether
+    /// or not a landing waits. An active integrator's remainder stays in U.
     pub no_landing_expectation: bool,
-    /// The moving runs' remaining counts 0.
+    /// U, the unused WORKER and INTEGRATOR reservations, contributes zero
+    /// to claims. Waiting stages already contribute zero.
     pub no_remaining: bool,
 }
 
@@ -1033,56 +1298,6 @@ mod tests {
     }
 
     #[test]
-    fn breakdown_additions_match_both_thresholds_under_the_existing_rules() {
-        for (expected, moving, waiting, remaining) in [
-            (Some(10 * GIB), 0, false, 0),
-            (None, 2, false, 0),
-            (None, 0, true, 0),
-            (Some(10 * GIB), 0, true, 0),
-            (
-                Some(10 * GIB),
-                2,
-                true,
-                moving_remaining(Some(10 * GIB), [Some(4 * GIB), None]),
-            ),
-        ] {
-            let state = DiskState {
-                free: Some(1),
-                total: 200 * GIB,
-                expected,
-                moving,
-                remaining,
-                landing_waiting: waiting,
-                relaxed: None,
-            };
-            let mut needs = state.needs(0.05);
-            needs.measured = usize::from(remaining > 0);
-            needs.unmeasured = moving - needs.measured;
-            assert_eq!(
-                needs.claim,
-                needs
-                    .reserve
-                    .saturating_add(needs.claim_expected)
-                    .saturating_add(needs.claim_remaining)
-                    .saturating_add(needs.landing_expected)
-            );
-            assert_eq!(
-                needs.landing,
-                needs.reserve.saturating_add(needs.claim_expected)
-            );
-            assert_eq!(needs.volume, 200 * GIB);
-            assert_eq!(needs.reserve, 10 * GIB);
-            assert_eq!(needs.measured + needs.unmeasured, moving);
-            assert_eq!(needs.claims_wait, needs.claims_wait_reason.is_some());
-            if remaining > 0 {
-                assert_eq!(needs.claim, 46 * GIB);
-                assert_eq!(needs.landing_expected, 10 * GIB);
-                assert_eq!(needs.unmeasured, 1);
-            }
-        }
-    }
-
-    #[test]
     fn estimate_reports_only_samples_used_by_the_expectation() {
         let now = SAMPLE_WINDOW_MILLIS + 1;
         let mut samples = vec![
@@ -1138,79 +1353,11 @@ mod tests {
     }
 
     #[test]
-    fn fixed_claims_keep_remaining_space_idle_progress_and_landing_first() {
-        let config = DiskConfig {
-            estimate: DiskEstimate::Fixed,
-            run_size: Some(20 * GIB),
-            ..DiskConfig::default()
-        };
-        let expected = run_expectation(&config, &[], NOW);
-        let mut state = DiskState {
-            free: Some(60 * GIB),
-            total: 228 * GIB,
-            expected,
-            moving: 2,
-            remaining: moving_remaining(expected, [Some(12 * GIB), Some(5 * GIB)]),
-            landing_waiting: false,
-            relaxed: None,
-        };
-        let mut needs = state.needs(config.reserve);
-        needs.estimate = config.estimate;
-        // reserve is rounded up to the next byte, so sum its independently
-        // calculated value and the exact whole-GiB additions.
-        let reserve = (228 * GIB).div_ceil(20);
-        assert_eq!(needs.reserve, reserve);
-        assert_eq!(needs.remaining, 23 * GIB);
-        assert_eq!(needs.claim, reserve + 43 * GIB);
-        assert_eq!(needs.claims_wait_reason, None); // no samples, yet a claim goes
-        assert!(needs.message().contains("expected 20.0 GiB (fixed)"));
-        assert_eq!(serde_json::to_value(needs).unwrap()["estimate"], "fixed");
-        assert!(state.verdict(config.reserve).claim);
-        assert_eq!(state.claims(config.reserve), Some(1));
-        state.free = Some(50 * GIB);
-        assert!(!state.verdict(config.reserve).claim);
-        state.moving = 1;
-        state.remaining = moving_remaining(expected, [Some(gib_f(33.7))]);
-        assert_eq!(state.remaining, 0);
-        state.free = Some(reserve + 20 * GIB - 1);
-        assert!(!state.verdict(config.reserve).claim);
-        assert_eq!(state.claims(config.reserve), Some(0));
-        state.free = Some(reserve + 20 * GIB);
-        assert!(state.verdict(config.reserve).claim);
-        state.free = Some(80 * GIB);
-        assert_eq!(state.claims(config.reserve), Some(3));
-        state.landing_waiting = true;
-        assert_eq!(state.needs(config.reserve).claim, reserve + 40 * GIB);
-        state.moving = 0;
-        state.free = Some(12 * GIB);
-        state.landing_waiting = false;
-        assert!(state.verdict(config.reserve).claim);
-        assert_eq!(state.claims(config.reserve), Some(1));
-        state.landing_waiting = true;
-        let needs = state.needs(config.reserve);
-        assert!(needs.claims_wait);
-        assert_eq!(
-            needs.claims_wait_reason,
-            Some(ClaimsWaitReason::LandingFirst)
-        );
-        assert!(!state.verdict(config.reserve).claim);
-        assert!(state.verdict(config.reserve).landing);
-        state.moving = 1;
-        state.landing_waiting = false;
-        state.relaxed = Some(relaxed(DiskRelax {
-            expected: Some(GIB),
-            ..DiskRelax::default()
-        }));
-        assert_eq!(state.needs(config.reserve).expected, Some(GIB));
-        state.free = Some(reserve + GIB);
-        assert!(state.verdict(config.reserve).claim);
-        state.free = Some(reserve - 1);
-        assert!(!state.verdict(config.reserve).claim);
-    }
-
-    #[test]
     fn the_settings_are_set_by_name() {
-        assert_eq!(DiskConfig::KEYS, ["reserve", "estimate", "run_size"]);
+        assert_eq!(
+            DiskConfig::KEYS,
+            ["reserve", "estimate", "run_size", "landing_size"]
+        );
         assert_eq!(DiskConfig::default().reserve, DEFAULT_RESERVE_SHARE);
         for key in DiskConfig::RETIRED_KEYS {
             assert!(!DiskConfig::KEYS.contains(&key), "{key}");
@@ -1458,39 +1605,6 @@ mod tests {
         assert_eq!(expected_run_size(&old, NOW), Some(3));
     }
 
-    /// Acceptance 1, the stretch of 2026-11-03: one 45.6 GiB build among
-    /// 20 of 8 to 14 GiB does not move the expectation above 14 GiB, and
-    /// with 71 GiB free of 228 GiB a claim goes with no run moving or one.
-    #[test]
-    fn one_outlier_does_not_hold_the_claims_of_2026_11_03() {
-        let mut samples: Vec<RunSample> = (0..19)
-            .map(|n| {
-                sample(
-                    gib_f(8.0 + 6.0 * f64::from(n) / 18.0),
-                    NOW - i64::from(n) * 3_600_000,
-                )
-            })
-            .collect();
-        samples.push(sample(gib_f(45.6), NOW - 60_000));
-        let expected = expected_run_size(&samples, NOW);
-        assert!(
-            expected.is_some_and(|expected| expected <= 14 * GIB),
-            "{expected:?}"
-        );
-        for moving in [0, 1] {
-            let state = DiskState {
-                free: Some(71 * GIB),
-                total: 228 * GIB,
-                expected,
-                moving,
-                remaining: 0,
-                landing_waiting: false,
-                relaxed: None,
-            };
-            assert!(state.verdict(DEFAULT_RESERVE_SHARE).claim, "{moving}");
-        }
-    }
-
     /// A walk starts before the first and at the interval, not 1 ms before
     /// it, for the same runs all measured; at once for a run not measured;
     /// never while one runs or with no run moving.
@@ -1601,80 +1715,6 @@ mod tests {
         assert_eq!(moving_remaining(Some(u64::MAX), [None, None]), u64::MAX);
     }
 
-    /// Acceptance 4 of the task: with no run moving and room above the
-    /// reserve one run is claimed and a landing goes, whatever the
-    /// remaining.
-    #[test]
-    fn with_no_run_moving_a_claim_and_a_landing_go_whatever_the_remaining() {
-        for remaining in [0, 10 * GIB, u64::MAX] {
-            let state = DiskState {
-                free: Some(6 * GIB),
-                total: 0,
-                expected: Some(10 * GIB),
-                moving: 0,
-                remaining,
-                landing_waiting: false,
-                relaxed: None,
-            };
-            assert_eq!(
-                state.verdict(DEFAULT_RESERVE_SHARE),
-                DiskVerdict {
-                    claim: true,
-                    landing: true
-                },
-                "{remaining}"
-            );
-            assert_eq!(state.claims(DEFAULT_RESERVE_SHARE), Some(1), "{remaining}");
-        }
-    }
-
-    /// Acceptance 2: once every sample is older than 14 days there is no
-    /// expectation, and with no run moving a claim goes above the reserve.
-    #[test]
-    fn old_samples_leave_no_expectation_and_a_claim_goes() {
-        let samples = [
-            sample(90 * GIB, NOW - 15 * DAY),
-            sample(80 * GIB, NOW - 20 * DAY),
-        ];
-        let expected = expected_run_size(&samples, NOW);
-        assert_eq!(expected, None);
-        let state = DiskState {
-            free: Some(20 * GIB),
-            total: 228 * GIB,
-            expected,
-            moving: 0,
-            remaining: 0,
-            landing_waiting: false,
-            relaxed: None,
-        };
-        assert_eq!(
-            state.verdict(DEFAULT_RESERVE_SHARE),
-            DiskVerdict {
-                claim: true,
-                landing: true
-            }
-        );
-    }
-
-    /// Acceptance 3: a project with no sample runs one at a time, with no
-    /// setting.
-    #[test]
-    fn no_sample_runs_one_at_a_time() {
-        let state = |moving| DiskState {
-            free: Some(100 * GIB),
-            total: 228 * GIB,
-            expected: expected_run_size(&[], NOW),
-            moving,
-            remaining: 0,
-            landing_waiting: false,
-            relaxed: None,
-        };
-        assert!(state(0).verdict(DEFAULT_RESERVE_SHARE).claim);
-        assert!(!state(1).verdict(DEFAULT_RESERVE_SHARE).claim);
-        // A landing goes with no expectation, whatever moves.
-        assert!(state(1).verdict(DEFAULT_RESERVE_SHARE).landing);
-    }
-
     #[test]
     fn the_reserve_is_5_gib_or_5_percent() {
         let reserve = reserve_bytes(gib_f(228.3), DEFAULT_RESERVE_SHARE);
@@ -1682,180 +1722,6 @@ mod tests {
         assert_eq!(reserve_bytes(50 * GIB, DEFAULT_RESERVE_SHARE), 5 * GIB);
         assert_eq!(reserve_bytes(0, DEFAULT_RESERVE_SHARE), MIN_RESERVE_BYTES);
         assert_eq!(reserve_bytes(1_000 * GIB, 0.10), 100 * GIB);
-    }
-
-    /// Acceptance 6 and 7: the reserve, landings first with no run moving,
-    /// and what a claim needs with runs moving, to the byte.
-    #[test]
-    fn the_verdict_holds_below_the_reserve_and_otherwise_moves_on() {
-        let total = 50 * GIB; // the reserve is 5 GiB
-        let reserve = 5 * GIB;
-        let base = DiskState {
-            free: Some(reserve),
-            total,
-            expected: Some(10 * GIB),
-            moving: 0,
-            remaining: 0,
-            landing_waiting: false,
-            relaxed: None,
-        };
-        let verdict = |state: DiskState| state.verdict(DEFAULT_RESERVE_SHARE);
-        let both = |claim, landing| DiskVerdict { claim, landing };
-        // Below the reserve both are held, whatever moves.
-        for moving in [0, 2] {
-            let below = DiskState {
-                free: Some(reserve - 1),
-                moving,
-                expected: None,
-                ..base
-            };
-            assert_eq!(verdict(below), both(false, false), "{moving}");
-        }
-        // At the reserve with no run moving both go, the claim only with
-        // no landing waiting.
-        assert_eq!(verdict(base), both(true, true));
-        let waiting = DiskState {
-            landing_waiting: true,
-            ..base
-        };
-        assert_eq!(verdict(waiting), both(false, true));
-        // Runs moving with no expectation: the claim is held, the
-        // landing goes.
-        let unknown = DiskState {
-            free: Some(100 * GIB),
-            expected: None,
-            moving: 1,
-            landing_waiting: true,
-            ..base
-        };
-        assert_eq!(verdict(unknown), both(false, true));
-        // Unread free space holds nothing.
-        for moving in [0, 3] {
-            let unread = DiskState {
-                free: None,
-                moving,
-                landing_waiting: true,
-                ..base
-            };
-            assert_eq!(verdict(unread), both(true, true), "{moving}");
-        }
-        // With runs moving: a claim needs the expectation, the remaining
-        // and, with a landing waiting, the expectation again; a landing
-        // the expectation.
-        for landing_waiting in [false, true] {
-            let need = 10 * GIB + 3 * GIB + if landing_waiting { 10 * GIB } else { 0 };
-            let moving = DiskState {
-                free: Some(reserve + need),
-                moving: 2,
-                remaining: 3 * GIB,
-                landing_waiting,
-                ..base
-            };
-            assert_eq!(verdict(moving), both(true, true), "{landing_waiting}");
-            let short = DiskState {
-                free: Some(reserve + need - 1),
-                ..moving
-            };
-            assert!(!verdict(short).claim, "{landing_waiting}");
-            assert!(verdict(short).landing, "{landing_waiting}");
-        }
-        // A landing with runs moving needs the expectation free above the
-        // reserve.
-        let landing = DiskState {
-            free: Some(reserve + 10 * GIB),
-            moving: 1,
-            ..base
-        };
-        assert!(verdict(landing).landing);
-        assert!(
-            !verdict(DiskState {
-                free: Some(reserve + 10 * GIB - 1),
-                ..landing
-            })
-            .landing
-        );
-    }
-
-    /// The needs give the verdict's thresholds to the byte, and the claims
-    /// of a pass: one at least with no run moving, then one per expectation
-    /// the room holds.
-    #[test]
-    fn the_needs_give_the_verdict_and_bound_the_claims_of_a_pass() {
-        let reserve = 5 * GIB;
-        let state = |free: u64, expected: Option<u64>, moving, landing_waiting| DiskState {
-            free: Some(free),
-            total: 50 * GIB,
-            expected,
-            moving,
-            remaining: 0,
-            landing_waiting,
-            relaxed: None,
-        };
-        let share = DEFAULT_RESERVE_SHARE;
-        let e = Some(10 * GIB);
-        assert_eq!(
-            state(0, e, 2, true).needs(share),
-            DiskNeeds {
-                reserve,
-                expected: e,
-                claim: reserve + 20 * GIB,
-                landing: reserve + 10 * GIB,
-                claims_wait: false,
-                volume: 50 * GIB,
-                reserve_share: share,
-                moving: 2,
-                landing_waiting: true,
-                claim_expected: 10 * GIB,
-                landing_expected: 10 * GIB,
-                ..DiskNeeds::default()
-            }
-        );
-        assert_eq!(state(0, e, 0, false).needs(share).claim, reserve);
-        assert_eq!(state(0, e, 0, false).needs(share).landing, reserve);
-        assert!(state(0, e, 0, true).needs(share).claims_wait);
-        assert!(state(0, None, 1, false).needs(share).claims_wait);
-        assert!(!state(0, None, 0, false).needs(share).claims_wait);
-        // A claim goes exactly when the claims of the pass are not 0.
-        for free in [
-            0,
-            reserve - 1,
-            reserve,
-            14 * GIB,
-            15 * GIB,
-            26 * GIB,
-            60 * GIB,
-        ] {
-            for expected in [None, Some(0), e] {
-                for moving in [0, 1, 3] {
-                    for waiting in [false, true] {
-                        let state = state(free, expected, moving, waiting);
-                        assert_eq!(
-                            state.verdict(share).claim,
-                            state.claims(share) != Some(0),
-                            "{state:?}"
-                        );
-                    }
-                }
-            }
-        }
-        // No run moving: one whatever the expectation, more as the room
-        // above the reserve holds it; none while a landing waits.
-        assert_eq!(state(reserve, e, 0, false).claims(share), Some(1));
-        assert_eq!(state(reserve, None, 0, false).claims(share), Some(1));
-        assert_eq!(state(26 * GIB, e, 0, false).claims(share), Some(2));
-        assert_eq!(state(26 * GIB, e, 0, true).claims(share), Some(0));
-        // Runs moving: one per expectation above a waiting landing's.
-        assert_eq!(state(35 * GIB, e, 2, false).claims(share), Some(3));
-        assert_eq!(state(35 * GIB, e, 2, true).claims(share), Some(2));
-        assert_eq!(state(24 * GIB, e, 2, true).claims(share), Some(0));
-        assert_eq!(state(60 * GIB, None, 2, false).claims(share), Some(0));
-        // No limit: an expectation of 0, or unread free space.
-        assert_eq!(state(60 * GIB, Some(0), 2, true).claims(share), None);
-        let unread = DiskState {
-            free: None,
-            ..state(0, e, 2, true)
-        };
-        assert_eq!(unread.claims(share), None);
     }
 
     /// A `disk_relaxed` (or another of [`RELAX_KINDS`]) on the queue,
@@ -1976,84 +1842,6 @@ mod tests {
         );
     }
 
-    /// Acceptance 1 and 3: each term loosens its part of the needs alone,
-    /// out of a relaxation the needs are as before, and the reserve is
-    /// never loosened: below it both the claim and the landing are held.
-    #[test]
-    fn each_term_loosens_its_part_and_the_reserve_holds() {
-        let total = 200 * GIB; // the reserve is 10 GiB
-        let base = DiskState {
-            free: Some(40 * GIB),
-            total,
-            expected: Some(10 * GIB),
-            moving: 2,
-            remaining: 15 * GIB,
-            landing_waiting: true,
-            relaxed: None,
-        };
-        let needs = |relax: Option<DiskRelax>| {
-            DiskState {
-                relaxed: relax.map(relaxed),
-                ..base
-            }
-            .needs(DEFAULT_RESERVE_SHARE)
-        };
-        // reserve 10 + expected 10 + remaining 15 + landing 10.
-        let before = needs(None);
-        assert_eq!((before.claim, before.landing), (45 * GIB, 20 * GIB));
-        assert_eq!(before.relaxed, None);
-        assert!(!base.verdict(DEFAULT_RESERVE_SHARE).claim);
-        let expected = needs(Some(DiskRelax {
-            expected: Some(4 * GIB),
-            ..DiskRelax::default()
-        }));
-        assert_eq!((expected.claim, expected.landing), (33 * GIB, 14 * GIB));
-        assert_eq!(expected.expected, Some(4 * GIB));
-        assert!(expected.relaxed.is_some());
-        assert!(expected.message().contains("relaxed until"));
-        let landing = needs(Some(DiskRelax {
-            no_landing_expectation: true,
-            ..DiskRelax::default()
-        }));
-        assert_eq!((landing.claim, landing.landing), (35 * GIB, 20 * GIB));
-        assert_eq!(landing.landing_expected, 0);
-        let remaining = needs(Some(DiskRelax {
-            no_remaining: true,
-            ..DiskRelax::default()
-        }));
-        assert_eq!((remaining.claim, remaining.landing), (30 * GIB, 20 * GIB));
-        assert_eq!(remaining.claim_remaining, 0);
-        let all = DiskRelax {
-            expected: Some(4 * GIB),
-            no_landing_expectation: true,
-            no_remaining: true,
-        };
-        let loosest = needs(Some(all));
-        assert_eq!((loosest.claim, loosest.landing), (14 * GIB, 14 * GIB));
-        assert_eq!(loosest.reserve, before.reserve);
-        let relaxed_state = DiskState {
-            relaxed: Some(relaxed(all)),
-            ..base
-        };
-        assert!(relaxed_state.verdict(DEFAULT_RESERVE_SHARE).claim);
-        // 40 free less the reserve's 10 (the moving runs' remaining and the
-        // waiting landing count nothing): 7 claims of 4 GiB each.
-        assert_eq!(relaxed_state.claims(DEFAULT_RESERVE_SHARE), Some(7));
-        // Below the reserve nothing goes, relaxed or not.
-        let below = DiskState {
-            free: Some(10 * GIB - 1),
-            ..relaxed_state
-        };
-        assert_eq!(
-            below.verdict(DEFAULT_RESERVE_SHARE),
-            DiskVerdict {
-                claim: false,
-                landing: false
-            }
-        );
-        assert_eq!(below.claims(DEFAULT_RESERVE_SHARE), Some(0));
-    }
-
     /// The public view keeps the exact terms and provenance only while
     /// the newest record is active, including at the instant it expires.
     #[test]
@@ -2092,53 +1880,323 @@ mod tests {
         assert!(relax_view(None, NOW).is_none());
     }
 
-    /// Acceptance 3: under a relaxation one run still goes with none
-    /// moving, a waiting landing still goes before a claim with none
-    /// moving, and a project with no sample still runs one at a time.
     #[test]
-    fn a_relaxation_keeps_the_progress_and_the_landing_first() {
-        let all = relaxed(DiskRelax {
-            expected: Some(GIB),
-            no_landing_expectation: true,
-            no_remaining: true,
-        });
-        let idle = DiskState {
-            free: Some(11 * GIB),
-            total: 200 * GIB,
-            expected: Some(50 * GIB),
-            moving: 0,
-            remaining: 0,
-            landing_waiting: true,
-            relaxed: Some(all),
-        };
-        let needs = idle.needs(DEFAULT_RESERVE_SHARE);
-        assert_eq!(
-            needs.claims_wait_reason,
-            Some(ClaimsWaitReason::LandingFirst)
+    fn one_outlier_does_not_hold_the_claims_of_2026_11_03() {
+        let mut samples: Vec<RunSample> = (0..19)
+            .map(|n| {
+                sample(
+                    gib_f(8.0 + 6.0 * f64::from(n) / 18.0),
+                    NOW - i64::from(n) * 3_600_000,
+                )
+            })
+            .collect();
+        samples.push(sample(gib_f(45.6), NOW - 60_000));
+        let expected = expected_run_size(&samples, NOW);
+        assert!(
+            expected.is_some_and(|expected| expected <= 14 * GIB),
+            "{expected:?}"
         );
+        for moving in [0, 1] {
+            let state = DiskState {
+                free: Some(71 * GIB),
+                total: 228 * GIB,
+                expected,
+                moving,
+                integrator_expected: expected,
+                runs: vec![staged(DiskStage::Worker, expected); moving],
+                landing_current: None,
+                landing_waiting: false,
+                relaxed: None,
+            };
+            assert!(state.verdict(DEFAULT_RESERVE_SHARE).claim, "{moving}");
+        }
+    }
+
+    #[test]
+    fn old_samples_leave_no_expectation_and_a_claim_goes() {
+        let samples = [
+            sample(90 * GIB, NOW - 15 * DAY),
+            sample(80 * GIB, NOW - 20 * DAY),
+        ];
+        let expected = expected_run_size(&samples, NOW);
+        assert_eq!(expected, None);
+        let state = DiskState {
+            free: Some(20 * GIB),
+            total: 228 * GIB,
+            expected,
+            moving: 0,
+            integrator_expected: expected,
+            runs: vec![],
+            landing_current: None,
+            landing_waiting: false,
+            relaxed: None,
+        };
         assert_eq!(
-            idle.verdict(DEFAULT_RESERVE_SHARE),
+            state.verdict(DEFAULT_RESERVE_SHARE),
             DiskVerdict {
-                claim: false,
+                claim: true,
                 landing: true
             }
         );
-        let alone = DiskState {
-            landing_waiting: false,
-            ..idle
-        };
-        assert!(alone.verdict(DEFAULT_RESERVE_SHARE).claim);
-        assert_eq!(alone.claims(DEFAULT_RESERVE_SHARE), Some(1));
-        let unsampled = DiskState {
+    }
+
+    #[test]
+    fn phase_properties_choose_host_builds_idle_reviews_and_landing() {
+        use super::super::run_phase::Phase as P;
+        for phase in [P::Worker, P::Revise, P::Resume, P::E2e, P::AwaitingE2e] {
+            assert_eq!(disk_usage(phase, true, true).stage, DiskStage::Worker);
+        }
+        for phase in [
+            P::Review,
+            P::AgentEval,
+            P::Waiting { in_slot: false },
+            P::LandingQueue,
+        ] {
+            assert_eq!(disk_usage(phase, true, true).stage, DiskStage::Waiting);
+        }
+        assert_eq!(
+            disk_usage(P::Landing, true, true).stage,
+            DiskStage::Integrator
+        );
+        assert_eq!(disk_usage(P::E2e, false, true).stage, DiskStage::Worker); // current host e2e of a container run
+        assert_eq!(disk_usage(P::E2e, false, false).stage, DiskStage::Waiting); // a container-only e2e engine
+        assert_eq!(
+            disk_usage(P::AwaitingE2e, false, false).stage,
+            DiskStage::Waiting
+        );
+    }
+
+    #[test]
+    fn one_pass_keeps_candidate_gates_holds_and_ask_membership_consistent() {
+        let a = super::super::RunId::new("measured-slot").unwrap();
+        let b = super::super::RunId::new("queued-outside-slot").unwrap();
+        let mut state = staged_state();
+        state.total = 0; // reserve 5 GiB
+        state.free = Some(15 * GIB);
+        state.runs = vec![staged(DiskStage::Worker, Some(20 * GIB))];
+        state.moving = 1;
+        let candidates = vec![
+            LandingCandidate {
+                run: a.clone(),
+                current: Some(18 * GIB),
+                integrating: false,
+                waiting: true,
+            },
+            LandingCandidate {
+                run: b.clone(),
+                current: None,
+                integrating: false,
+                waiting: true,
+            },
+        ];
+        let pass = state.decide(0.05, &candidates, DiskEstimate::Fixed, 0);
+        assert_eq!(
+            (
+                pass.landing(&a).unwrap().needed,
+                pass.landing(&a).unwrap().allowed
+            ),
+            (7 * GIB, true)
+        );
+        assert_eq!(
+            (
+                pass.landing(&b).unwrap().needed,
+                pass.landing(&b).unwrap().allowed
+            ),
+            (25 * GIB, false)
+        );
+        assert_eq!(
+            pass.blocked().map(|d| d.run.clone()).collect::<Vec<_>>(),
+            vec![b.clone()]
+        );
+        assert_eq!(pass.landing_hold().unwrap().threshold, (25 * GIB) as f64);
+        assert!(pass.claim_short);
+        assert!(!pass.claim_allowed);
+        // Completing the measurement changes gate, hold and ask membership together.
+        let mut measured = candidates.clone();
+        measured[1].current = Some(18 * GIB);
+        let pass = state.decide(0.05, &measured, DiskEstimate::Fixed, 0);
+        assert!(pass.landing(&b).unwrap().allowed);
+        assert!(pass.landing_hold().is_none());
+        assert_eq!(pass.blocked().count(), 0);
+        // Start and retry use identical progress, excluding an already active candidate.
+        state.moving = 0;
+        state.runs = vec![staged(DiskStage::Waiting, None); 2];
+        let start = state.decide(0.05, &candidates, DiskEstimate::Fixed, 0);
+        state.moving = 1;
+        state.runs = vec![staged(DiskStage::Integrator, None)];
+        let retry = state.decide(
+            0.05,
+            &[LandingCandidate {
+                integrating: true,
+                ..candidates[1].clone()
+            }],
+            DiskEstimate::Fixed,
+            0,
+        );
+        assert_eq!(start.landing(&b).unwrap().needed, 5 * GIB);
+        assert_eq!(retry.landing(&b).unwrap().needed, 5 * GIB);
+        state.free = Some(5 * GIB - 1);
+        assert!(
+            !state
+                .decide(
+                    0.05,
+                    &[LandingCandidate {
+                        integrating: true,
+                        ..candidates[1].clone()
+                    }],
+                    DiskEstimate::Fixed,
+                    0
+                )
+                .landing(&b)
+                .unwrap()
+                .allowed
+        );
+    }
+
+    fn staged(stage: DiskStage, current: Option<u64>) -> DiskRun {
+        DiskRun { stage, current }
+    }
+    fn staged_state() -> DiskState {
+        DiskState {
             free: Some(100 * GIB),
-            expected: None,
-            moving: 1,
+            total: 228 * GIB,
+            expected: Some(20 * GIB),
+            integrator_expected: Some(20 * GIB),
+            runs: vec![
+                staged(DiskStage::Worker, Some(12 * GIB)),
+                staged(DiskStage::Worker, Some(5 * GIB)),
+                staged(DiskStage::Waiting, Some(18 * GIB)),
+            ],
+            moving: 2,
+            landing_current: Some(18 * GIB),
             landing_waiting: false,
-            ..idle
-        };
-        let needs = unsampled.needs(DEFAULT_RESERVE_SHARE);
-        assert_eq!(needs.claims_wait_reason, Some(ClaimsWaitReason::NoSamples));
-        assert!(!unsampled.verdict(DEFAULT_RESERVE_SHARE).claim);
+            relaxed: None,
+        }
+    }
+
+    #[test]
+    fn stage_reservations_keep_an_integration_slot_without_double_counting() {
+        let mut state = staged_state();
+        let reserve = (228 * GIB).div_ceil(20);
+        let needs = state.needs(0.05);
+        assert_eq!(needs.remaining, 23 * GIB);
+        assert_eq!((needs.workers, needs.waiting, needs.integrators), (2, 1, 0));
+        assert_eq!(needs.claim, reserve + 63 * GIB); // 74.4 GiB
+        assert_eq!(needs.landing, reserve + 2 * GIB);
+        state.landing_waiting = true;
+        assert_eq!(state.needs(0.05).claim, reserve + 63 * GIB);
+        state
+            .runs
+            .push(staged(DiskStage::Integrator, Some(14 * GIB)));
+        state.moving += 1;
+        let needs = state.needs(0.05);
+        assert_eq!(needs.remaining, 29 * GIB);
+        assert_eq!(needs.landing_expected, 0);
+        assert_eq!(needs.claim, reserve + 49 * GIB);
+        state.landing_current = Some(33 * GIB);
+        assert_eq!(state.needs(0.05).landing, reserve);
+        // A wait releases all unused W, and resuming reinstates it.
+        state.runs[0].stage = DiskStage::Waiting;
+        assert_eq!(state.needs(0.05).remaining, 21 * GIB);
+        state.runs[0].stage = DiskStage::Worker;
+        assert_eq!(state.needs(0.05).remaining, 29 * GIB);
+        state.runs[0].current = None;
+        assert_eq!(state.needs(0.05).remaining, 41 * GIB);
+    }
+
+    #[test]
+    fn stage_claims_use_the_floor_and_keep_progress_order_and_no_samples() {
+        let mut state = staged_state();
+        let reserve = (228 * GIB).div_ceil(20);
+        state.runs = vec![staged(DiskStage::Worker, Some(gib_f(33.7)))];
+        state.moving = 1;
+        assert_eq!(state.needs(0.05).remaining, 0);
+        for (free, claims) in [
+            (reserve - 1, 0),
+            (reserve + 40 * GIB - 1, 0),
+            (reserve + 40 * GIB, 1),
+            (reserve + 80 * GIB, 3),
+        ] {
+            state.free = Some(free);
+            assert_eq!(state.claims(0.05), Some(claims));
+        }
+        state.runs = vec![staged(DiskStage::Waiting, None)];
+        state.moving = 0;
+        state.free = Some(reserve);
+        assert_eq!(state.claims(0.05), Some(1));
+        assert!(state.verdict(0.05).landing);
+        state.free = Some(reserve + 80 * GIB);
+        assert_eq!(state.claims(0.05), Some(3)); // still reserves the empty I slot
+        state.landing_waiting = true;
+        assert_eq!(
+            state.needs(0.05).claims_wait_reason,
+            Some(ClaimsWaitReason::LandingFirst)
+        );
+        assert_eq!(state.claims(0.05), Some(0));
+        state.runs.push(staged(DiskStage::Worker, None));
+        state.moving = 1;
+        state.expected = None;
+        state.integrator_expected = None;
+        assert_eq!(
+            state.needs(0.05).claims_wait_reason,
+            Some(ClaimsWaitReason::NoSamples)
+        );
+        assert_eq!(state.claims(0.05), Some(0));
+        state.relaxed = Some(relaxed(DiskRelax {
+            expected: Some(GIB),
+            ..DiskRelax::default()
+        }));
+        assert_eq!(
+            state.needs(0.05).claims_wait_reason,
+            Some(ClaimsWaitReason::NoSamples)
+        );
+        state.expected = Some(0);
+        state.integrator_expected = Some(0);
+        state.relaxed = None;
+        assert_eq!(state.claims(0.05), None);
+        state.free = None;
+        assert_eq!(state.claims(0.05), None);
+    }
+
+    #[test]
+    fn stage_relaxations_override_both_budgets_the_empty_slot_and_u() {
+        let mut state = staged_state();
+        state.integrator_expected = Some(30 * GIB);
+        let reserve = (228 * GIB).div_ceil(20);
+        assert_eq!(state.needs(0.05).claim, reserve + 73 * GIB);
+        state.relaxed = Some(relaxed(DiskRelax {
+            expected: Some(10 * GIB),
+            ..DiskRelax::default()
+        }));
+        let needs = state.needs(0.05);
+        assert_eq!(needs.expected, Some(10 * GIB));
+        assert_eq!(needs.integrator_expected, Some(10 * GIB));
+        assert_eq!(needs.remaining, 5 * GIB); // recomputed from current sizes
+        assert_eq!(needs.claim, reserve + 25 * GIB);
+        assert_eq!(needs.landing, reserve);
+        state.relaxed = Some(relaxed(DiskRelax {
+            no_landing_expectation: true,
+            ..DiskRelax::default()
+        }));
+        assert_eq!(state.needs(0.05).claim, reserve + 43 * GIB);
+        assert_eq!(state.needs(0.05).landing, reserve + 12 * GIB);
+        state.relaxed = Some(relaxed(DiskRelax {
+            no_remaining: true,
+            ..DiskRelax::default()
+        }));
+        assert_eq!(state.needs(0.05).claim, reserve + 50 * GIB);
+        state
+            .runs
+            .push(staged(DiskStage::Integrator, Some(14 * GIB)));
+        state.moving += 1;
+        state.relaxed = Some(relaxed(DiskRelax {
+            no_landing_expectation: true,
+            ..DiskRelax::default()
+        }));
+        assert_eq!(state.needs(0.05).claim, reserve + 59 * GIB); // occupied I remains in U
+        state.free = Some(reserve - 1);
+        assert_eq!(state.claims(0.05), Some(0));
+        assert!(!state.verdict(0.05).landing);
     }
 
     fn executable(pid: u32, ppid: u32, executable: Option<&str>) -> ProcessExecutable {

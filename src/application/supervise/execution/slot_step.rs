@@ -57,7 +57,7 @@ impl Supervisor<'_> {
         // (ADR-t3049-1); one that hands off keeps it, and hands the
         // run over leased (ADR-t3048-1,
         // [`crate::domain::landing_hold::judge`]).
-        match self.landing_hold() {
+        match self.landing_hold(slot.run.id()) {
             crate::domain::landing_hold::LandingHold::Proceed => {}
             crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
             crate::domain::landing_hold::LandingHold::HandBack(why) => {

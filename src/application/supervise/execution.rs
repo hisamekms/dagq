@@ -1880,6 +1880,29 @@ fn offered_for_room(phase: &Phase, out_of_slot: bool, recheck: bool, draining: b
 }
 
 impl Phase {
+    /// Adapt execution state to domain phase facts without choosing budgets.
+    /// This match is exhaustive independently of the recording adapter.
+    fn disk_phase(&self) -> crate::domain::run_phase::Phase {
+        use crate::domain::run_phase::Phase as P;
+        match self {
+            Self::Session(_) => P::Worker,
+            Self::Revise(_) => P::Revise,
+            Self::Resume(_) => P::Resume,
+            Self::Recovery(_) => P::Recovery,
+            Self::Satisfied(_) => P::Verifying,
+            Self::SatisfiedReview(_) => P::Review,
+            Self::Landing(_) => P::Landing,
+            Self::Validating(..) => P::Validating,
+            Self::ReviewPrograms(_) | Self::Review(_) => P::Review,
+            Self::ReviewHeld { .. } => P::ReviewHeld,
+            Self::Exiting(_) => P::Exiting,
+            Self::AwaitingSlot => P::AwaitingSlot,
+            Self::AgentEval(_) => P::AgentEval,
+            Self::AwaitingE2e => P::AwaitingE2e,
+            Self::E2e(_) => P::E2e,
+        }
+    }
+
     /// Whether this phase holds work in flight that a rebuild from the
     /// queue would start again (a validation, an e2e, a verification, a
     /// landing, a review's, a claim judgment's or a recovery's job, the
@@ -2509,6 +2532,35 @@ pub(super) fn requested_by_job<S: ?Sized, T>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disk_reservations_switch_after_receipt_and_at_landing() {
+        use crate::domain::disk::DiskStage;
+        for phase in [
+            super::Phase::Validating(None, None),
+            super::Phase::AwaitingSlot,
+            super::Phase::ReviewHeld {
+                session: None,
+                retried: false,
+                providers: vec![],
+            },
+        ] {
+            assert_eq!(
+                crate::domain::disk::disk_usage(phase.disk_phase(), true, true).stage,
+                DiskStage::Waiting
+            );
+        }
+        assert_eq!(
+            crate::domain::disk::disk_usage(super::Phase::AwaitingE2e.disk_phase(), true, true)
+                .stage,
+            DiskStage::Worker
+        );
+        assert_eq!(
+            crate::domain::disk::disk_usage(super::Phase::Landing(None).disk_phase(), true, true)
+                .stage,
+            DiskStage::Integrator
+        );
+    }
+
     use std::cell::RefCell;
 
     use serde_json::json;

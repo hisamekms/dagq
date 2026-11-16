@@ -21,6 +21,8 @@ pub struct MemoryFiles {
     rejected_suffix: Mutex<Option<String>>,
     /// The directories that are there ([`Self::put_dir`]); none else is.
     dirs: Mutex<std::collections::HashSet<PathBuf>>,
+    /// Injected directory measurements; unspecified paths are unmeasured.
+    tree_sizes: Mutex<HashMap<PathBuf, u64>>,
     /// The milliseconds the files' `now` moved on since its start, one at
     /// each write, when the files tick ([`Self::ticking`]); `None` keeps
     /// one `now`.
@@ -75,6 +77,14 @@ impl MemoryFiles {
     /// Make `dir` a directory that is there.
     pub fn put_dir(&self, dir: &Path) {
         self.dirs.lock().unwrap().insert(dir.to_owned());
+    }
+
+    /// Supply a directory measurement without allocating its contents.
+    pub fn set_tree_size(&self, dir: &Path, bytes: u64) {
+        self.tree_sizes
+            .lock()
+            .unwrap()
+            .insert(dir.to_owned(), bytes);
     }
 
     pub fn put(&self, path: &Path, modified: SystemTime, contents: &str) {
@@ -227,8 +237,8 @@ impl RunFiles for MemoryFiles {
             .map(drop)
             .ok_or_else(missing)
     }
-    fn tree_size(&self, _: &Path) -> io::Result<Option<u64>> {
-        Ok(None)
+    fn tree_size(&self, dir: &Path) -> io::Result<Option<u64>> {
+        Ok(self.tree_sizes.lock().unwrap().get(dir).copied())
     }
     fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
         self.files
@@ -236,6 +246,10 @@ impl RunFiles for MemoryFiles {
             .unwrap()
             .retain(|path, _| !path.starts_with(dir));
         self.dirs.lock().unwrap().retain(|at| !at.starts_with(dir));
+        self.tree_sizes
+            .lock()
+            .unwrap()
+            .retain(|at, _| !at.starts_with(dir));
         Ok(())
     }
     /// A directory with no file under it.

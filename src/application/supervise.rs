@@ -113,7 +113,7 @@ pub use self::host_ops::queue_service::{
 pub use self::host_ops::release::{RELEASE_LOOK, ReleasePort};
 pub use self::host_ops::sccache::SccachePort;
 pub use self::host_ops::update::{UPDATE_INTERVAL, UpdateSettings};
-use self::host_ops::{broker_relay, cleanup, disk, handoff, inbox_nudge, queue_broker, sccache};
+use self::host_ops::{broker_relay, cleanup, handoff, inbox_nudge, queue_broker, sccache};
 use self::observation::ObservationState;
 pub use self::observation::agent_watch::AGENT_WATCH_CHECK;
 pub use self::observation::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};

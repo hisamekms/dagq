@@ -37,7 +37,7 @@ use crate::domain::{
     CommitSha, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult, Reason,
     ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus, Task,
     TaskId, TaskRun,
-    disk::{DiskConfig, DiskState, gib},
+    disk::{DiskConfig, DiskRun, DiskStage, DiskState, gib},
     execution_class::missing_spike_result,
     heartbeat_stale,
     landing_branch::{
@@ -826,6 +826,8 @@ pub struct RetryDisk<'a> {
     pub free: &'a dyn Fn() -> Option<u64>,
     pub total: Option<u64>,
     pub moving: Option<&'a dyn Fn() -> usize>,
+    /// Supervisor retries consume its immutable latest pass result.
+    pub decision: Option<&'a dyn Fn() -> Option<crate::domain::disk::DiskDecision>>,
 }
 
 /// What a person's `integrate` checks the free disk space with (task
@@ -1149,7 +1151,7 @@ fn begin(
     )?;
     if let Some(room) = ctx.disk {
         let now = crate::application::unix_millis(ctx.clock.system_time());
-        check_disk_room(&*queue, &room, run.id(), now)?;
+        check_disk_room(&*queue, ctx.files, &room, &run, now)?;
     }
     // The call is the approval to land (ADR-0016 decision 5): a run it
     // parks as `needs_session` is landed by the supervisor once a resumed
@@ -1268,15 +1270,45 @@ fn approval_due(
     Ok(!approved)
 }
 
+/// Measure the landing candidate at its boundary (the supervisor uses its
+/// off-loop cache). Missing worktree or any unreadable part is unknown.
+fn landing_current(files: &dyn RunFiles, run: &TaskRun) -> Option<u64> {
+    if run.in_container() {
+        return None;
+    }
+    let mut bytes = files.tree_size(Path::new(run.worktree_path()?)).ok()??;
+    for path in [
+        Path::new(run.run_dir()?).join(super::RUN_TMP_DIR),
+        super::host_verification_tmp_path(run.id()),
+    ] {
+        bytes = bytes.saturating_add(files.tree_size(&path).ok()?.unwrap_or(0));
+    }
+    Some(bytes)
+}
+
 /// Refuse to land `run` while the free disk space is below what a
 /// landing's verification needs (task 638, ADR-t4473-1): the same need the
 /// supervisor holds its landings at, with the queue's running runs as the
 /// runs moving. A person is at hand, so the call fails instead of
 /// waiting; nothing is recorded. Unread free space checks nothing, as in
 /// the supervisor.
-fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId, now_millis: i64) -> Result<()> {
-    if let Some(short) = disk_short(queue, &room.config, room.free, room.total, None, now_millis)? {
-        bail!(disk_refusal(run, short));
+fn check_disk_room(
+    queue: &dyn Queue,
+    files: &dyn RunFiles,
+    room: &DiskRoom,
+    run: &TaskRun,
+    now_millis: i64,
+) -> Result<()> {
+    if let Some(short) = disk_short(
+        queue,
+        &room.config,
+        room.free,
+        room.total,
+        None,
+        now_millis,
+        (Some(run.id()), landing_current(files, run)),
+    )? {
+        bail!(disk_refusal(run.id(), short));
     }
     Ok(())
 }
@@ -1292,12 +1324,12 @@ fn disk_refusal(run: &RunId, short: DiskShort) -> String {
         .relaxed
         .map_or_else(String::new, |relaxed| format!("; {}", relaxed.message()));
     format!(
-        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the reserve of {}, [disk] reserve of dagq.toml as a share of the volume and at least {}, plus, while other runs move, what a run is expected to take from the sizes of the recent runs, {expected}{relaxed}); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the reserve of {}, [disk] reserve of dagq.toml as a share of the volume and at least {}, plus unused INTEGRATOR reservation from {expected}{relaxed}); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
         gib(short.free as f64),
         gib(short.need as f64),
         gib(short.reserve as f64),
         gib(crate::domain::disk::MIN_RESERVE_BYTES as f64),
-    )
+    ) + &format!("; {}", short.needs.message())
 }
 
 /// The free disk space below what a landing's verification needs: what
@@ -1311,6 +1343,7 @@ struct DiskShort {
     expected: Option<u64>,
     /// The relaxation of the needs it was reckoned under (ADR-t4727-1).
     relaxed: Option<crate::domain::disk::DiskRelaxed>,
+    needs: crate::domain::disk::DiskNeeds,
 }
 
 impl DiskShort {
@@ -1337,67 +1370,121 @@ fn disk_short<L: super::RunLog + ?Sized>(
     config: &DiskConfig,
     free: Option<u64>,
     total: Option<u64>,
-    moving: Option<usize>,
+    moving: Option<Vec<DiskRun>>,
     now_millis: i64,
+    candidate: (Option<&RunId>, Option<u64>),
 ) -> Result<Option<DiskShort>> {
     if free.is_none() {
         return Ok(None);
     }
+    let (candidate_id, current) = candidate;
     let samples = crate::application::recent_run_samples(queue)?;
     let kinds = crate::domain::disk::RELAX_KINDS.map(EventKind::as_str);
     let relaxed =
         crate::domain::disk::relax_state(queue.latest_queue_event(&kinds)?.as_ref(), now_millis)
             .in_effect();
-    let moving = match moving {
-        Some(moving) => moving,
+    let mut activity = moving.as_ref().map_or(0, Vec::len);
+    let runs = match moving {
+        Some(runs) => runs,
         None => {
-            let mut moving = 0;
+            let mut runs = Vec::new();
             for status in MOVING_STATUSES {
-                moving += queue.runs_with_status(status)?.len();
+                for run in queue.runs_with_status(status)? {
+                    if candidate_id == Some(run.id()) {
+                        continue;
+                    }
+                    let events = queue.run_events(run.id())?;
+                    let phase = crate::domain::run_phase::last_recorded(&events);
+                    let phase = phase
+                        .and_then(|p| crate::domain::run_phase::Phase::from_name(&p.phase))
+                        .unwrap_or_else(|| {
+                            crate::domain::run_phase::Phase::for_disk_status(status)
+                        });
+                    let usage = crate::domain::disk::disk_usage(phase, !run.in_container(), true);
+                    activity += usize::from(usage.active);
+                    let stage = usage.stage;
+                    runs.push(DiskRun {
+                        stage,
+                        current: None,
+                    });
+                }
             }
-            moving
+            runs
         }
     };
-    Ok(landing_short(
+    let mut short = landing_short(
         &DiskState {
             free,
             total: total.unwrap_or(0),
             expected: crate::domain::disk::run_expectation(config, &samples, now_millis),
-            moving,
-            remaining: 0,
+            integrator_expected: crate::domain::disk::landing_expectation(
+                config,
+                crate::domain::disk::run_expectation(config, &samples, now_millis),
+            ),
+            moving: activity,
+            runs,
+            landing_current: current,
             landing_waiting: false,
             relaxed,
         },
         config.reserve,
-    ))
+    );
+    if let Some(short) = short.as_mut() {
+        short.needs.estimate = config.estimate;
+        short.needs.sample_count =
+            crate::domain::disk::expected_run_estimate(&samples, now_millis).1;
+    }
+    Ok(short)
 }
 
-/// The statuses of the runs a person's `integrate` counts as moving: a
-/// worker's session or a verification under way. A run waiting for a
-/// person rests as `running` too and is counted, which errs toward
-/// needing more.
-const MOVING_STATUSES: [RunStatus; 4] = [
+/// Statuses that can have active work. Recorded phases separate worker,
+/// waiting and integrator reservations, and remove parked human/provider
+/// waits from the activity count; absent records conservatively count work.
+const MOVING_STATUSES: [RunStatus; 5] = [
     RunStatus::Claimed,
     RunStatus::Starting,
     RunStatus::Running,
     RunStatus::Validating,
+    RunStatus::Integrating,
 ];
 
 /// Whether the free bytes of `state` are short of what a landing's
 /// verification needs with the reserve `share`
 /// ([`DiskState::needs`]): `None` with room or no reading.
 fn landing_short(state: &DiskState, share: f64) -> Option<DiskShort> {
-    let needs = state.needs(share);
-    match state.free {
-        Some(free) if free < needs.landing => Some(DiskShort {
-            free,
-            need: needs.landing,
-            reserve: needs.reserve,
-            expected: needs.expected,
-            relaxed: needs.relaxed,
-        }),
-        _ => None,
+    let id = RunId::new("landing-candidate").expect("valid static id");
+    let result = state.decide(
+        share,
+        &[crate::domain::disk::LandingCandidate {
+            run: id.clone(),
+            current: state.landing_current,
+            integrating: false,
+            waiting: true,
+        }],
+        crate::domain::disk::DiskEstimate::Recent,
+        0,
+    );
+    landing_short_decision(&result, &id)
+}
+
+fn landing_short_decision(
+    result: &crate::domain::disk::DiskDecision,
+    run: &RunId,
+) -> Option<DiskShort> {
+    let landing = result.landing(run)?;
+    if landing.allowed {
+        return None;
     }
+    let mut needs = result.needs;
+    needs.landing = landing.needed;
+    Some(DiskShort {
+        free: result.free?,
+        need: landing.needed,
+        reserve: needs.reserve,
+        expected: needs.integrator_expected,
+        relaxed: needs.relaxed,
+        needs,
+    })
 }
 
 /// Land a run that holds the integration slot under `token` and record
@@ -2852,14 +2939,28 @@ fn land(
             if first_failure.class.is_environmental() {
                 let short = match retry_disk {
                     Some(room) if first_failure.class == verify_failure::FailureClass::DiskFull => {
-                        disk_short(
-                            &*queue,
-                            &room.config,
-                            (room.free)(),
-                            room.total,
-                            room.moving.map(|moving| moving()),
-                            crate::application::unix_millis(clock.system_time()),
-                        )?
+                        if let Some(read) = room.decision {
+                            let decision = read().context("no disk pass available for landing")?;
+                            landing_short_decision(&decision, run.id())
+                        } else {
+                            disk_short(
+                                &*queue,
+                                &room.config,
+                                (room.free)(),
+                                room.total,
+                                room.moving.map(|moving| {
+                                    vec![
+                                        DiskRun {
+                                            stage: DiskStage::Worker,
+                                            current: None
+                                        };
+                                        moving()
+                                    ]
+                                }),
+                                crate::application::unix_millis(clock.system_time()),
+                                (Some(run.id()), landing_current(files, run)),
+                            )?
+                        }
                     }
                     _ => None,
                 };
@@ -7317,8 +7418,16 @@ mod tests {
             free,
             total: 0,
             expected,
+            integrator_expected: expected,
+            runs: vec![
+                crate::domain::disk::DiskRun {
+                    stage: crate::domain::disk::DiskStage::Worker,
+                    current: None
+                };
+                moving
+            ],
             moving,
-            remaining: 0,
+            landing_current: None,
             landing_waiting: false,
             relaxed: None,
         };
@@ -7343,9 +7452,9 @@ mod tests {
         // With runs moving: the reserve and the expectation.
         let error = refusal(state(Some(12 * GIB), Some(8 * GIB), 2));
         assert!(error.contains("below the 13.0 GiB"), "{error}");
-        assert!(error.contains("recent runs, 8.0 GiB"), "{error}");
+        assert!(error.contains("reservation from 8.0 GiB"), "{error}");
         let error = refusal(state(Some(GIB), None, 2));
-        assert!(error.contains("recent runs, none yet"), "{error}");
+        assert!(error.contains("reservation from none yet"), "{error}");
         // Room, nothing moving, no reading.
         assert!(landing_short(&state(Some(13 * GIB), Some(8 * GIB), 2), share).is_none());
         assert!(landing_short(&state(Some(5 * GIB), Some(8 * GIB), 0), share).is_none());
@@ -7353,12 +7462,10 @@ mod tests {
         assert!(landing_short(&state(None, Some(8 * GIB), 2), share).is_none());
     }
 
-    /// The supervisor's retry of a command that failed on a full disk
-    /// gives the runs moving besides the landing and reads the samples of
-    /// the queue: with none besides it the reserve is enough, as at the
-    /// landing's start; with one, the reserve and the expectation.
+    /// Start and disk-full retry use the same landing requirement: reserve
+    /// alone with no other active run; otherwise the unused I, relaxed alike.
     #[test]
-    fn the_supervisors_retry_needs_what_the_landing_needed() {
+    fn the_supervisors_retry_uses_the_landings_progress_rule() {
         use crate::domain::{EventId, EventKind, RunId};
         const GIB: u64 = 1 << 30;
         let now = 1_793_664_000_000;
@@ -7375,9 +7482,24 @@ mod tests {
         }];
         let config = DiskConfig::default();
         let short = |free: u64, moving: usize| {
-            disk_short(&queue, &config, Some(free), None, Some(moving), now).unwrap()
+            disk_short(
+                &queue,
+                &config,
+                Some(free),
+                None,
+                Some(vec![
+                    DiskRun {
+                        stage: DiskStage::Worker,
+                        current: None
+                    };
+                    moving
+                ]),
+                now,
+                (None, None),
+            )
+            .unwrap()
         };
-        // The landing alone: the reserve.
+        // No other run active: the landing and its retry both need only reserve.
         assert!(short(5 * GIB, 0).is_none());
         assert_eq!(short(5 * GIB - 1, 0).map(|short| short.need), Some(5 * GIB));
         // Another run moving: the reserve and the expectation.
@@ -7412,6 +7534,34 @@ mod tests {
     #[test]
     fn human_integration_uses_the_fixed_expectation_and_relaxation_without_samples() {
         use crate::domain::disk::DiskEstimate;
+        for phase in [
+            "environment_placement",
+            "environment_image_pull",
+            "environment_preparation",
+            "environment_result_return",
+            "resume",
+            "revise",
+        ] {
+            assert_eq!(
+                crate::domain::disk::disk_usage(
+                    crate::domain::run_phase::Phase::from_name(phase).unwrap(),
+                    true,
+                    true
+                )
+                .stage,
+                DiskStage::Worker
+            );
+        }
+        assert_eq!(
+            crate::domain::disk::disk_usage(crate::domain::run_phase::Phase::Review, true, true)
+                .stage,
+            DiskStage::Waiting
+        );
+        assert_eq!(
+            crate::domain::disk::disk_usage(crate::domain::run_phase::Phase::Landing, true, true)
+                .stage,
+            DiskStage::Integrator
+        );
         const GIB: u64 = 1 << 30;
         let config = DiskConfig {
             estimate: DiskEstimate::Fixed,
@@ -7421,12 +7571,65 @@ mod tests {
         let queue = crate::application::port_fakes::SupervisorsAndEvents::default();
         let now = 1_793_664_000_000;
         let short = |free, moving| {
-            disk_short(&queue, &config, Some(free), None, Some(moving), now).unwrap()
+            disk_short(
+                &queue,
+                &config,
+                Some(free),
+                None,
+                Some(vec![
+                    DiskRun {
+                        stage: DiskStage::Worker,
+                        current: None
+                    };
+                    moving
+                ]),
+                now,
+                (None, None),
+            )
+            .unwrap()
         };
         assert!(short(25 * GIB, 1).is_none());
         let held = short(25 * GIB - 1, 1).unwrap();
         assert_eq!(held.need, 25 * GIB);
         assert_eq!(held.expected, Some(20 * GIB));
+        assert_eq!(held.needs.integrator_expected, Some(20 * GIB));
+        let separate = DiskConfig {
+            landing_size: Some(30 * GIB),
+            ..config
+        };
+        let measured = disk_short(
+            &queue,
+            &separate,
+            Some(21 * GIB - 1),
+            None,
+            Some(vec![DiskRun {
+                stage: DiskStage::Worker,
+                current: None,
+            }]),
+            now,
+            (None, Some(14 * GIB)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(measured.need, 21 * GIB);
+        assert_eq!(measured.needs.estimate, DiskEstimate::Fixed);
+        assert!(disk_refusal(&RunId::new("r").unwrap(), measured).contains("I 30.0 GiB"));
+        assert!(
+            disk_short(
+                &queue,
+                &separate,
+                Some(21 * GIB),
+                None,
+                Some(vec![DiskRun {
+                    stage: DiskStage::Worker,
+                    current: None
+                }]),
+                now,
+                (None, Some(14 * GIB))
+            )
+            .unwrap()
+            .is_none()
+        );
         assert!(short(5 * GIB, 0).is_none());
         queue.events.borrow_mut().push(RunEvent {
             id: crate::domain::EventId::new(1),
@@ -7452,6 +7655,7 @@ mod tests {
             reserve: 5 << 30,
             expected: Some(5 << 30),
             relaxed: None,
+            needs: crate::domain::disk::DiskNeeds::default(),
         };
         let Verdict::Held { reason, detail } = held(
             &run(Path::new(DIR)),

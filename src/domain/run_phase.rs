@@ -267,6 +267,62 @@ impl Phase {
         }
     }
 
+    /// Decode a recorded name; resource classification is `disk::disk_usage`.
+    /// Names omit the waiting/push slot flag, which decodes as false.
+    pub fn from_name(name: &str) -> Option<Self> {
+        use super::environment::EnvironmentWait as E;
+        Some(match name {
+            "provisioning" => Self::Provisioning,
+            "worker" => Self::Worker,
+            "validating" => Self::Validating,
+            "review" => Self::Review,
+            "review_held" => Self::ReviewHeld,
+            "revise" => Self::Revise,
+            "exiting" => Self::Exiting,
+            "resume" => Self::Resume,
+            "recovery" => Self::Recovery,
+            "waiting" => Self::Waiting { in_slot: false },
+            "verifying" => Self::Verifying,
+            "claim_answer" => Self::ClaimAnswer,
+            "claim_held" => Self::ClaimHeld,
+            "returning" => Self::Returning,
+            "awaiting_slot" => Self::AwaitingSlot,
+            "agent_eval" => Self::AgentEval,
+            "awaiting_e2e" => Self::AwaitingE2e,
+            "e2e" => Self::E2e,
+            "landing_queue" => Self::LandingQueue,
+            "landing" => Self::Landing,
+            "landing_answer" => Self::LandingAnswer,
+            "needs_session" => Self::NeedsSession,
+            "held" => Self::Held,
+            "push" => Self::Push { in_slot: false },
+            "push_pending" => Self::PushPending,
+            "ended" => Self::Ended,
+            "environment_placement" => Self::Environment(E::Placement),
+            "environment_image_pull" => Self::Environment(E::ImagePull),
+            "environment_preparation" => Self::Environment(E::Preparation),
+            "environment_result_return" => Self::Environment(E::ResultReturn),
+            _ => return None,
+        })
+    }
+
+    /// Conservative phase when a legacy run has no recorded phase.
+    pub fn for_disk_status(status: RunStatus) -> Self {
+        match status {
+            RunStatus::Claimed | RunStatus::Starting => Self::Provisioning,
+            RunStatus::Running => Self::Worker,
+            RunStatus::Validating => Self::Validating,
+            RunStatus::AwaitingIntegration => Self::AwaitingSlot,
+            RunStatus::Integrating => Self::Landing,
+            RunStatus::NeedsSession => Self::NeedsSession,
+            RunStatus::Integrated
+            | RunStatus::Succeeded
+            | RunStatus::Failed
+            | RunStatus::Interrupted
+            | RunStatus::Replaced => Self::Ended,
+        }
+    }
+
     /// The phase's tags.
     pub const fn tags(self) -> Tags {
         use Blocker as B;
@@ -669,6 +725,20 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), ALL.len() - 2);
+    }
+
+    /// Every recorded name must decode before a caller can classify its
+    /// disk usage; only slot flags, absent from names, are normalized.
+    #[test]
+    fn recorded_names_decode_every_phase() {
+        for phase in ALL {
+            let expected = match phase {
+                Phase::Waiting { .. } => Phase::Waiting { in_slot: false },
+                Phase::Push { .. } => Phase::Push { in_slot: false },
+                other => other,
+            };
+            assert_eq!(Phase::from_name(phase.name()), Some(expected), "{phase:?}");
+        }
     }
 
     #[test]
