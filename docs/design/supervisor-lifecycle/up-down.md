@@ -36,7 +36,8 @@ related:
 外部との境界はtrait越しに呼び、判定はfakeで、実launchdでの起動・状態・停止はe2eで確かめる（条件は`tests/e2e.rs`の冒頭のdoc comment）。
 
 queueの読み書きは呼び出し元のprincipalでqueue serviceの制御のstepとして送り、DBを開かず、届かなければそのerrorで失敗する。
-停止前の記録だけは失敗しても警告して止める（呼び出し元は最初のstepで通っている。[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
+停止前の運用の記録（event）だけは失敗しても警告して止める（呼び出し元は最初のstepで通っている。[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
+`up` / `down`の監査の記録の送り直しと失敗の扱いは、[Audit](../audit.md#流れ)の「管理の操作」の段落を参照する。
 
 ## 起動の入口と境界
 
