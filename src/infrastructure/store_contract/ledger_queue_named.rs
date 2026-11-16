@@ -11,11 +11,11 @@
 //! （Spike 4811）" "判定" (B) to (F)).
 use std::cell::Cell;
 
-use super::ContractStore;
 use super::ledger_earlier::{
     NOW, clear, differences, fill, history, kpi_questions, lay_down, run, time_query, whole_query,
 };
 use super::ledger_open::taken_over;
+use super::{Checks, ContractStore};
 use crate::application::kpi::{Host, of_window as kpi_of_window};
 use crate::application::stats::{StatsSources, of_window as stats_of_window};
 use crate::application::{LedgerWindowRead, RunFinish, WindowRead, ledger_window_in};
@@ -2148,10 +2148,19 @@ pub fn ledger_queue_named_goes_back_whole_of<S: ContractStore, F: Fn() -> Result
 pub fn ledger_queue_named_past_an_old_writer<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_queue_named_past_an_old_writer_of(open, Checks::Run)
+}
+
+/// [`ledger_queue_named_past_an_old_writer`] with its reads checked, or its
+/// writes alone (`checks`).
+pub(crate) fn ledger_queue_named_past_an_old_writer_of<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    checks: Checks,
+) -> Result<()> {
     let (first, a) = taken_over(open, None, "queue-named-1")?;
     let tx = first.write_entry("contract_queue_named_init")?;
     let laid = lay_down_named(&tx, &named_history(30))?;
-    reads_as(&tx, true)?;
+    checks.check(|| reads_as(&tx, true))?;
     let mark_of = |tx: &S::Write<'_>| -> Result<Vec<(Option<String>, Option<i64>)>> {
         Ok(tx.query_map(
             "SELECT through, generation FROM ledger_queue_views_filled",
@@ -2159,8 +2168,12 @@ pub fn ledger_queue_named_past_an_old_writer<S: ContractStore, F: Fn() -> Result
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
     };
-    let mark = mark_of(&tx)?;
-    let r = view::with_snapshot(&tx, |snapshot| snapshot.ledger_marks())?;
+    let before = checks.read(|| {
+        Ok((
+            mark_of(&tx)?,
+            view::with_snapshot(&tx, |snapshot| snapshot.ledger_marks())?,
+        ))
+    })?;
     S::commit(tx)?;
 
     let (older, b) = taken_over(open, Some(("queue-named-1", a)), "queue-named-old")?;
@@ -2199,24 +2212,28 @@ pub fn ledger_queue_named_past_an_old_writer<S: ContractStore, F: Fn() -> Result
     for row in rows.iter().filter(|row| row.kind == LedgerKind::Queue) {
         views::write_row_alone(&tx, row)?;
     }
-    ensure!(mark_of(&tx)? == mark, "the mark's row is as it was");
-    ensure!(
-        view::with_snapshot(&tx, |snapshot| snapshot.ledger_marks())? == r,
-        "R is as it was"
-    );
-    ensure!(
-        !views::usable(&tx)?,
-        "an older writer's generation leaves the mark behind"
-    );
-    reads_as(&tx, false)?;
+    if let Some((mark, r)) = before {
+        ensure!(mark_of(&tx)? == mark, "the mark's row is as it was");
+        ensure!(
+            view::with_snapshot(&tx, |snapshot| snapshot.ledger_marks())? == r,
+            "R is as it was"
+        );
+        ensure!(
+            !views::usable(&tx)?,
+            "an older writer's generation leaves the mark behind"
+        );
+        reads_as(&tx, false)?;
+    }
     S::commit(tx)?;
 
     let (current, c) = taken_over(open, Some(("queue-named-old", b)), "queue-named-current")?;
     let tx = current.write_entry("contract_queue_named_current")?;
-    reads_as(&tx, false)?;
+    checks.check(|| reads_as(&tx, false))?;
     fill_views(&tx)?;
-    ensure!(views::usable(&tx)?);
-    reads_as(&tx, true)?;
+    checks.check(|| {
+        ensure!(views::usable(&tx)?);
+        reads_as(&tx, true)
+    })?;
     views::clear_views(&tx)?;
     for e in &added.events {
         tx.execute(

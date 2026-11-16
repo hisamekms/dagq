@@ -7,7 +7,7 @@
 //! "読みの約束" 3 to 5).
 use std::collections::{BTreeSet, HashMap};
 
-use super::{ContractStore, ledger_open::taken_over};
+use super::{Checks, ContractStore, ledger_open::taken_over};
 use crate::application::kpi::{Host, of_window as kpi_of_window};
 use crate::application::stats::now_ms;
 use crate::domain::kpi::{KpiConfig, KpiQuery, Period, read_from_ms};
@@ -992,32 +992,53 @@ pub fn ledger_earlier_answers_as_every_row<S: ContractStore, F: Fn() -> Result<S
 pub fn ledger_earlier_past_an_old_writer<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_earlier_past_an_old_writer_of(open, Checks::Run)
+}
+
+/// [`ledger_earlier_past_an_old_writer`] with its reads checked, or its
+/// writes alone (`checks`).
+pub(crate) fn ledger_earlier_past_an_old_writer_of<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    checks: Checks,
+) -> Result<()> {
     let (first, a) = taken_over(open, None, "earlier-1")?;
     let tx = first.write_entry("contract_earlier_init")?;
     let laid = lay_down(&tx, &history(30, 0))?;
     let old = laid.old.clone();
-    ensure!(answers_as_every_row(&tx)? == ALL);
+    checks.check(|| {
+        ensure!(answers_as_every_row(&tx)? == ALL);
+        Ok(())
+    })?;
     S::commit(tx)?;
 
     let (older, b) = taken_over(open, Some(("earlier-1", a)), "earlier-old")?;
     let tx = older.write_entry("contract_earlier_old")?;
     view::write_row_alone(&tx, &old)?;
-    ensure!(!view::left_open(&tx)?.contains(&old.key));
     let none = view::Sought {
         runs: false,
         executions: false,
         ..ALL
     };
-    ensure!(answers_as_every_row(&tx)? == none);
+    checks.check(|| {
+        ensure!(!view::left_open(&tx)?.contains(&old.key));
+        ensure!(answers_as_every_row(&tx)? == none);
+        Ok(())
+    })?;
     S::commit(tx)?;
 
     let (current, c) = taken_over(open, Some(("earlier-old", b)), "earlier-current")?;
     let tx = current.write_entry("contract_earlier_current")?;
     view::write_row(&tx, &old)?;
-    ensure!(answers_as_every_row(&tx)? == none);
+    checks.check(|| {
+        ensure!(answers_as_every_row(&tx)? == none);
+        Ok(())
+    })?;
     fill(&tx)?;
-    ensure!(view::left_open(&tx)?.contains(&old.key));
-    ensure!(answers_as_every_row(&tx)? == ALL);
+    checks.check(|| {
+        ensure!(view::left_open(&tx)?.contains(&old.key));
+        ensure!(answers_as_every_row(&tx)? == ALL);
+        Ok(())
+    })?;
     clear(&tx, &laid)?;
     S::commit(tx)?;
     ensure!(current.release_write_leader("earlier-current", c)?);

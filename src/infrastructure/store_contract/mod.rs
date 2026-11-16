@@ -366,6 +366,51 @@ pub(crate) fn cases<S: ContractStore, F: Fn() -> Result<S>>() -> Vec<(&'static s
     ]
 }
 
+/// Whether a case checks what it reads (`Run`) or makes its writes alone
+/// (`WritesAlone`): the same writes in the same transactions and commits,
+/// the write leader taken over as the same holders, and none of the reads
+/// that only its checks use. A case of [`writes_alone`] runs so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Checks {
+    Run,
+    WritesAlone,
+}
+
+impl Checks {
+    /// `check`, which only reads and compares, when the checks run.
+    pub(crate) fn check(self, check: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.read(check).map(|_| ())
+    }
+
+    /// What `read`, which only reads, gives the checks, when they run.
+    pub(crate) fn read<T>(self, read: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
+        match self {
+            Self::Run => read().map(Some),
+            Self::WritesAlone => Ok(None),
+        }
+    }
+}
+
+/// The cases of [`run`] that commit what the cases after them meet and
+/// that no test may run apart (the cases past an older writer, whose
+/// writers take the write leader over and commit, moving its generation,
+/// the counters of the ids and the search's index), each with the same
+/// case of its writes alone ([`Checks::WritesAlone`]).
+pub(crate) fn writes_alone<S: ContractStore, F: Fn() -> Result<S>>() -> Vec<(&'static str, Case<F>)>
+{
+    vec![
+        ("ledger earlier past an old writer", |open| {
+            ledger_earlier::ledger_earlier_past_an_old_writer_of(open, Checks::WritesAlone)
+        }),
+        ("ledger queue named past an old writer", |open| {
+            ledger_queue_named::ledger_queue_named_past_an_old_writer_of(open, Checks::WritesAlone)
+        }),
+        ("ledger named queue past old writer", |open| {
+            ledger_queue_lives::ledger_queue_lives_past_an_old_writer_of(open, Checks::WritesAlone)
+        }),
+    ]
+}
+
 /// [`run`] in its order on one database, but each case named in `apart`
 /// runs only when it is `full`, and then must leave the database as it
 /// found it (`state`, the whole content of the database, the same before
@@ -375,24 +420,44 @@ pub(crate) fn cases<S: ContractStore, F: Fn() -> Result<S>>() -> Vec<(&'static s
 /// of each case of `apart` (`full`) and one of none (`full` of `None`, every
 /// case not apart), in parallel. Errors name the failing case, as [`run`]'s
 /// do, and a name of `apart` that is no case.
+///
+/// A case of [`writes_alone`] runs with its checks in the test of none and
+/// as its writes alone in the test of a case of `apart` after it: the
+/// database it leaves is the same of either, as its writes are, so that a
+/// case of `apart` meets what the whole of [`run`] gives it without the
+/// reads that the test of none checks once.
 pub(crate) fn run_apart<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
     apart: &[&str],
     full: Option<&str>,
     state: &dyn Fn() -> Result<String>,
 ) -> Result<()> {
-    sequence_apart(&cases::<S, F>(), apart, full, state, |case| case(open))
+    sequence_apart(
+        &cases::<S, F>(),
+        apart,
+        &writes_alone::<S, F>(),
+        full,
+        state,
+        |case| case(open),
+    )
 }
 
-/// [`run_apart`] of named `cases`, each run by `run`.
+/// [`run_apart`] of named `cases`, each run by `run`, and of the cases of
+/// `alone`, run in place of the cases of their names in the test of a case
+/// of `apart`.
 fn sequence_apart<T>(
     cases: &[(&str, T)],
     apart: &[&str],
+    alone: &[(&str, T)],
     full: Option<&str>,
     state: &dyn Fn() -> Result<String>,
     mut run: impl FnMut(&T) -> Result<()>,
 ) -> Result<()> {
-    for name in apart.iter().chain(full.iter()) {
+    for name in apart
+        .iter()
+        .chain(full.iter())
+        .chain(alone.iter().map(|(name, _)| name))
+    {
         anyhow::ensure!(
             cases.iter().any(|(case, _)| case == name),
             "store contract: no case {name}"
@@ -402,8 +467,18 @@ fn sequence_apart<T>(
         full.is_none_or(|full| apart.contains(&full)),
         "store contract: {full:?} is not apart"
     );
+    for (name, _) in alone {
+        anyhow::ensure!(
+            !apart.contains(name),
+            "store contract: {name} runs its writes alone and is apart"
+        );
+    }
     for (name, case) in cases {
         if !apart.contains(name) {
+            let case = match alone.iter().find(|(of, _)| of == name) {
+                Some((_, writes)) if full.is_some() => writes,
+                _ => case,
+            };
             run(case).with_context(|| format!("store contract: {name}"))?;
         } else if full == Some(*name) {
             let before = state()?;
@@ -590,14 +665,16 @@ mod tests {
     }
 
     /// The cases of `[("a", 1), ("b", 2), ("c", 3), ("d", 4)]` with "b"
-    /// and "d" apart, of `full`, against a database whose content is the
-    /// cases run that wrote (`writes`): what ran, or the error.
+    /// and "d" apart and "c" of its writes alone as 30, of `full`, against
+    /// a database whose content is the cases run that wrote (`writes`):
+    /// what ran, or the error.
     fn apart_of(full: Option<&str>, writes: &[i32]) -> Result<Vec<i32>> {
         let seen = std::cell::RefCell::new(Vec::new());
         let written = std::cell::RefCell::new(Vec::new());
         sequence_apart(
             &[("a", 1), ("b", 2), ("c", 3), ("d", 4)],
             &["b", "d"],
+            &[("c", 30)],
             full,
             &|| Ok(format!("{:?}", written.borrow())),
             |n| {
@@ -611,11 +688,13 @@ mod tests {
         .map(|()| seen.into_inner())
     }
 
+    /// The test of none runs a case of its writes alone in full, and the
+    /// test of a case apart after it its writes alone.
     #[test]
     fn the_cases_apart_run_alone_after_every_case_before_them() {
         assert_eq!(apart_of(None, &[]).unwrap(), [1, 3]);
         assert_eq!(apart_of(Some("b"), &[]).unwrap(), [1, 2]);
-        assert_eq!(apart_of(Some("d"), &[1, 3]).unwrap(), [1, 3, 4]);
+        assert_eq!(apart_of(Some("d"), &[1, 30]).unwrap(), [1, 30, 4]);
     }
 
     #[test]
@@ -630,22 +709,41 @@ mod tests {
 
     #[test]
     fn a_name_apart_that_is_no_case_fails_the_run() {
-        let run = |apart: &[&str], full| {
-            sequence_apart(&[("a", 1)], apart, full, &|| Ok(String::new()), |_| Ok(()))
+        let run = |apart: &[&str], alone: &[(&str, i32)], full| {
+            sequence_apart(
+                &[("a", 1)],
+                apart,
+                alone,
+                full,
+                &|| Ok(String::new()),
+                |_| Ok(()),
+            )
         };
         assert!(
-            run(&["z"], None)
+            run(&["z"], &[], None)
                 .unwrap_err()
                 .to_string()
                 .contains("no case z")
         );
         assert!(
-            run(&[], Some("a"))
+            run(&[], &[("z", 2)], None)
+                .unwrap_err()
+                .to_string()
+                .contains("no case z")
+        );
+        assert!(
+            run(&["a"], &[("a", 2)], None)
+                .unwrap_err()
+                .to_string()
+                .contains("runs its writes alone and is apart")
+        );
+        assert!(
+            run(&[], &[], Some("a"))
                 .unwrap_err()
                 .to_string()
                 .contains("not apart")
         );
-        assert!(run(&["a"], Some("a")).is_ok());
+        assert!(run(&["a"], &[], Some("a")).is_ok());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Queue seeks and their fallback, on the same adapter contract on both stores.
-use super::ContractStore;
 use super::ledger_earlier::{self as fixture, clear, history};
 use super::ledger_range::counted_window;
+use super::{Checks, ContractStore};
 use crate::domain::ledger::testkit::{DAY, Log, READ_AT_DAY, T0};
 use crate::infrastructure::runtime_store::ledger_open_in as view;
 use crate::infrastructure::runtime_store::ledger_views_in as views;
@@ -561,6 +561,15 @@ pub(crate) fn ledger_queue_lives_with<S: ContractStore, F: Fn() -> Result<S>>(
 pub fn ledger_queue_lives_past_an_old_writer<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_queue_lives_past_an_old_writer_of(open, Checks::Run)
+}
+
+/// [`ledger_queue_lives_past_an_old_writer`] with its reads checked, or its
+/// writes alone (`checks`).
+pub(crate) fn ledger_queue_lives_past_an_old_writer_of<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    checks: Checks,
+) -> Result<()> {
     use super::ledger_open::taken_over;
     use crate::domain::ledger::{LedgerKind, build};
     use crate::domain::{EventId, RunEvent};
@@ -568,13 +577,17 @@ pub fn ledger_queue_lives_past_an_old_writer<S: ContractStore, F: Fn() -> Result
     let tx = first.write_entry("contract_queue_lives_first")?;
     let mut laid = lay_down(&tx, &log(30, true, true))?;
     fill(&tx)?;
-    answers_with(&tx, false)?;
-    let marks = views::marks(&tx)?;
-    let saved: (Option<String>, Option<i64>) = tx.query_row(
-        "SELECT through, generation FROM ledger_queue_views_filled",
-        sql_params![],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let mark_of = |tx: &S::Write<'_>| -> Result<(Option<String>, Option<i64>)> {
+        Ok(tx.query_row(
+            "SELECT through, generation FROM ledger_queue_views_filled",
+            sql_params![],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    };
+    let before = checks.read(|| {
+        answers_with(&tx, false)?;
+        Ok((views::marks(&tx)?, mark_of(&tx)?))
+    })?;
     S::commit(tx)?;
     let (old, b) = taken_over(open, Some(("queue-named-new", a)), "queue-named-old")?;
     let tx = old.write_entry("contract_queue_lives_old")?;
@@ -624,18 +637,18 @@ pub fn ledger_queue_lives_past_an_old_writer<S: ContractStore, F: Fn() -> Result
     for row in rows.iter().filter(|r| r.kind == LedgerKind::Queue) {
         views::write_row_alone(&tx, row)?;
     }
-    ensure!(views::marks(&tx)? == marks, "old writer left R unchanged");
-    let after: (Option<String>, Option<i64>) = tx.query_row(
-        "SELECT through, generation FROM ledger_queue_views_filled",
-        sql_params![],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    ensure!(saved == after, "old writer left view mark unchanged");
-    view::with_snapshot(&tx, |s| {
-        ensure!(!s.reads_named_queue()?);
-        Ok(())
-    })?;
-    answers_with(&tx, false)?;
+    if let Some((marks, saved)) = before {
+        ensure!(views::marks(&tx)? == marks, "old writer left R unchanged");
+        ensure!(
+            saved == mark_of(&tx)?,
+            "old writer left view mark unchanged"
+        );
+        view::with_snapshot(&tx, |s| {
+            ensure!(!s.reads_named_queue()?);
+            Ok(())
+        })?;
+        answers_with(&tx, false)?;
+    }
     S::commit(tx)?;
     let (next, c) = taken_over(open, Some(("queue-named-old", b)), "queue-named-refill")?;
     let tx = next.write_entry("contract_queue_lives_refill")?;
@@ -645,26 +658,29 @@ pub fn ledger_queue_lives_past_an_old_writer<S: ContractStore, F: Fn() -> Result
     )?;
     fixture::fill(&tx)?;
     fill(&tx)?;
-    view::with_snapshot(&tx, |s| {
-        ensure!(s.reads_named_queue()?);
+    checks.check(|| {
+        view::with_snapshot(&tx, |s| {
+            ensure!(s.reads_named_queue()?);
+            Ok(())
+        })?;
+        answers_with(&tx, false)?;
+        // The older writer's backdated ids move time cursors beyond earlier
+        // applications, so compare the full JSON without assuming nonempty
+        // period samples. The named snapshots and open asks must still be in
+        // the actual range read after the view is filled again.
+        let window = view::window(
+            &tx,
+            &fixture::time_query(&crate::domain::kpi::KpiQuery::default()),
+        )?;
+        for event in additions.iter().skip(1) {
+            ensure!(
+                window.events().iter().any(|e| e.id == event.id),
+                "named old-writer event {} was not read",
+                event.id
+            );
+        }
         Ok(())
     })?;
-    answers_with(&tx, false)?;
-    // The older writer's backdated ids move time cursors beyond earlier
-    // applications, so compare the full JSON without assuming nonempty
-    // period samples. The named snapshots and open asks must still be in
-    // the actual range read after the view is filled again.
-    let window = view::window(
-        &tx,
-        &fixture::time_query(&crate::domain::kpi::KpiQuery::default()),
-    )?;
-    for event in additions.iter().skip(1) {
-        ensure!(
-            window.events().iter().any(|e| e.id == event.id),
-            "named old-writer event {} was not read",
-            event.id
-        );
-    }
     laid.log.events.extend(additions);
     clear(&tx, &laid)?;
     reset(&tx)?;

@@ -1,0 +1,181 @@
+# The lib tests of task 5009 over the --lib time gate's threshold (5 s,
+# ADR-t4948-1), each with the boundary it keeps: the tests of
+# src/infrastructure/sqlite.rs, mod
+# store_contract_tests::all_cases_run_in_order_on_the_same_database. The
+# seconds above an item are of the worker's run of that mod alone
+# (`cargo nextest run --lib` filtered by its name, 6 tests at a time, load
+# average about 20, 2026-11-16).
+
+# 22.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_keeps_an_old_snapshot"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 33.5s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_forecast_through_kpi"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 48.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_tables"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 49.4s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_mark"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 50.1s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_marks_of_the_rows"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 50.5s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_summary_without_its_record"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 53.0s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_record_without_main_by_time"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 58.6s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_earlier_answers_as_every_row"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 60.0s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_record_without_ci_by_time"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 61.3s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_with_only_ci_after_a_future_main_event"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 64.3s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_of_no_generation"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 75.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_of_another_generation"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 77.1s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::kpi_compare_groups_read_by_their_range"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 77.9s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_filled_part_way"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 78.0s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_a_life_of_each_unit"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 103.3s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_lives_shared_by_the_units"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 103.9s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_the_clocks_in_the_range"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 105.1s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_ci_alone_after_a_future_main_event"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 107.9s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_answers_as_every_row"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 108.0s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::the_cases_not_apart"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の apart でない case を同じ DB に順に流し、前の case の残す行がある上で各 case が単独と同じ答えを返すこと。古い writer の後の 3 つの case を検査つきで流す量が要る"
+task = 5009
+
+# 117.1s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_past_a_clock_set_back"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 120.0s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_answers_as_every_row"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 123.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_range_answers_as_every_row"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 123.7s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_the_range_s_clocks"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 129.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_a_named_task_s_history"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 134.1s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_a_clock_set_back"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 140.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_keeps_an_old_snapshot"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 149.6s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_a_target_s_ends"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009
+
+# 167.2s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_answers_as_every_row"
+reason = "境界（store の契約、ADR-t3986-1 決定10）: store_contract::run の順で同じ DB に前の case の残す行がある上で、この case が単独と同じ答えを返し、DB の中身を変えないこと。この case の全件の比べと、前に流す case（古い writer の後の 3 つは書き込みだけ）の量が要る"
+task = 5009

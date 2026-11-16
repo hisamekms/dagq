@@ -3517,15 +3517,18 @@ mod store_contract_tests {
     /// `store_contract::run` in its order on the same database, as the
     /// Postgres example runs it: each case meets the rows the cases before
     /// it leave, and answers as alone. The cases named in `apart!` (the
-    /// heavy ones whose writes roll back; the ones past an old writer
-    /// commit and leave rows, and run in every test after them) run each
-    /// in a test of its own,
+    /// heavy ones whose writes roll back) run each in a test of its own,
     /// after every case before it, and are checked to leave the database's
     /// whole content ([`content`]) as they found it, so that the test of the
     /// other cases (`the_cases_not_apart`) and the tests after them meet
     /// what `run` gives them ([`store_contract::run_apart`]); the tests run
-    /// in parallel. Each case runs in full: its units and checks are its
-    /// own test's and Postgres's.
+    /// in parallel. The ones past an old writer commit and leave rows, so
+    /// that no test runs them apart: they run with their checks in
+    /// `the_cases_not_apart`, and as their writes alone in the tests of the
+    /// cases of `apart!` after them ([`store_contract::writes_alone`]),
+    /// which so meet the database `run` gives them. Each case runs in full
+    /// in one test of the mod: its units and checks are its own test's and
+    /// Postgres's.
     mod all_cases_run_in_order_on_the_same_database {
         use super::*;
 
