@@ -27,6 +27,7 @@ use crate::domain::{
     disk::{
         DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskRelaxed, DiskState, RELAX_KINDS,
         RelaxState, RunSample, expected_run_estimate, gib, relax_state, run_expectation,
+        size_exceeded_expected,
     },
 };
 
@@ -67,6 +68,9 @@ impl DiskMoves {
 pub(in crate::application::supervise) struct DiskWatch {
     /// The recent runs' samples and when they were read.
     samples: Option<(Instant, Vec<RunSample>)>,
+    /// Successful exceedance observations for this supervisor process.
+    /// Retained across waits/resumes; restart allows one further event.
+    exceeded: std::collections::HashSet<RunId>,
     /// What this pass read of the disk: what a claim and a landing need.
     pub(super) needs: DiskNeeds,
     /// How many new runs this pass may claim ([`DiskState::claims`]);
@@ -195,6 +199,25 @@ impl HostOpsState {
         let (remaining, measured, unmeasured) = self
             .moving_sizes
             .remaining_with_counts(moving, expected, now);
+        for (run_id, size) in self.moving_sizes.trusted_sizes(moving, now) {
+            if let Some((bytes, expected)) =
+                size_exceeded_expected(size, expected, self.disk.exceeded.contains(&run_id))
+            {
+                let task_id = env.queue.run(&run_id)?.task_id();
+                env.queue.record_runtime_event(
+                    &run_id,
+                    EventKind::RunSizeExceededExpected,
+                    serde_json::json!({
+                        "run_id": run_id,
+                        "task_id": task_id,
+                        "bytes": bytes,
+                        "expected": expected,
+                        "estimate": self.disk_config.estimate,
+                    }),
+                )?;
+                self.disk.exceeded.insert(run_id);
+            }
+        }
         self.moving_sizes
             .pass(moving, &self.measure_tree, &env.generators.clock, now);
         let state = DiskState {

@@ -181,18 +181,17 @@ impl MovingSizes {
         self.remaining_with_counts(moving, expected, now).0
     }
 
-    /// Remaining bytes and the counts using trusted sizes or the whole expectation.
-    pub(in crate::application::supervise) fn remaining_with_counts(
+    /// Sizes trusted by the loop for this pass, with each run's identity.
+    /// Neither remaining-space arithmetic nor exceedance recording may
+    /// consume a failed, stale or different target's measurement.
+    pub(in crate::application::supervise) fn trusted_sizes(
         &self,
         moving: &[MovingTarget],
-        expected: Option<u64>,
         now: Instant,
-    ) -> (u64, usize, usize) {
+    ) -> Vec<(RunId, Option<u64>)> {
         let measured = lock(&self.measured);
         let interval = Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
-        let mut trusted = 0;
-        let mut unmeasured = 0;
-        let sizes: Vec<_> = moving
+        moving
             .iter()
             .map(|target| {
                 let measure = measured.get(&target.run).map(|measured| SizeMeasure {
@@ -200,7 +199,24 @@ impl MovingSizes {
                     age: now.saturating_duration_since(measured.at),
                     same_target: measured.target == *target,
                 });
-                let size = trusted_size(measure.as_ref(), interval);
+                (target.run.clone(), trusted_size(measure.as_ref(), interval))
+            })
+            .collect()
+    }
+
+    /// Remaining bytes and the counts using trusted sizes or the whole expectation.
+    pub(in crate::application::supervise) fn remaining_with_counts(
+        &self,
+        moving: &[MovingTarget],
+        expected: Option<u64>,
+        now: Instant,
+    ) -> (u64, usize, usize) {
+        let mut trusted = 0;
+        let mut unmeasured = 0;
+        let sizes: Vec<_> = self
+            .trusted_sizes(moving, now)
+            .into_iter()
+            .map(|(_, size)| {
                 if size.is_some() {
                     trusted += 1;
                 } else {

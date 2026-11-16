@@ -653,6 +653,25 @@ pub fn trusted_size(measure: Option<&SizeMeasure>, interval: std::time::Duration
         .flatten()
 }
 
+/// Whether to record `run_size_exceeded_expected` for a moving run.
+/// `bytes` must be its trusted current size from [`trusted_size`], never
+/// the zero used for an unmeasured run's remaining-space arithmetic.
+/// No expectation or no trusted size produces no observation; equality
+/// does not exceed it. The returned pair is (measured bytes, expectation).
+/// The caller remembers successful records for the entire supervisor
+/// process, even across waits/resumes, and sets `recorded` accordingly.
+/// Restart clears that memory and permits one further record per run;
+/// no event-history read is required on the loop. Expectations are the
+/// configured fixed or recent estimate before temporary disk relaxation.
+pub fn size_exceeded_expected(
+    bytes: Option<u64>,
+    expected: Option<u64>,
+    recorded: bool,
+) -> Option<(u64, u64)> {
+    let (bytes, expected) = (bytes?, expected?);
+    (!recorded && bytes > expected).then_some((bytes, expected))
+}
+
 /// What the moving runs are expected to take yet, together
 /// ([`DiskState::remaining`]): for each, the expectation less its size now
 /// ([`trusted_size`]; `None` counts as 0), or 0 for a run past it. With no
@@ -2170,5 +2189,49 @@ mod tests {
             .map(|p| p.pid)
             .collect();
         assert_eq!(stopped, [50, 40, 30, 60, 61]);
+    }
+
+    #[test]
+    fn exceeding_an_expectation_records_only_the_first_trusted_observation() {
+        let gib = 1 << 30;
+        let expected = Some(20 * gib); // Fixed 20 GiB, independent of samples.
+        assert_eq!(
+            size_exceeded_expected(Some(19 * gib), expected, false),
+            None
+        );
+        assert_eq!(
+            size_exceeded_expected(Some(20 * gib), expected, false),
+            None
+        );
+        assert_eq!(
+            size_exceeded_expected(Some(21 * gib), expected, false),
+            Some((21 * gib, 20 * gib))
+        );
+        assert_eq!(size_exceeded_expected(Some(25 * gib), expected, true), None);
+        assert_eq!(size_exceeded_expected(Some(21 * gib), None, false), None);
+        let interval = std::time::Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
+        for measure in [
+            None,
+            Some(SizeMeasure {
+                bytes: None,
+                age: interval,
+                same_target: true,
+            }),
+            Some(SizeMeasure {
+                bytes: Some(21 * gib),
+                age: interval * MOVING_SIZE_STALE_INTERVALS + std::time::Duration::from_secs(1),
+                same_target: true,
+            }),
+            Some(SizeMeasure {
+                bytes: Some(21 * gib),
+                age: interval,
+                same_target: false,
+            }),
+        ] {
+            assert_eq!(
+                size_exceeded_expected(trusted_size(measure.as_ref(), interval), expected, false),
+                None
+            );
+        }
     }
 }

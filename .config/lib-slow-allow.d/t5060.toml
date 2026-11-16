@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_moving_run_exceeding_the_fixed_expectation_is_recorded_once"
+reason = "境界: 起動時の固定方式と loop 外の計測が実際の supervisor・queue service を通り SQLite の run event に届き、複数 pass でも1件だけ残ることを確かめる。判断の case は domain::disk の unit test に分離済みで、この配線は最小の1 task・1 run、1ms の待ち間隔を使うが、実際の service と memdb の初期化、保留した worker と supervisor の終了までを含むため1秒を超える。"
+task = 5060

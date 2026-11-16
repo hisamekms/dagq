@@ -97,8 +97,6 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ## 空き容量
 
-supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイルシステムの空きを確かめ、足りなければclaimと着地を控えて掃除し、それでも足りないときだけinboxに1件知らせる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44）。
-
 ### 閾値
 
 控えのlogとeventは必要量の内訳を持ち、掃除を待つ間のeventのない控えも同じ内訳をlogに残す。
@@ -109,6 +107,8 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 動いているrun（`check_disk`の`in_flight`）が0本なら最低ラインだけを要り、0本で着地待ちがあれば着地が先に始まり、claimは控えのeventなしにそのpassを待つ。
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
 - 動いているrunの残りの見込みは想定から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いた和で、信頼できない値（量れない・古い・別のrun）は想定のまま数える。
+- 動いているrunの信頼できる今の大きさが想定を初めて超えたとき、runごとに1回eventを残す（supervisorの再起動後は再度1回を許す）。
+- 記録するかの判断の入口は`domain::disk::size_exceeded_expected`。
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。
 - 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。

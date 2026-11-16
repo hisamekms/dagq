@@ -21,7 +21,8 @@
 //! - planning: `task_*`, `dependency_*`, `goal_*`, `proposal_*`, `plan_*`,
 //!   `planner_*`, `draft_*`, `follow_up_*`, `request_*`, `replan_*` and
 //!   `finding_planner_*`.
-//! - execution and landing: `run_*` (but `run_tmp_removed`), `lease_*`,
+//! - execution and landing: `run_*` (but `run_tmp_removed` and
+//!   `run_size_exceeded_expected`), `lease_*`,
 //!   `claim_*`, `worktree_*`, `workspace_*`, `wrapper_*`, `session_*`,
 //!   `turn_*`, `review_*`, `revise_*`, `resume_*`, `triage_*`,
 //!   `recovery_*`, `integration_*`, `landing_*`, `conflict_*`,
@@ -59,6 +60,7 @@
 //!   full), `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `incremental_sessions_removed`,
 //!   `build_cache_removed`, `scratchpad_removed` and `run_tmp_removed`,
+//!   the disk observation `run_size_exceeded_expected`,
 //!   `backend_call_failed`, `disk_relax*` (the relaxation of the disk's
 //!   needs, ADR-t4727-1), `headless_job_stopped` and
 //!   `provider_executable_relocated` (named in full: the start of an AI
@@ -70,11 +72,11 @@
 //! not know (decision 21, ADR-t2125-1).
 
 macro_rules! event_kinds {
-    ($($variant:ident => $name:literal,)*) => {
+    ($($(#[$meta:meta])* $variant:ident => $name:literal,)*) => {
         /// A kind of `run_events` the write port writes.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum EventKind {
-            $($variant,)*
+            $($(#[$meta])* $variant,)*
         }
 
         impl EventKind {
@@ -444,6 +446,16 @@ event_kinds! {
     RunSatisfiedReviewStarted => "run_satisfied_review_started",
     RunSatisfiedSnapshot => "run_satisfied_snapshot",
     RunSatisfiedVerified => "run_satisfied_verified",
+    /// `run_size_exceeded_expected`: a moving run's trusted size first
+    /// exceeds its expectation in this supervisor process. Payload:
+    /// `run_id`, the measured run; `task_id`, its task; `bytes`, its
+    /// measured worktree and TMPDIR bytes at this observation; `expected`,
+    /// the unrelaxed expectation in bytes then; `estimate`, `recent` or
+    /// `fixed`, the configured method. This is a crossing observation,
+    /// not a peak. Recorded once per run per supervisor process, including
+    /// when a run leaves and reenters the moving set. After restart one
+    /// further record for that run is allowed; history is not queried.
+    RunSizeExceededExpected => "run_size_exceeded_expected",
     RunSlotRegained => "run_slot_regained",
     RunTmpRemoved => "run_tmp_removed",
     RunUnfinishedChanged => "run_unfinished_changed",
@@ -2096,6 +2108,10 @@ mod tests {
             ),
             (EventKind::RunSatisfiedSnapshot, "run_satisfied_snapshot"),
             (EventKind::RunSatisfiedVerified, "run_satisfied_verified"),
+            (
+                EventKind::RunSizeExceededExpected,
+                "run_size_exceeded_expected",
+            ),
             (EventKind::RunSlotRegained, "run_slot_regained"),
             (EventKind::RunTmpRemoved, "run_tmp_removed"),
             (EventKind::RunUnfinishedChanged, "run_unfinished_changed"),

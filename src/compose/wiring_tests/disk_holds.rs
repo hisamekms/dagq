@@ -166,6 +166,88 @@ fn fixed_disk_configuration_reaches_the_supervisors_hold_without_samples() {
     assert!(queue.show(task).unwrap().runs.is_empty());
 }
 
+/// Startup's fixed estimate and the off-loop measurement reach the event
+/// writer on a moving pass. Further passes write nothing more for this
+/// run in the same supervisor process.
+#[test]
+fn a_moving_run_exceeding_the_fixed_expectation_is_recorded_once() {
+    let mut wiring = Wiring::new(
+        "a_moving_run_exceeding_the_fixed_expectation_is_recorded_once",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![verdict("pass", "meets the acceptance")],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1))
+    .with_repository_startup_file(std::sync::Arc::new(|| {
+        let config = crate::infrastructure::run_env::parse_config(
+            "[disk]\nestimate = \"fixed\"\nrun_size = \"20GiB\"\n",
+        )?;
+        Ok(
+            crate::application::supervise::repository_config::StartupRules {
+                stall: config.stall,
+                disk: config.disk,
+                resume: config.resume,
+                review_jobs: config.review_jobs,
+            },
+        )
+    }));
+    wiring.free.store(ROOM, Ordering::SeqCst);
+    // Only the worktree contributes; neither TMPDIR exists in this probe.
+    wiring.moving_sizes = std::sync::Arc::new(move |path: &std::path::Path| {
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("worktree"))
+        {
+            Ok(Some(21 * GIB))
+        } else {
+            Ok(None)
+        }
+    });
+    let (release, released) = std::sync::mpsc::channel();
+    wiring.agent.hold_next_turn(released);
+    let task = wiring.ready_task(&[]);
+    let mut observed_pass = None;
+    let mut released = false;
+    wiring.supervise_once_while_stoppable(|queue, stop| {
+        let events = queue_payloads(queue, "run_size_exceeded_expected");
+        if events.is_empty() {
+            return false;
+        }
+        assert_eq!(events.len(), 1);
+        if released {
+            if queue.show(task).unwrap().runs[0].status() == RunStatus::Integrated {
+                stop();
+                return true;
+            }
+            return false;
+        }
+        assert!(running(queue, task));
+        let pass = *observed_pass.get_or_insert(wiring.passes());
+        if wiring.passes() < pass + 5 {
+            return false;
+        }
+        release.send(()).unwrap();
+        released = true;
+        false
+    });
+    assert!(observed_pass.is_some());
+    let mut queue = wiring.queue();
+    let detail = queue.show(task).unwrap();
+    let events = queue_payloads(&queue, "run_size_exceeded_expected");
+    assert_eq!(
+        events,
+        vec![serde_json::json!({
+            "run_id": detail.runs[0].id(),
+            "task_id": task,
+            "bytes": 21 * GIB,
+            "expected": 20 * GIB,
+            "estimate": "fixed",
+        })]
+    );
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+}
+
 /// The disk's hold a supervisor recorded reaches `status` as its
 /// `claim_hold` (the need's breakdown with it) while that supervisor runs,
 /// and, once it has stood 30 minutes with a ready task to claim, the
