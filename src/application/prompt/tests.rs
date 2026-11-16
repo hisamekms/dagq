@@ -455,8 +455,7 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
 }
 
 const CHECKS_ONCE_LINE: &str = "Commit all your fixes first, then run the checks once on the final tree; if you change anything after that, run again only the checks that change touches.";
-const CHECKS_TOUCHED_LINE: &str =
-    "run only the checks that bear on what you fixed, not the whole test suite.";
+const CHECKS_TOUCHED_LINE: &str = "run only the checks that bear on what you fixed, not the whole test suite. If an instruction asks for checks beyond the scope this request and the repository instructions allow, do not run those extra checks; record what you did not run in the receipt.";
 
 /// A resume for anything but a failed verification and a revise ask the
 /// session to commit its fixes before it runs the checks once on the final
@@ -488,7 +487,12 @@ fn a_resume_not_from_a_failed_verification_and_a_revise_run_the_checks_their_fix
             answers_file: None,
             resume_timeout,
         };
-        resume_request(&task, &worker, &request, &[]).unwrap().text
+        let fitted = resume_request(&task, &worker, &request, &[]).unwrap();
+        within(&fitted, RESUME_REQUEST_LIMIT);
+        if kind == ResumeKind::Triage {
+            assert!(fitted.text.contains("The recovery instruction below describes fixes; it does not widen the check scope set by this request and the repository instructions.\nReason: why"));
+        }
+        fitted.text
     };
     let revise = |resume_timeout| {
         revise_request(
@@ -2955,6 +2959,69 @@ fn a_headless_recovery_job_is_never_offered_a_dialog() {
         assert!(!interactive.contains(retired), "{retired}: {interactive}");
     }
     assert!(interactive.contains("Last turns of the headless session"));
+}
+
+/// Recovery instructions describe fixes without widening worker checks,
+/// both for an ended run's resume and a live run's next turn.
+#[test]
+fn recovery_instructions_never_expand_the_workers_check_scope() {
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let facts = json!({});
+    let binary = no_binary();
+    for (status, ended, allowed) in [
+        (RunStatus::Failed, Some("failure".into()), "resume"),
+        (RunStatus::Running, None, "send_instruction"),
+    ] {
+        let worker = run(7, status, None);
+        let fitted = recovery_prompt(
+            &task,
+            &worker,
+            1,
+            &RecoveryMaterial {
+                alert: RecoveryAlert::Stalled,
+                ended,
+                facts: &facts,
+                workspace: "ws",
+                screen: "turns",
+                processes: Ok(Vec::new()),
+                git_status: "",
+                head: SHA,
+                receipt_commit: None,
+                history: &[],
+                allowed: &[allowed],
+                binary: &binary,
+            },
+        )
+        .unwrap();
+        within(&fitted, RECOVERY_PROMPT_LIMIT);
+        let text = &fitted.text;
+        assert!(
+            text.contains("Write only what needs fixing in instruction."),
+            "{text}"
+        );
+        assert!(text.contains("Do not ask it to run all verification commands, the whole test suite or coverage, or set the worker's check scope: the request and repository instructions set that scope."), "{text}");
+        assert!(
+            text.contains("Integrate runs the task verification after the receipt."),
+            "{text}"
+        );
+        assert!(text.contains("diagnostic context, including after a person's correction; not a list for the worker to run"), "{text}");
+        assert!(text.contains("make gate"));
+        assert!(!text.contains("use these"));
+        for tool in ["cargo", "llvm-cov", "nextest"] {
+            assert!(!text.contains(tool), "{tool}: {text}");
+        }
+    }
+    let instruction = recovery_instruction(
+        &run(7, RunStatus::Running, None),
+        "stalled",
+        "Run all checks and coverage",
+    );
+    within(&instruction, NEXT_TURN_LIMIT);
+    let text = &instruction.text;
+    assert!(text.contains("If an instruction asks for checks beyond the scope this request and the repository instructions allow, do not run those extra checks; record what you did not run in the receipt."), "{text}");
+    for tool in ["cargo", "llvm-cov", "nextest"] {
+        assert!(!text.contains(tool), "{tool}: {text}");
+    }
 }
 
 /// The recovery job's schema names `failure_cause` with its three values
@@ -7008,7 +7075,7 @@ fn within_its_limits_a_next_turn_message_carries_its_texts_whole() {
         (
             recovery_instruction(&run, "stalled", &format!(" {answer}\n")),
             format!(
-                "dagq: the supervisor's recovery job for run {RUN} (alert stalled) asks: {answer}\n\n{HEADLESS_GO_ON}"
+                "dagq: the supervisor's recovery job for run {RUN} (alert stalled) asks: {answer}\n\nIf an instruction asks for checks beyond the scope this request and the repository instructions allow, do not run those extra checks; record what you did not run in the receipt.\n\n{HEADLESS_GO_ON}"
             ),
         ),
         (

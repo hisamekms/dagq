@@ -51,6 +51,7 @@ promptの資料と収め方は `prompt::recovery_prompt` のdoc comment、固定
 commitのあるrunを最初からやり直すのは成果の破棄なので、自動では適用しない。
 引き継ぐcommitの読み方は `Supervisor::own_commits`、登録の壊れたhost worktreeの判定は `run_git::host_head`、containerの事実の読み直しは [Container runtime](../container-runtime.md#git) が入口になる。
 
+resumeのinstructionは直す中身を伝え、依頼とrepositoryの指示が決めるworkerの検証範囲を広げない。
 resumeは適用のtransactionでも再検査し、後のrunがあれば戻さない（`domain::telemetry::run_revivable`）。
 終わったrunの未送信の計測をsweepが消すので、戻すとsessionの番号を数え直すという落とし穴がある（[計測](../measurement.md#送る口)）。
 resumeの試行回数と新しいsessionへの引き継ぎは [needs_session](needs-session.md#needs_session) と共有する。

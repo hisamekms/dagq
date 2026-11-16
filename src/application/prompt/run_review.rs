@@ -580,11 +580,14 @@ pub struct RecoveryMaterial<'a> {
 
 /// What each allowed action does, for the recovery prompt of a worker
 /// run: an instruction is the prompt of the session's next turn (every
-/// worker run is headless since task 1437).
+/// worker run is headless since task 1437). Instructions describe fixes,
+/// never widen the check scope the request and repository instructions set
+/// or ask for all verification, the whole suite or coverage. The task
+/// verification belongs to integrate after the receipt.
 pub(super) fn recovery_action_help(action: &str) -> &'static str {
     match action {
         "send_instruction" => {
-            "{\"action\": \"send_instruction\", \"instruction\": string}: send this instruction once, as the prompt of the session's next turn (a resume of the same session; its previous turn has ended), for example to rerun the tests in the foreground, commit and write the receipt."
+            "{\"action\": \"send_instruction\", \"instruction\": string}: send this instruction once, as the prompt of the session's next turn (a resume of the same session; its previous turn has ended), for example to fix the work, commit and write the receipt. Write only what needs fixing in instruction. Do not ask it to run all verification commands, the whole test suite or coverage, or set the worker's check scope: the request and repository instructions set that scope. Integrate runs the task verification after the receipt."
         }
         "stop_processes" => {
             "{\"action\": \"stop_processes\", \"pids\": [pid, ...]}: stop these processes (SIGTERM, then SIGKILL after a grace). Only processes listed below as the run's own are allowed; any other pid makes the whole verdict an escalation. Use it for a background process the session waits for that will not end by itself (an orphan holding a pipe, a hung test). Never the session's own wrapper or agent."
@@ -599,7 +602,7 @@ pub(super) fn recovery_action_help(action: &str) -> &'static str {
             "{\"action\": \"retry_inherit\"}: make the task ready again for a new run that carries this run's branch over onto the current main. Only for a run whose branch has commits, and once per task."
         }
         "resume" => {
-            "{\"action\": \"resume\", \"instruction\": string}: send the run back to a session of its own in its worktree, with the instruction (what to do: fix the failing test, commit and rewrite the receipt, rebase) added to the resolution request. Only while its resumes are not used up."
+            "{\"action\": \"resume\", \"instruction\": string}: send the run back to a session of its own in its worktree, with the instruction (what to do: fix the failing test, commit and rewrite the receipt, rebase) added to the resolution request. Only while its resumes are not used up. Write only what needs fixing in instruction. Do not ask it to run all verification commands, the whole test suite or coverage, or set the worker's check scope: the request and repository instructions set that scope. Integrate runs the task verification after the receipt."
         }
         "hand_off" => {
             "{\"action\": \"hand_off\"}: hand the run to the check that the base already meets the acceptance, as if its worker had reported already_satisfied: the runtime runs the task's verification commands on main and the review judges whether main meets every criterion with no change; the task closes only if both pass, else a person is asked. Only for a failed run whose receipt names its base as its commit (it failed commit_mismatch: no commit was made on top of base) and whose branch holds no commit past the base, when the receipt and the files show the base already meets every criterion. Your diagnosis says why; you do not close the task yourself."
@@ -1146,7 +1149,7 @@ pub fn recovery_prompt(
          Read only: the material below, and the files it names if you need more (the worktree is {worktree}, the run directory {run_dir}). Do not change any file and do not run commands; the runtime applies your verdict. The material is held to limits: what was cut says how much and in which file it is, or that you cannot read it.\n\n\
          Task description:\n{description}\n\n\
          Acceptance criteria:\n{acceptance}\n\n\
-         Current task verification commands (use these, including after a person's correction):\n{verification}\n\n\
+         Current task verification commands (diagnostic context, including after a person's correction; not a list for the worker to run):\n{verification}\n\n\
          Alert facts:\n{facts}\n\n\
          {binary}\
          {ended}\

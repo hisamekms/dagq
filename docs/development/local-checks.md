@@ -103,6 +103,8 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 
 ## resumeでの再現
 
+- 復旧jobのinstructionが全体の検証や`llvm-cov`を求めても上の検証範囲を広げる例外にはならず、流さなかった分をreceiptに書く。
+
 - 手元で`cargo llvm-cov`（`cargo llvm-cov nextest`を含む）や全体のtestを流してよいのは、`integrate`の検証が落ちてresumeされたrunが、その落ちたコマンドを手元で流して再現するときだけ。coverageの関門が置き換わったtaskで再現するのは、置き換えの後の着地の検証のコマンド（`sh scripts/landing-it.sh`。`DAGQ_LANDING_BASE`にrebase先のmainのcommitを渡さなければITを全部流し、`DAGQ_CI_KNOWN_FAILURES`を渡さなければ既に落ちているtestも流れて落ちる）で、llvm-covではない（ADR-t1925-1決定6）。再現のコマンドも「cargoの出力」の形で流し（`sh scripts/cargo-brief.sh sh scripts/landing-it.sh`など）、落ちたtestの出力はログを狭く読む。
 - rebaseの衝突・migrationの番号・receiptの催促など、検証の失敗以外の理由のresumeと、reviewの差し戻し（revise）はこの例外に当たらず、上の関係するtestだけを流す。
 - どのresumeとreviseでも、直しを全部commitしてから最終のtreeで検証を1回だけ流す。その後に直したときの流し直しは、直した所に関係するtestと、`sh scripts/check-local-gates.sh`が名指すstressと時間の関門に限り、全体を流し直さない（上の例外の再現は除く）。

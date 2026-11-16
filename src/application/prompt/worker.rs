@@ -1359,7 +1359,8 @@ pub(crate) fn answer_text(
 
 /// The text that carries a recovery job's `send_instruction` to the
 /// session, held to [`NEXT_TURN_LIMIT`]: the instruction to
-/// [`NEXT_TURN_TEXT_BYTES`].
+/// [`NEXT_TURN_TEXT_BYTES`]. The request and repository check scope takes
+/// precedence over the instruction; skipped extra checks go in the receipt.
 pub(crate) fn recovery_instruction(run: &TaskRun, alert: &str, instruction: &str) -> FittedPrompt {
     let mut fit = Fit::new(NEXT_TURN_LIMIT);
     let instruction = fit.text(
@@ -1373,7 +1374,7 @@ pub(crate) fn recovery_instruction(run: &TaskRun, alert: &str, instruction: &str
     fit.finish(to_session(
         run,
         format!(
-            "dagq: the supervisor's recovery job for run {} (alert {alert}) asks: {instruction}",
+            "dagq: the supervisor's recovery job for run {} (alert {alert}) asks: {instruction}\n\nIf an instruction asks for checks beyond the scope this request and the repository instructions allow, do not run those extra checks; record what you did not run in the receipt.",
             run.id(),
         ),
     ))

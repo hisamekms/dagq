@@ -166,7 +166,8 @@ const CHECKS_ONCE: &str = "Commit all your fixes first, then run the checks once
 
 /// What a session resumed or revised for anything but a failed
 /// verification runs: the checks its fixes touch, never the whole suite.
-const CHECKS_TOUCHED: &str = "This request does not come from a failed verification: run only the checks that bear on what you fixed, not the whole test suite.";
+/// An instruction cannot widen that scope; omitted checks go in the receipt.
+const CHECKS_TOUCHED: &str = "This request does not come from a failed verification: run only the checks that bear on what you fixed, not the whole test suite. If an instruction asks for checks beyond the scope this request and the repository instructions allow, do not run those extra checks; record what you did not run in the receipt.";
 
 /// The line of a resume or revise request on the resume timeout, as the
 /// handoff of a new session says it.
@@ -374,6 +375,9 @@ pub(crate) fn resume_request(
             task.id()
         ),
     });
+    if request.kind == ResumeKind::Triage {
+        lines.push("The recovery instruction below describes fixes; it does not widen the check scope set by this request and the repository instructions.".to_owned());
+    }
     lines.push(format!("Reason: {reason}"));
     let branch = &request.branch;
     lines.push(format!(
