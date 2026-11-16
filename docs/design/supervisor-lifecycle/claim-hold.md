@@ -103,9 +103,11 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 
 控えのlogとeventは必要量の内訳を持ち、掃除を待つ間のeventのない控えも同じ内訳をlogに残す。
 
-- 必要量は`domain::disk::DiskState::needs`が最低ラインと直近の標本からの想定で係数なしで決める（[ADR-t4473-1](../../adr/2026-11-08-t4473-1-disk-needs-follow-a-reserve-and-recent-runs-with-no-factor.md)）。
+- 予測方式の必要量は`domain::disk::DiskState::needs`が直近の標本で決める（ADR-t5059-1）。
+- run 1本の想定は既定で直近の標本、`[disk]`の固定枠なら設定値を使い、共に係数なし。
+- 想定の方式の入口は`domain::disk::run_expectation`。
 - 動いているrun（`check_disk`の`in_flight`）が0本なら最低ラインだけを要り、0本で着地待ちがあれば着地が先に始まり、claimは控えのeventなしにそのpassを待つ。
-  標本が無ければqueueは1本ずつ進む。
+  予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
 - 動いているrunの残りの見込みは想定から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いた和で、信頼できない値（量れない・古い・別のrun）は想定のまま数える。
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。

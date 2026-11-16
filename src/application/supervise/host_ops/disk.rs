@@ -26,7 +26,7 @@ use crate::domain::{
     Ask,
     disk::{
         DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskRelaxed, DiskState, RELAX_KINDS,
-        RelaxState, RunSample, expected_run_estimate, gib, relax_state,
+        RelaxState, RunSample, expected_run_estimate, gib, relax_state, run_expectation,
     },
 };
 
@@ -207,6 +207,7 @@ impl HostOpsState {
             relaxed,
         };
         let mut needs = state.needs(self.disk_config.reserve);
+        needs.estimate = self.disk_config.estimate;
         needs.sample_count = sample_count;
         needs.measured = measured;
         needs.unmeasured = unmeasured;
@@ -308,8 +309,8 @@ impl HostOpsState {
         (self.total_space)(&env.layout.runs_dir)
             .or_else(|| env.layout.db.parent().and_then(self.total_space))
     }
-    /// What a new run is expected to take now, from the recent runs'
-    /// samples read again every [`SAMPLES_INTERVAL`]
+    /// What a new run is expected to take under the configured method;
+    /// recent samples are read again every [`SAMPLES_INTERVAL`]
     /// ([`crate::application::recent_run_samples`]).
     fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<(Option<u64>, usize)> {
         let fresh = self
@@ -327,7 +328,10 @@ impl HostOpsState {
             .samples
             .as_ref()
             .map_or((None, 0), |(_, samples)| {
-                expected_run_estimate(samples, now)
+                (
+                    run_expectation(&self.disk_config, samples, now),
+                    expected_run_estimate(samples, now).1,
+                )
             }))
     }
     /// The relaxation of the needs in effect this pass (ADR-t4727-1), from
@@ -863,6 +867,7 @@ mod tests {
         volume: 0,
         reserve_share: 0.05,
         sample_count: 0,
+        estimate: crate::domain::disk::DiskEstimate::Recent,
         moving: 0,
         remaining: 0,
         measured: 0,

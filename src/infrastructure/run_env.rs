@@ -86,7 +86,7 @@ use crate::{
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
         container_image::{ProjectImage, repository_path_problem},
         container_runtime::{RUNTIME_KEY, Runtime, RuntimeConfig, RuntimeTarget, refuse_container},
-        disk::DiskConfig,
+        disk::{DiskConfig, DiskEstimate},
         exit::ExitConfig,
         fresh_session::FreshSessionConfig,
         headless_job::ReviewJobs,
@@ -794,6 +794,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut stall_keys: Vec<String> = Vec::new();
     let mut conflict_keys: Vec<String> = Vec::new();
     let mut disk_keys: Vec<String> = Vec::new();
+    let mut disk_estimate_line = 0;
+    // Defer reading the value until the method is known; recent ignores it.
+    let mut disk_run_size: Option<(&str, usize)> = None;
     let mut resume_keys: Vec<String> = Vec::new();
     let mut retention_keys: Vec<String> = Vec::new();
     let mut exit_keys: Vec<String> = Vec::new();
@@ -2452,6 +2455,19 @@ pub fn parse_config(text: &str) -> Result<Config> {
                                 "{CONFIG_FILE_NAME}:{number}: value of {key}: expected a share of the volume such as \"5%\" (above 0% and below 100%), not {text:?}"
                             )
                         })?;
+                } else if key == "estimate" {
+                    disk_estimate_line = number;
+                    let text = parse_string(rest.trim())
+                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                    config.disk.estimate = match text.as_str() {
+                        "recent" => DiskEstimate::Recent,
+                        "fixed" => DiskEstimate::Fixed,
+                        _ => anyhow::bail!(
+                            "{CONFIG_FILE_NAME}:{number}: value of {key}: expected \"recent\" or \"fixed\", not {text:?}"
+                        ),
+                    };
+                } else {
+                    disk_run_size = Some((rest.trim(), number));
                 }
                 disk_keys.push(key.to_owned());
             }
@@ -2686,6 +2702,27 @@ pub fn parse_config(text: &str) -> Result<Config> {
         command,
         timeout: e2e_timeout.unwrap_or(crate::application::install::E2E_TIMEOUT),
     });
+    match config.disk.estimate {
+        DiskEstimate::Fixed => {
+            let (value, line) = disk_run_size.with_context(|| {
+                format!("{CONFIG_FILE_NAME}:{disk_estimate_line}: estimate = \"fixed\" requires run_size")
+            })?;
+            let with = || format!("{CONFIG_FILE_NAME}:{line}: value of run_size");
+            let text = parse_string(value).with_context(with)?;
+            let bytes = crate::domain::disk::parse_size(&text)
+                .ok()
+                .filter(|bytes| *bytes > 0)
+                .with_context(|| format!("{CONFIG_FILE_NAME}:{line}: value of run_size: expected a positive size such as \"20GiB\", not {text:?}"))?;
+            config.disk.run_size = Some(bytes);
+        }
+        DiskEstimate::Recent => {
+            if let Some((_, line)) = disk_run_size {
+                tracing::warn!(
+                    "{CONFIG_FILE_NAME}:{line}: [disk] run_size is ignored with estimate = \"recent\""
+                );
+            }
+        }
+    }
     Ok(config)
 }
 
@@ -3093,6 +3130,11 @@ fn parse_positive_number(text: &str) -> Result<f64> {
 /// ADR-t4473-1), `None` when there is no file; no table or no key is the
 /// default ([`DiskConfig`] names each key, its type and default).
 /// `reserve` takes a share written as `"5%"`; a bad value is an error.
+/// `estimate` is `"recent"` (default) or `"fixed"`; unknown values are errors.
+/// Fixed requires `run_size`, a positive string size read by
+/// [`crate::domain::disk::parse_size`]; absent, invalid and zero values are
+/// errors with line numbers. Recent warns and ignores any `run_size` value,
+/// regardless of key order. Both callers use the method in [`DiskConfig`].
 /// The supervisor warns of a file it cannot read
 /// and runs on the defaults. A retired key ([`DiskConfig::RETIRED_KEYS`])
 /// is read on without its value, warned of once in a process
@@ -3108,7 +3150,7 @@ pub fn load_disk_config(root: &Path) -> Result<Option<DiskConfig>> {
     if !config.disk_retired.is_empty() && warns_of_retired_disk_keys() {
         tracing::warn!(
             keys = %config.disk_retired.join(", "),
-            "{}: [{DISK_TABLE}] {} are read no more and their values are not used: the disk's thresholds follow [{DISK_TABLE}] reserve and the recent runs' sizes with no factor; remove them",
+            "{}: [{DISK_TABLE}] {} are read no more and their values are not used: the disk's thresholds follow [{DISK_TABLE}] reserve and the run expectation with no factor; remove them",
             path.display(),
             config.disk_retired.join(", ")
         );
@@ -6767,6 +6809,69 @@ LITERAL = 'no \n escapes # here'
         assert!(!warns_of_retired_disk_keys());
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[disk]\nx = 3\n").unwrap();
         assert!(load_disk_config(dir.path()).is_err());
+    }
+
+    #[test]
+    fn disk_estimate_validates_fixed_sizes_and_ignores_recent_sizes_with_a_warning() {
+        use crate::infrastructure::telemetry::Telemetry;
+        let default = DiskConfig::default();
+        for text in ["", "[disk]", "[disk]\nestimate = \"recent\""] {
+            assert_eq!(parse_config(text).unwrap().disk, default);
+        }
+        let fixed = DiskConfig {
+            estimate: DiskEstimate::Fixed,
+            run_size: Some(20 << 30),
+            ..default
+        };
+        for text in [
+            "[disk]\nestimate = \"fixed\"\nrun_size = \"20GiB\"",
+            "[disk]\nrun_size = \"20GiB\"\nestimate = \"fixed\"",
+        ] {
+            assert_eq!(parse_config(text).unwrap().disk, fixed);
+        }
+        for (text, line, part) in [
+            ("[disk]\nestimate = \"fixed\"", 2, "requires run_size"),
+            (
+                "[disk]\nestimate = \"fixed\"\nrun_size = \"abc\"",
+                3,
+                "value of run_size",
+            ),
+            (
+                "[disk]\nestimate = \"fixed\"\nrun_size = \"0GiB\"",
+                3,
+                "value of run_size",
+            ),
+            (
+                "[disk]\nrun_size = 20\nestimate = \"fixed\"",
+                2,
+                "value of run_size",
+            ),
+            ("[disk]\nestimate = \"other\"", 2, "value of estimate"),
+            ("[disk]\nestimate = 1", 2, "value of estimate"),
+            (
+                "[disk]\nestimate = \"recent\"\nestimate = \"fixed\"",
+                3,
+                "defined twice",
+            ),
+            ("[disk]\nrun_size = 1\nrun_size = 2", 3, "defined twice"),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(&format!("dagq.toml:{line}:")), "{error}");
+            assert!(error.contains(part), "{error}");
+        }
+        for text in [
+            "[disk]\nestimate = \"recent\"\nrun_size = \"20GiB\"",
+            "[disk]\nrun_size = \"abc\"\nestimate = \"recent\"",
+            "[disk]\nrun_size = \"0GiB\"",
+            "[disk]\nrun_size = 123",
+        ] {
+            let (telemetry, captured) = Telemetry::capture();
+            let config = telemetry.in_scope(|| parse_config(text)).unwrap();
+            assert_eq!(config.disk, default);
+            let output = captured.text();
+            assert!(output.contains("run_size is ignored"), "{output}");
+            assert!(output.contains("WARN"), "{output}");
+        }
     }
 
     #[test]

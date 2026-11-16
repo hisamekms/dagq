@@ -118,6 +118,54 @@ fn below_the_reserve_no_run_is_claimed_and_with_room_a_new_queue_claims_one_at_a
     );
 }
 
+/// The startup reader wires the fixed method through check_disk into
+/// the hold event and its log breakdown even before the first sample.
+#[test]
+fn fixed_disk_configuration_reaches_the_supervisors_hold_without_samples() {
+    let wiring = Wiring::new(
+        "fixed_disk_configuration_reaches_the_supervisors_hold_without_samples",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_repository_startup_file(std::sync::Arc::new(|| {
+        let config = crate::infrastructure::run_env::parse_config(
+            "[disk]\nestimate = \"fixed\"\nrun_size = \"20GiB\"\n",
+        )?;
+        Ok(
+            crate::application::supervise::repository_config::StartupRules {
+                stall: config.stall,
+                disk: config.disk,
+                resume: config.resume,
+                review_jobs: config.review_jobs,
+            },
+        )
+    }));
+    wiring.free.store(SHORT, Ordering::SeqCst);
+    let task = wiring.ready_task(&[]);
+    wiring.supervise_once_while_stoppable(|queue, stop| {
+        if queue_payloads(queue, "claim_held").is_empty() {
+            return false;
+        }
+        stop();
+        true
+    });
+    let mut queue = wiring.queue();
+    let held = queue_payloads(&queue, "claim_held");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["disk"]["estimate"], "fixed");
+    assert_eq!(held[0]["disk"]["expected"], 20 * GIB);
+    assert_eq!(held[0]["disk"]["sample_count"], 0);
+    assert!(
+        held[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected 20.0 GiB (fixed)")
+    );
+    assert!(queue.show(task).unwrap().runs.is_empty());
+}
+
 /// The disk's hold a supervisor recorded reaches `status` as its
 /// `claim_hold` (the need's breakdown with it) while that supervisor runs,
 /// and, once it has stood 30 minutes with a ready task to claim, the
@@ -450,7 +498,7 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
     assert_eq!(disk["claims_wait_reason"], Value::Null);
     let message = held[0]["message"].as_str().unwrap();
     assert!(
-        message.contains("expected 10.0 GiB (samples 1)"),
+        message.contains("expected 10.0 GiB (recent; samples 1)"),
         "{message}"
     );
     assert!(

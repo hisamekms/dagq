@@ -1,0 +1,9 @@
+[[test]]
+name = "compose::wiring_tests::disk_holds::fixed_disk_configuration_reaches_the_supervisors_hold_without_samples"
+reason = "境界: 起動時の設定 snapshot が実際の supervisor と queue service を通って SQLite の claim_held に固定方式と値を残す配線を確かめる。判断は domain::disk の unit test に分離済みで、この test は最小の1 task・1回の hold と停止だけを使うが、実際の service と memdb の初期化・終了を含むため1秒を超える。"
+task = 5059
+
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_claim"
+reason = "境界: 実際の supervisor・queue service・SQLite の間で、量れない run が動く間の claim_held と着地後の再開、および event の内訳と message の一致を確かめる。必要量の判断は domain::disk に分離済みで、標本用1本と動く1本・控える1本がこの配線に必要な最小の run 数になる。"
+task = 5059

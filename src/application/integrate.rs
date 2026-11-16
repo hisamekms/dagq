@@ -1362,7 +1362,7 @@ fn disk_short<L: super::RunLog + ?Sized>(
         &DiskState {
             free,
             total: total.unwrap_or(0),
-            expected: crate::domain::disk::expected_run_size(&samples, now_millis),
+            expected: crate::domain::disk::run_expectation(config, &samples, now_millis),
             moving,
             remaining: 0,
             landing_waiting: false,
@@ -7407,6 +7407,40 @@ mod tests {
         let past = relaxed("2026-11-02T22:00:00Z");
         queue.events.borrow_mut()[1] = past;
         assert_eq!(short(12 * GIB, 1).map(|short| short.need), Some(13 * GIB));
+    }
+
+    #[test]
+    fn human_integration_uses_the_fixed_expectation_and_relaxation_without_samples() {
+        use crate::domain::disk::DiskEstimate;
+        const GIB: u64 = 1 << 30;
+        let config = DiskConfig {
+            estimate: DiskEstimate::Fixed,
+            run_size: Some(20 * GIB),
+            ..DiskConfig::default()
+        };
+        let queue = crate::application::port_fakes::SupervisorsAndEvents::default();
+        let now = 1_793_664_000_000;
+        let short = |free, moving| {
+            disk_short(&queue, &config, Some(free), None, Some(moving), now).unwrap()
+        };
+        assert!(short(25 * GIB, 1).is_none());
+        let held = short(25 * GIB - 1, 1).unwrap();
+        assert_eq!(held.need, 25 * GIB);
+        assert_eq!(held.expected, Some(20 * GIB));
+        assert!(short(5 * GIB, 0).is_none());
+        queue.events.borrow_mut().push(RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::DiskRelaxed.as_str().into(),
+            payload: json!({"expected_bytes": 2 * GIB, "for_secs": 3600, "reason": "r"}),
+            created_at: "2026-11-03T00:00:00Z".into(),
+            actor: None,
+        });
+        assert!(short(7 * GIB, 1).is_none());
+        assert_eq!(short(7 * GIB - 1, 1).unwrap().expected, Some(2 * GIB));
+        assert_eq!(short(5 * GIB - 1, 0).unwrap().need, 5 * GIB);
     }
 
     #[test]

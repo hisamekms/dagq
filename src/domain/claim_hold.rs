@@ -772,7 +772,7 @@ mod tests {
             assert!(message.ends_with(&needs.message()), "{message}");
             for part in [
                 "reserve 10.0 GiB (volume 200.0 GiB, share 5.00%)",
-                "expected 10.0 GiB (samples 3)",
+                "expected 10.0 GiB (recent; samples 3)",
                 "moving 2, remaining 16.0 GiB (measured 1, unmeasured 1)",
                 "landing_waiting true, landing_expected 10.0 GiB",
                 "claim additions: expected 10.0 GiB, remaining 16.0 GiB",

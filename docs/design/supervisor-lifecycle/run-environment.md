@@ -48,7 +48,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - reviewのagentの設定の書式は`run_env::REVIEW_SUBAGENTS_PREFIX`、built-inの意味は`domain::review_builtins`が持つ（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）。
   起動の組と、landing branchから選ぶsnapshotの境界は[Review](review.md#reviewのsubagent)。
 
-- `[disk]`はclaimと着地の検証の前に確かめる空き容量の最低ラインの割合（`reserve`）で、keyと既定は`domain::disk::DiskConfig`、読む時と読めないときと廃止したkeyの扱いは[claimを控える](claim-hold.md#空き容量)が持つ（ADR-0047の決定44、ADR-t4473-1）。
+- `[disk]`はclaimと着地の検証の前に確かめる空き容量の最低ラインの割合とrun 1本の想定の方式を持ち、keyと既定は`domain::disk::DiskConfig`、読む時と読めないときと廃止したkeyの扱いは[claimを控える](claim-hold.md#空き容量)が持つ（ADR-0047の決定44、ADR-t4473-1）。
   緊急に必要量を期限つきで緩めるのは設定でなくCLIとqueueの記録で、再起動は要らない（[閾値](claim-hold.md#閾値)）。
 
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。

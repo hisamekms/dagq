@@ -3,11 +3,11 @@
 //! verification, while the free space of the queue's directory (where the
 //! run worktrees are) is short of what one needs. What one needs follows
 //! from a reserve of the volume ([`reserve_bytes`]) and the size a new run
-//! is expected to take from the recent runs' samples ([`run_samples`],
-//! [`expected_run_size`]), with no factor; [`DiskState::needs`] and
+//! is expected to take from the configured method ([`run_expectation`]),
+//! with no factor; [`DiskState::needs`] and
 //! [`DiskState::claims`] give them for a pass, and the queue always moves
 //! on above the reserve with no run moving. The `[disk]` table of
-//! `dagq.toml` sets the reserve's share.
+//! `dagq.toml` sets the reserve's share and expectation method.
 
 use crate::domain::EventKind;
 use serde::Serialize;
@@ -26,7 +26,24 @@ pub const DISK_CLEANUP: &str = "disk_cleanup";
 /// Share above the reserve at which the runtime closes an open disk ask.
 pub const DISK_CLOSE_MARGIN: f64 = 0.05;
 
+/// How `[disk] estimate` obtains one run's expectation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskEstimate {
+    /// The recent samples' maximum or p90 ([`expected_run_estimate`]).
+    #[default]
+    Recent,
+    /// The project's configured `run_size`, independent of samples.
+    Fixed,
+}
+
 /// The `[disk]` table of `dagq.toml`.
+/// `estimate` is a string, `"recent"` by default or `"fixed"`; other values
+/// are read errors with a line number. In fixed mode `run_size` is required,
+/// a positive size string read by [`parse_size`] (for example `"20GiB"`),
+/// with no runtime default. Missing, unreadable or zero sizes are read errors
+/// with a line number, like invalid `reserve`. In recent mode a supplied
+/// `run_size` is warned of and ignored, even if its value cannot be read.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DiskConfig {
     /// `reserve` (a share of the volume written as `"5%"`, default
@@ -34,21 +51,28 @@ pub struct DiskConfig {
     /// below is this share of the volume's size, at least
     /// [`MIN_RESERVE_BYTES`] ([`reserve_bytes`]).
     pub reserve: f64,
+    /// The method used by both supervisor and human integration.
+    pub estimate: DiskEstimate,
+    /// The fixed expectation in bytes; validated as positive for `Fixed`,
+    /// absent for `Recent` by the configuration reader.
+    pub run_size: Option<u64>,
 }
 
 impl Default for DiskConfig {
     fn default() -> Self {
         Self {
             reserve: DEFAULT_RESERVE_SHARE,
+            estimate: DiskEstimate::Recent,
+            run_size: None,
         }
     }
 }
 
 impl DiskConfig {
     /// The setting names of the `[disk]` table.
-    pub const KEYS: [&str; 1] = ["reserve"];
+    pub const KEYS: [&str; 3] = ["reserve", "estimate", "run_size"];
     /// The settings of an older `[disk]` that are read no more: the
-    /// thresholds follow the reserve and the recent runs' samples with no
+    /// thresholds follow the reserve and the configured expectation with no
     /// factor (ADR-t4473-1), so a `dagq.toml` that still has them is
     /// warned of and read on without them.
     pub const RETIRED_KEYS: [&str; 7] = [
@@ -251,6 +275,22 @@ pub fn expected_run_size(samples: &[RunSample], now_millis: i64) -> Option<u64> 
     expected_run_estimate(samples, now_millis).0
 }
 
+/// One run's expectation from the validated `[disk]` configuration,
+/// samples and Unix time in milliseconds. The default `estimate = "recent"`
+/// delegates to [`expected_run_estimate`]: newest 20 within 14 days, maximum
+/// below five samples, p90 otherwise, `None` without samples. With
+/// `estimate = "fixed"`, returns `run_size` regardless of sample count,
+/// age or outliers, including with no samples. The reader requires a
+/// positive size string via [`parse_size`] for fixed mode (missing, invalid
+/// or zero is a line-numbered error); recent mode warns and ignores it.
+/// Relaxation is applied later by [`DiskState::needs`] to either method.
+pub fn run_expectation(config: &DiskConfig, samples: &[RunSample], now_millis: i64) -> Option<u64> {
+    match config.estimate {
+        DiskEstimate::Recent => expected_run_estimate(samples, now_millis).0,
+        DiskEstimate::Fixed => config.run_size,
+    }
+}
+
 /// The expectation and number of samples actually used in its window.
 pub fn expected_run_estimate(samples: &[RunSample], now_millis: i64) -> (Option<u64>, usize) {
     let mut recent: Vec<&RunSample> = samples
@@ -293,7 +333,7 @@ pub struct DiskState {
     pub free: Option<u64>,
     /// The size of that volume.
     pub total: u64,
-    /// What a new run is expected to take ([`expected_run_size`]).
+    /// What a new run is expected to take ([`run_expectation`]).
     pub expected: Option<u64>,
     /// How many runs move now (a session open or a landing's verification
     /// running).
@@ -322,6 +362,8 @@ pub struct DiskNeeds {
     pub volume: u64,
     /// Configured fraction of that volume; the minimum reserve still applies.
     pub reserve_share: f64,
+    /// The configured method, including when a relaxation overrides its value.
+    pub estimate: DiskEstimate,
     /// Samples within the expectation's age and count window.
     pub sample_count: usize,
     /// Runs moving at this reading, including landing verifications.
@@ -344,7 +386,7 @@ pub struct DiskNeeds {
     pub claims_wait_reason: Option<ClaimsWaitReason>,
     /// The reserve ([`reserve_bytes`]).
     pub reserve: u64,
-    /// What a new run is expected to take ([`expected_run_size`]).
+    /// What a new run is expected to take ([`run_expectation`]).
     pub expected: Option<u64>,
     /// What a claim needs free: the reserve with no run moving or no
     /// expectation, else the reserve, the expectation, the moving runs'
@@ -377,12 +419,15 @@ impl DiskNeeds {
     pub fn message(&self) -> String {
         let show = |bytes: u64| gib(bytes as f64);
         format!(
-            "reserve {} (volume {}, share {:.2}%); expected {} (samples {}); moving {}, remaining {} (measured {}, unmeasured {}); landing_waiting {}, landing_expected {}; claim additions: expected {}, remaining {}; claims_wait {}",
+            "reserve {} (volume {}, share {:.2}%); expected {} ({}); moving {}, remaining {} (measured {}, unmeasured {}); landing_waiting {}, landing_expected {}; claim additions: expected {}, remaining {}; claims_wait {}",
             show(self.reserve),
             show(self.volume),
             self.reserve_share * 100.0,
             self.expected.map_or_else(|| "none yet".into(), show),
-            self.sample_count,
+            match self.estimate {
+                DiskEstimate::Recent => format!("recent; samples {}", self.sample_count),
+                DiskEstimate::Fixed => "fixed".into(),
+            },
             self.moving,
             show(self.remaining),
             self.measured,
@@ -408,9 +453,9 @@ impl DiskState {
     /// larger than expected may fail for want of space and is retried.
     ///
     /// Under a relaxation ([`Self::relaxed`], ADR-t4727-1) only the terms
-    /// it names are loosened: `expected` stands for the samples'
+    /// it names are loosened: `expected` stands for the configured
     /// expectation, of a new run and of a landing, while there is one (a
-    /// project with no sample still runs one at a time); the waiting
+    /// recent estimate with no sample still runs one at a time); the waiting
     /// landing's expectation is not added to a claim; the moving runs'
     /// remaining counts 0. The reserve, a run with none moving and the
     /// landing first with none moving are kept.
@@ -1040,8 +1085,113 @@ mod tests {
     }
 
     #[test]
+    fn configured_expectation_selects_recent_or_a_sample_independent_fixed_size() {
+        let recent = DiskConfig::default();
+        let fixed = DiskConfig {
+            estimate: DiskEstimate::Fixed,
+            run_size: Some(20 * GIB),
+            ..recent
+        };
+        let mut twenty: Vec<_> = (1..=19).map(|n| sample(n * GIB, NOW)).collect();
+        twenty.push(sample(gib_f(45.6), NOW));
+        for (samples, expected) in [
+            (vec![], None),
+            (vec![sample(7 * GIB, NOW)], Some(7 * GIB)),
+            (
+                vec![sample(9 * GIB, NOW), sample(3 * GIB, NOW)],
+                Some(9 * GIB),
+            ),
+            (
+                (1..=5).map(|n| sample(n * GIB, NOW)).collect(),
+                Some(5 * GIB),
+            ),
+            (twenty, Some(18 * GIB)),
+            (vec![sample(90 * GIB, NOW - SAMPLE_WINDOW_MILLIS - 1)], None),
+        ] {
+            // Literal expected values keep the baseline independent of the
+            // estimator; the compatibility assertion also names the old API.
+            assert_eq!(run_expectation(&recent, &samples, NOW), expected);
+            assert_eq!(expected_run_estimate(&samples, NOW).0, expected);
+            for now in [NOW, NOW + SAMPLE_WINDOW_MILLIS + 1] {
+                assert_eq!(run_expectation(&fixed, &samples, now), Some(20 * GIB));
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_claims_keep_remaining_space_idle_progress_and_landing_first() {
+        let config = DiskConfig {
+            estimate: DiskEstimate::Fixed,
+            run_size: Some(20 * GIB),
+            ..DiskConfig::default()
+        };
+        let expected = run_expectation(&config, &[], NOW);
+        let mut state = DiskState {
+            free: Some(60 * GIB),
+            total: 228 * GIB,
+            expected,
+            moving: 2,
+            remaining: moving_remaining(expected, [Some(12 * GIB), Some(5 * GIB)]),
+            landing_waiting: false,
+            relaxed: None,
+        };
+        let mut needs = state.needs(config.reserve);
+        needs.estimate = config.estimate;
+        // reserve is rounded up to the next byte, so sum its independently
+        // calculated value and the exact whole-GiB additions.
+        let reserve = (228 * GIB).div_ceil(20);
+        assert_eq!(needs.reserve, reserve);
+        assert_eq!(needs.remaining, 23 * GIB);
+        assert_eq!(needs.claim, reserve + 43 * GIB);
+        assert_eq!(needs.claims_wait_reason, None); // no samples, yet a claim goes
+        assert!(needs.message().contains("expected 20.0 GiB (fixed)"));
+        assert_eq!(serde_json::to_value(needs).unwrap()["estimate"], "fixed");
+        assert!(state.verdict(config.reserve).claim);
+        assert_eq!(state.claims(config.reserve), Some(1));
+        state.free = Some(50 * GIB);
+        assert!(!state.verdict(config.reserve).claim);
+        state.moving = 1;
+        state.remaining = moving_remaining(expected, [Some(gib_f(33.7))]);
+        assert_eq!(state.remaining, 0);
+        state.free = Some(reserve + 20 * GIB - 1);
+        assert!(!state.verdict(config.reserve).claim);
+        assert_eq!(state.claims(config.reserve), Some(0));
+        state.free = Some(reserve + 20 * GIB);
+        assert!(state.verdict(config.reserve).claim);
+        state.free = Some(80 * GIB);
+        assert_eq!(state.claims(config.reserve), Some(3));
+        state.landing_waiting = true;
+        assert_eq!(state.needs(config.reserve).claim, reserve + 40 * GIB);
+        state.moving = 0;
+        state.free = Some(12 * GIB);
+        state.landing_waiting = false;
+        assert!(state.verdict(config.reserve).claim);
+        assert_eq!(state.claims(config.reserve), Some(1));
+        state.landing_waiting = true;
+        let needs = state.needs(config.reserve);
+        assert!(needs.claims_wait);
+        assert_eq!(
+            needs.claims_wait_reason,
+            Some(ClaimsWaitReason::LandingFirst)
+        );
+        assert!(!state.verdict(config.reserve).claim);
+        assert!(state.verdict(config.reserve).landing);
+        state.moving = 1;
+        state.landing_waiting = false;
+        state.relaxed = Some(relaxed(DiskRelax {
+            expected: Some(GIB),
+            ..DiskRelax::default()
+        }));
+        assert_eq!(state.needs(config.reserve).expected, Some(GIB));
+        state.free = Some(reserve + GIB);
+        assert!(state.verdict(config.reserve).claim);
+        state.free = Some(reserve - 1);
+        assert!(!state.verdict(config.reserve).claim);
+    }
+
+    #[test]
     fn the_settings_are_set_by_name() {
-        assert_eq!(DiskConfig::KEYS, ["reserve"]);
+        assert_eq!(DiskConfig::KEYS, ["reserve", "estimate", "run_size"]);
         assert_eq!(DiskConfig::default().reserve, DEFAULT_RESERVE_SHARE);
         for key in DiskConfig::RETIRED_KEYS {
             assert!(!DiskConfig::KEYS.contains(&key), "{key}");
