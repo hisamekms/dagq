@@ -1,0 +1,4 @@
+[[test]]
+name = "slow_mod::inner::allowed"
+reason = "B: fixture process boundary"
+task = 1

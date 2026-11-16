@@ -1,5 +1,6 @@
 # The budget of the self-test of scripts/check-it-budget.sh.
 count = 5
 secs = 6.0 # the sum of the seconds
+test_secs = 2
 decided = "2026-11-01"
 basis = "fixture"

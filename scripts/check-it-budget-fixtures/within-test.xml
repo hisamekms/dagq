@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<testsuites>
+    <testsuite name="dagq::it">
+        <testcase name="slow_mod::inner::unlisted" time="1.999"/>
+    </testsuite>
+</testsuites>

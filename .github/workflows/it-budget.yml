@@ -1,11 +1,13 @@
 name: IT budget
 
 # The number of dagq::it tests (the binary of tests/it) and the sum of their
-# seconds on a CI runner, against the ceiling in .config/it-budget.toml
+# seconds, plus the seconds of each test outside the time gate's allow list,
+# on a CI runner, against the ceilings in .config/it-budget.toml
 # (scripts/check-it-budget.sh compares them; its top comment has the budget's
-# format and the exit status). The job fails when either is over the budget,
+# format and the exit status). The job fails when any is over the budget,
 # and the job summary and the artifact it-budget hold the count, the seconds,
-# the budget, what is over it and the modules with the most seconds.
+# the budget, what is over it (including full test names and seconds) and
+# the modules with the most seconds.
 #
 # Not a gate: the landing's verification and ci.yml's push and pull_request
 # runs do not run it, so an over-budget main still lands. The failed run of

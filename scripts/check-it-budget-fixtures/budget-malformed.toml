@@ -1,5 +1,6 @@
 count = 5
 secs = 6.0
+test_secs = 2
 decided = "2026-11-01"
 basis = "fixture"
 target = 3

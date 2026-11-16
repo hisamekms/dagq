@@ -1098,6 +1098,7 @@ D と R の本数の和の多い module の上位 10（両側を通して。同�
 ## 予算と目標
 
 goal 239 の方針 A.3。`dagq::it` の合計の本数と秒の天井は [.config/it-budget.toml](../../.config/it-budget.toml) が持ち（値・決めた日・根拠はそのファイル）、毎晩の測定と超過の扱いは [testing.md](../development/testing.md) の「CI」が持つ。
+test ごとの秒にも天井を置き、時間の関門と同じ許可の一覧に無い test の超過を夜の測定で見つける。helper や production の待ちで既存の test が延び、差分だけの関門が見ないものを finding の経路に乗せる。
 天井は今の値を超えないためのもので、下の目標は D と R が unit test とプロセスの中の層へ移った後に天井を下げる先。
 
 秒は CI の linux の job（ubuntu-24.04、全ての test binary を一緒に流す `cargo nextest run`）の JUnit の `dagq::it` の秒で、本番の関門の log の秒（上の「2026-11 の分類」）とは並列度が違うので混ぜない。

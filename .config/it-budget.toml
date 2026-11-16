@@ -1,4 +1,4 @@
-# dagq::it（tests/it の binary）の合計の本数と秒の予算。毎晩 main で
+# dagq::it（tests/it の binary）の合計の本数と秒、1 本ごとの秒の予算。毎晩 main で
 # .github/workflows/it-budget.yml が CI の runner（ubuntu-24.04）で dagq::it だけを
 # cargo nextest で流し、JUnit から求めた本数と test ごとの秒の和をここと比べ、
 # 超えれば job を落とす（scripts/check-it-budget.sh。書式は script の冒頭）。
@@ -18,7 +18,25 @@
 #   run 41563335489（2026-11-03） 4,116.787 秒
 #   run 41746449723（2026-11-04） 5,262.574 秒
 #   run 41943497896（2026-11-05） 4,415.278 秒
+# 1 本: 夜の成果物 it-budget の JUnit を直近 3 回、現在の許可の一覧と全名で照合。
+#   run 43535747153（2026-11-14 UTC）許可以外の最大 300.131 秒
+#   run 43654224359（2026-11-14 UTC）許可以外の最大 300.135 秒
+#   run 43776509890（2026-11-15 UTC）許可以外の最大 7.763 秒
+# 前 2 回の 30 秒単位の待ちは入れ替えの待ちの fixture の直しより前。
+# 最新の tree（38077bd7）はその直しの後。30 秒超は既存の許可の一覧にある
+# supervisor_service_ledger::what_builds_the_ledger_crosses_the_services_limits_in_parts
+# の 38.018 秒だけ。許可以外の最大は runtime_handoff::
+# a_resume_taken_over_after_a_handoff_keeps_its_recorded_exit_request。
+# さらに後の 42330d66 の 6 並列・3 周の測定では新しい build の exec と実の
+# supervisor の子 process の仕事が残り、cli_version・runtime_cleanup などの
+# 長い test は理由 B / D の既存の一覧で許可（新たな一律の免除は足さない）。
+# その直しの後の夜の JUnit はまだ無いので、最新の夜とこの測定を根拠にする。
+# 30 秒は許可以外の実測最大の約 3.9 倍で runner の揺れを許し、30 秒の待ちが
+# 積み重なった test を検出する。着地の上限 3,600 秒、目標 2,700 秒の余白は
+# 900 秒。IT の 6 並列でも 1 本の数百秒の待ちは末尾を延ばすので、1 本を
+# 30 秒で見張る（CI の runner の秒と着地の秒は違い、全体の上限の保証ではない）。
 count = 1862
 secs = 7400
-decided = "2026-11-05"
-basis = "本数は分類の後の tree の流れる本数、秒は夜の job の 5 回の最大 6,727.661 秒に約 1 割"
+test_secs = 30
+decided = "2026-11-16"
+basis = "本数は分類の後の tree の流れる本数、秒は夜の job の 5 回の最大 6,727.661 秒に約 1 割。1 本は run 43535747153・43654224359（2026-11-14 UTC）と 43776509890（2026-11-15 UTC）の JUnit、最新の許可以外の最大 7.763 秒と 42330d66 の直し後の残る長い test の B / D の許可から 30 秒"

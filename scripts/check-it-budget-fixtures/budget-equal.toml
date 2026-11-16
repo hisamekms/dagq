@@ -2,5 +2,6 @@
 # with a backslash in the basis.
 count = 4
 secs = 4.5
+test_secs = 2
 decided = "2026-11-01"
 basis = "fixture C:\new"
