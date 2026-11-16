@@ -29,8 +29,8 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `plan task <N> with the answer: request add --ref task:<N> --ref ask:<id>, then close ask <id>`: a planner's answer about a draft no planner carries. Record the person's answer as a planning request in their words, naming the draft and the ask, then close the ask (`dagq-recover`'s `reference/session.md`). Never send it to a worker.
 - Review and landing:
   - `review by hand`: a headless review failed with no open `approve_landing` ask; the person reviews it (the `dagq-recover` skill, section 6).
-  - `review and integrate`: an accepted run nobody reviews (a supervisor gave it up mid-review: read what its session did first). The same section.
-  - A review's concern or failure shows only as its `approve_landing` ask.
+  - `review and integrate`: an accepted run nobody reviews (a supervisor gave it up mid-review: read what its session did first), or a run a direct `integrate` approved whose landing found what it would merge differ from what was approved (`landing_changed`). The latter shows here even while an ask of it is open; it lands only by `integrate` again after the person checks the new diff. The same section.
+  - Otherwise a review's concern or failure shows only as its `approve_landing` ask.
   - `push main`: a landed run whose push failed: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
   - `check the e2e host`: the e2e a reviewed run needs could not run several times in a row. The person checks the host in their own terminal without `DAGQ_ROLE` (`dagq doctor`). The attention clears by itself once an e2e runs; nothing to close. If the run is left as `review and integrate`, check its e2e before integrating by hand.
   - `stop the dead landing's processes`: a dead landing left processes that hold the integration slot. Show the person the pids (`dagq show TASK --full`); the person stops those pids, never by name or pattern.
