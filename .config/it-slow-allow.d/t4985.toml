@@ -1,0 +1,8 @@
+# The items of task 4985 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 6.8s (8.3-12.8s with the 42 longest ITs at 6 threads): a real install of a release by a stub cargo
+[[test]]
+name = "cli_install_release::install_release_installs_with_cargo_and_puts_the_binary_in_place"
+reason = "B 境界（プロセス）: 実の dagq install --release が stub の cargo を子のプロセスで走らせ、失敗なら何も置き換えず、成功なら build した binary を rename で置いて前の binary を残すことを、置かれた新しい binary の実行（macOS は新しい実行ファイルの初回の exec に約 2 秒）まで、実のプロセスとファイルの rename で確かめる"
+task = 4985

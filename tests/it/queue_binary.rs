@@ -42,7 +42,7 @@ fn error_of(output: &Output) -> String {
 /// A copy of the test's `dagq` at `path`.
 fn copy_of_dagq(path: &Path) -> PathBuf {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_dagq"), path).unwrap();
+    common::template::dagq(path);
     path.canonicalize().unwrap()
 }
 

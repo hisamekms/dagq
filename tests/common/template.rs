@@ -38,7 +38,7 @@
 //!
 //! Templates do not pile up (a run's worktree once held 1720, too many for
 //! the cleanup's measure): each one made prunes the others of an old
-//! [`FORMAT`] or schema, the incomplete ones and those left by a process
+//! [`FORMAT`], schema or build, the incomplete ones and those left by a process
 //! that died making them, and beyond [`KEPT`] the least recently used. A
 //! stub whose content holds a fixture's temporary path names a template of
 //! its own on every run, so the bound is a count, not a list of keys. A
@@ -72,7 +72,7 @@ pub const FORMAT: u32 = 2;
 pub const KEPT: usize = 128;
 
 /// The kinds of template, the first part of their names.
-const KINDS: [&str; 3] = ["script", "repo", "queue"];
+const KINDS: [&str; 4] = ["script", "repo", "queue", "binary"];
 
 /// The file `made` writes last in a template, after `make`: a template
 /// without it is incomplete, whatever else it holds.
@@ -226,6 +226,51 @@ pub fn script(path: &Path, script: impl AsRef<str>) {
     fs::rename(&link, path).unwrap();
 }
 
+/// Put at `path` an immutable, already executed copy of the build's
+/// `dagq`, for a test that needs the binary at a path of its own (the
+/// queue's binary, a run's wrapper copy, the binary `install` replaces).
+/// macOS checks a new executable file at its first exec, about 2 s for the
+/// debug build, and a test that copied it paid that for every copy; a hard
+/// link of one template the first process executed pays nothing. Like
+/// [`script`], the copy is read-only and never written through: a test or
+/// an `install` replaces it by a rename, and the template follows the
+/// build (its size, mtime and inode), so a new build names another one.
+pub fn dagq(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let template = made(&dagq_name(), |building| {
+        let binary = building.join("dagq");
+        fs::copy(env!("CARGO_BIN_EXE_dagq"), &binary).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o555)).unwrap();
+        let version = Command::new(&binary)
+            .arg("--version")
+            .bounded_output()
+            .unwrap();
+        assert!(version.status.success(), "{version:?}");
+    });
+    let link = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+    let link = link.into_temp_path();
+    fs::remove_file(&link).unwrap();
+    fs::hard_link(template.dir.join("dagq"), &link).unwrap();
+    drop(template);
+    fs::rename(&link, path).unwrap();
+}
+
+/// The name of the template of the build's `dagq` ([`dagq`]).
+fn dagq_name() -> String {
+    let build = fs::metadata(env!("CARGO_BIN_EXE_dagq")).unwrap();
+    let stamp = format!(
+        "{}-{}-{}-{}",
+        build.len(),
+        build.mtime(),
+        build.mtime_nsec(),
+        build.ino()
+    );
+    format!(
+        "binary-f{FORMAT}-{}",
+        short(&Sha256::digest(stamp.as_bytes()))
+    )
+}
+
 /// Per-fixture shell environment, sourced after the warmup guard. Values are
 /// quoted as data, and are not put in the test process's global environment.
 pub fn script_env(path: &Path, body: impl AsRef<str>, env: &[(&str, &str)]) {
@@ -338,6 +383,7 @@ fn lock(root: &Path, name: &str, operation: libc::c_int) -> Option<fs::File> {
 /// use or being made, and stays.
 fn prune(root: &Path, made: &str) {
     let queue = queue_name();
+    let binary = dagq_name();
     let mut names = BTreeSet::new();
     for entry in fs::read_dir(root).unwrap() {
         let entry = entry.unwrap().file_name();
@@ -363,6 +409,7 @@ fn prune(root: &Path, made: &str) {
             .any(|kind| name.starts_with(&format!("{kind}-f{FORMAT}-")));
         let stale = !of_this_format
             || (name.starts_with("queue-") && name != queue)
+            || (name.starts_with("binary-") && name != binary)
             || !root.join(&name).join(COMPLETE).exists();
         if stale {
             delete(root, &name);

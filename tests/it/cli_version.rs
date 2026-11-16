@@ -171,7 +171,7 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
     // copy of it a running run uses, now are the older binaries.
     let runner = dir.path().join("runs/run-1/runner");
     std::fs::create_dir_all(runner.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_dagq"), &runner).unwrap();
+    crate::common::template::dagq(&runner);
     raw.execute_batch(&format!(
         "ALTER TABLE tasks ADD COLUMN future_hint TEXT;
          CREATE TABLE future_things (id INTEGER PRIMARY KEY);
@@ -446,7 +446,7 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
     // The fixed binary the supervisor runs, and the one `install` replaces.
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_dagq"), &fixed).unwrap();
+    crate::common::template::dagq(&fixed);
     let previous = dir.path().join("bin").join("dagq.previous");
 
     let missing = invoke(
@@ -597,7 +597,7 @@ exec {quoted_bin} \"$@\"\n"
     );
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    std::fs::copy(bin, &fixed).unwrap();
+    crate::common::template::dagq(&fixed);
     // The fixed binary is the queue's, whose service only it starts
     // (ADR-t3102-2 decision 3).
     dagq::infrastructure::queue_binary::write(
@@ -762,15 +762,24 @@ exec {quoted_bin} \"$@\"\n"
     // writing over it, as cargo does: a process of it may still run (the install probe's throwaway
     // service as it exits), and Linux refuses a write over a running
     // binary (ETXTBSY), which failed the broken build at its build stage.
+    // A good build is a hard link of the template of this build
+    // (`common::template::dagq`): a copy is a new file macOS checks at its
+    // first exec (about 2 s), and the job runs the build before it installs
+    // it. The installed copy is new either way and is checked as it was.
+    let built = dir.path().join("built").join("dagq");
+    std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+    crate::common::template::dagq(&built);
     let build = format!(
-        "mkdir -p \"$CARGO_TARGET_DIR/release\" && if [ -f src/broken ]; then cp {} \
-\"$CARGO_TARGET_DIR/release/dagq.new\"; else cp {quoted_bin} \"$CARGO_TARGET_DIR/release/dagq.new\"; fi \
+        "mkdir -p \"$CARGO_TARGET_DIR/release\" && rm -f \"$CARGO_TARGET_DIR/release/dagq.new\" \
+&& if [ -f src/broken ]; then cp {} \
+\"$CARGO_TARGET_DIR/release/dagq.new\"; else ln -f {} \"$CARGO_TARGET_DIR/release/dagq.new\"; fi \
 && mv -f \"$CARGO_TARGET_DIR/release/dagq.new\" \"$CARGO_TARGET_DIR/release/dagq\"",
-        crate::common::shell_path(&broken)
+        crate::common::shell_path(&broken),
+        crate::common::shell_path(&built)
     );
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    std::fs::copy(bin, &fixed).unwrap();
+    crate::common::template::dagq(&fixed);
     // The fixed binary is the queue's, whose service only it starts
     // (ADR-t3102-2 decision 3).
     dagq::infrastructure::queue_binary::write(
@@ -1251,7 +1260,7 @@ fn a_supervisor_handed_over_by_an_exec_keeps_its_owner() {
     let fixture = supervised();
     let fixed = fixture.dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_dagq"), &fixed).unwrap();
+    crate::common::template::dagq(&fixed);
     let mut owner = common::service::StandInOwner::start();
     let mut supervisor = fixture.supervise(&fixed, owner.pid());
     fixture.wait_registered();

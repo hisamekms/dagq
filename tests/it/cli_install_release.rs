@@ -34,7 +34,7 @@ fn install_release_installs_with_cargo_and_puts_the_binary_in_place() {
     let (dir, db) = queue();
     let fixed = dir.path().join("fixed").join("dagq");
     fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_dagq"), &fixed).unwrap();
+    common::template::dagq(&fixed);
     let previous = dir.path().join("fixed").join("dagq.previous");
 
     // cargo fails: nothing is replaced.

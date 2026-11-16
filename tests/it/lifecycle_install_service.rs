@@ -654,8 +654,9 @@ while :; do sleep 0.05; done",
     let issued = service::issue(&dir, &principal, 1).unwrap();
     let to = dir.join("bin").join("dagq");
     std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_dagq"), &to).unwrap();
+    common::template::dagq(&to);
     let path = |path: &Path| path.to_str().unwrap().to_owned();
+    let stand_in = supervisor.child();
     let (output, gave_back) = std::thread::scope(|scope| {
         let gave_back = scope.spawn(|| {
             let deadline = common::deadline(common::STEP_LIMIT);
@@ -671,6 +672,15 @@ while :; do sleep 0.05; done",
                 .unwrap();
             service::revoke(&dir, &principal.credential_key()).unwrap();
             std::fs::write(&revoked, "").unwrap();
+            // Reap the stand-in as it exits, as launchd reaps a supervisor:
+            // a zombie still answers the job's liveness check, which would
+            // wait out its 10s stop before SIGKILL.
+            while stand_in.try_wait().unwrap().is_none() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             true
         });
         let output = job(
