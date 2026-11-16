@@ -189,10 +189,9 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
 Integratorはrole `integrator`のactor（`integrator:<pid>`）。
 `Integrator::acting_as(actor)`は`StaticPolicy`がこの2つを許すactorでなければ拒み、着地の関数はmoduleの外から呼べない。
 
-着地の依頼と記録の境界は`IntegrationRequest`、着地前の検査は`landing_refusal`、pushの許可の証拠は`PushGrant`のdoc commentが持つ。
-reviewのpassは着地の必要条件で、この後のreceipt・rebase・検証・scopeの関門を免除しない（ADR-t728-2の決定3）。
+着地には着地を許す判断のどれかと、その判断の差分の組と着地する組の照合が要り（[判断との照合](supervisor-lifecycle/integrate.md#判断との照合)）、どの判断も後のreceipt・rebase・検証・scopeの関門を免除しない（ADR-t728-2の決定3）。
 
-host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
+host実行ではIntegratorは呼び出し元と同じプロセスとユーザーで動き、境界は論理的なもの（ADR-t728-2の決定4）。
 
 ### queue serviceのユースケース（service側）
 

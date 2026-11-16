@@ -7,7 +7,7 @@ Read this for attention `review by hand`, `review and integrate`, or `push main`
 The supervisor reviews every run it accepts and lands, sends back or asks `approve_landing` by itself; while it holds the run (`reviewing (runtime)`, `queued to land (runtime)`) do nothing. Do not review those runs again. Only these come here:
 
 - `review by hand`: the headless review failed (its output stays in the run directory), including a review that `--no-claude` left without a provider.
-- `review and integrate`: a run accepted without a review.
+- `review and integrate`: a run accepted without a review, or a run whose direct `integrate` approval lapsed because the landing found the diff it would merge differ from the one that `integrate` approved (`landing_changed`). Running `integrate` again approves the run's current diff.
 
 ## Steps
 
@@ -21,6 +21,7 @@ The supervisor reviews every run it accepts and lands, sends back or asks `appro
 - `integrated`: report the landed commit, what it unblocked and the draft tasks from the receipt's follow-ups. The runtime opens a planner for each draft.
 - `needs_session`: nothing landed; the supervisor resumes the session. Do not `integrate` it again.
 - `failed`: the recovery job takes the run.
+- `changed`: nothing landed; the diff the landing would merge differs from the one the run's last approval was bound to, and the path of that approval approves it again: a review's judgment (a pass, an AI `land`, a convergence after the revise limit) is reviewed again by the supervisor, an `approve_landing` `land` opens the ask again, and a direct `integrate` waits in attention `review and integrate`. Run `integrate` again on a `changed` run only when its attention shows `review and integrate`.
 - An error leaves the landing branch untouched and names its cause (`show ID --full`). A checkout of the landing branch whose uncommitted changes overlap the landing is a common cause; so is a container runtime that did not start. Fix it with the person and run `integrate` again.
 
 The task's verification commands run in `integrate`, after its rebase; before it the receipt's test evidence is the worker's own claim. Judge by the latest attempt's verification log in the run directory.
