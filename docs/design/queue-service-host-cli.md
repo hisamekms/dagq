@@ -101,7 +101,8 @@ telemetryはコマンド自身の対象に限る（`control::own_target`）。
 結果の記録はserviceが取るまで同じidentityで送り直す。
 呼び出し元のprincipalで送れるのはそのプロセスだけなので、期限の後に記録を残して終わることはしない（`control::resending`）。
 記録でないstepが届かないときは新しいstepを始めずに終わる。
-起動・停止のコマンドには送り直しの例外があり、停止前の記録の失敗は警告して止めるが、serviceが呼び出し元を拒んだときは止めない（`application::queue_service::stop_record`）。
+起動・停止のコマンドの送り直しの例外は停止前の運用の記録だけで、記録の失敗は警告して止めるが、serviceが呼び出し元を拒んだときは止めない（`application::queue_service::stop_record`）。
+`up` / `down`の監査の記録の送り直しと失敗の扱いは、[監査](audit.md#流れ)の「管理の操作」の段落を読む。
 brokerの起動・停止の例外は`application::queue_broker::start_by_hand`と同moduleの停止のdoc commentを読む。
 
 ## principal
