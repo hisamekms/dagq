@@ -333,6 +333,14 @@ pub(crate) fn range_history(settled: usize) -> Log {
         events.insert(at, e);
     }
     clock_cases(&mut events);
+    // The latest id precedes the previous period in time.
+    events.push(event(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s8", "parallel": 1}),
+        S + 900,
+    ));
     renumbered(events)
 }
 
@@ -882,12 +890,88 @@ pub fn ledger_range_answers_as_every_row<S: ContractStore, F: Fn() -> Result<S>>
     ledger_range_with(open, 30, 300)
 }
 
+/// Isolate the landing seek from cursor resolution and queue range reads:
+/// two settled landings have opposite id/time order, then the clock returns
+/// before the read. The omitted run sought must be the last by time.
+fn landing_boundary(tx: &impl crate::infrastructure::sql_exec::SqlWrite) -> Result<()> {
+    let mut log = Log::default();
+    log.legacy(90, &run(90), S - DAY);
+    log.landed(79, &run(79), S + 2000);
+    log.landed(77, &run(77), S + 500);
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s8"}),
+        S + 900,
+    );
+    let laid = lay_down(tx, &log)?;
+    let from = RowsFrom {
+        ended_before_ms: ms(S + 7800),
+        inputs_through: laid.log.last(),
+    };
+    let (earlier, sought) = view::earlier(tx, &from, &Default::default())?;
+    ensure!(sought.runs, "the named landing seek is exercised");
+    let starts: Vec<_> = earlier
+        .records
+        .iter()
+        .filter(|e| e.kind.as_str() == "integration_started")
+        .map(|e| e.task_id.map(|id| id.as_i64()))
+        .collect();
+    ensure!(
+        starts == [Some(79), Some(77)],
+        "time and causal landing boundaries: {starts:?}"
+    );
+    clear(tx, &laid)
+}
+
+/// A retained start on an ahead clock is closed by a later id on a clock
+/// before the range. Keeping the time boundary must not lose that close.
+fn landing_causal_boundary(tx: &impl crate::infrastructure::sql_exec::SqlWrite) -> Result<()> {
+    let mut log = Log::default();
+    log.legacy(90, &run(90), S - DAY);
+    log.landed(79, &run(79), S + 2000);
+    log.add(
+        Some(76),
+        Some(&run(76)),
+        "integration_started",
+        json!({}),
+        S + 9000,
+    );
+    log.landed(77, &run(77), S + 500);
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s8"}),
+        S + 900,
+    );
+    let laid = lay_down(tx, &log)?;
+    let query = StatsQuery {
+        since: Some(Cursor::Time(ms(S + 7800))),
+        ..StatsQuery::default()
+    };
+    let expected = answers(&view::window(tx, &stats_window(&query, true))?, &query)?;
+    let got = answers(&view::window(tx, &stats_window(&query, false))?, &query)?;
+    ensure!(
+        got == expected,
+        "the causal landing boundary closes the ahead attempt"
+    );
+    clear(tx, &laid)
+}
+
 /// [`ledger_range_answers_as_every_row`] with `small` and `large` units.
 pub(crate) fn ledger_range_with<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
     small: usize,
     large: usize,
 ) -> Result<()> {
+    {
+        let store = open()?;
+        let tx = store.write_entry("contract_landing_boundary")?;
+        landing_boundary(&tx)?;
+        landing_causal_boundary(&tx)?;
+    }
     let mut reads = Vec::new();
     let mut kpi_answers = Vec::new();
     for settled in [small, large] {

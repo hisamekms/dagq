@@ -5,8 +5,8 @@
 use std::cell::Cell;
 
 use super::earlier::{
-    BY_TASK_SQL, STARTS_DOWN_SQL, by_payload_sql, by_task_held_sql, by_task_kind_down_sql,
-    by_task_kind_sql, session_range_sql,
+    BY_TASK_SQL, STARTS_BY_ID_DOWN_SQL, by_payload_sql, by_task_held_sql, by_task_kind_down_sql,
+    by_task_kind_sql, session_range_sql, starts_down_sql,
 };
 use super::*;
 use crate::application::LedgerWindowRead;
@@ -207,7 +207,8 @@ fn the_seeks_by_what_is_named_walk_no_table_whole() {
         session_range_sql(dialect),
         BY_TASK_SQL.to_owned(),
         by_task_held_sql(dialect),
-        STARTS_DOWN_SQL.to_owned(),
+        starts_down_sql(dialect),
+        STARTS_BY_ID_DOWN_SQL.to_owned(),
         super::earlier::run_row_sql(dialect),
         by_payload_sql(dialect, None, "plan_review_id"),
         by_payload_sql(dialect, Some(EventKind::FollowUpRegistered), "task_id"),
@@ -269,4 +270,35 @@ fn a_store_of_no_tables_reads_the_rows_left_out_whole_and_answers_alike() {
             kpi_value(&whole, &whole_question).unwrap()
         );
     }
+}
+
+/// Time and id form one indexed boundary even when the latest id's clock
+/// returned. Filtering by kind must not walk settled events of other kinds.
+#[test]
+fn landing_boundary_seeks_the_partial_time_index() {
+    let queue = queue();
+    let sql = starts_down_sql(SqlDialect::Sqlite);
+    assert_no_scan(&queue.conn, &sql);
+    let mut statement = queue
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap();
+    let steps: Vec<String> = statement
+        .query_map(
+            rusqlite::params!["2030-01-01T00:00:00.000Z", i64::MAX, 64],
+            |r| r.get("detail"),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.contains("landing_starts_by_time") && step.contains("created_at<?")),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|step| step.contains("TEMP B-TREE")),
+        "{steps:?}"
+    );
 }

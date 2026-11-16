@@ -92,9 +92,20 @@ pub(super) fn by_task_held_sql(dialect: SqlDialect) -> String {
     )
 }
 
-/// A page of the `integration_started` below the id `?1`, down the ids by
-/// `events_by_kind`, at most `?2`.
-pub(super) const STARTS_DOWN_SQL: &str = "SELECT * FROM run_events
+/// A page before `(time ?1, id ?2)` in time order. The id breaks ties,
+/// never substitutes for time: the latest id may have an older clock.
+/// The partial time index bounds the seek independently of settled history.
+pub(super) fn starts_down_sql(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT * FROM run_events{}
+         WHERE kind = 'integration_started' AND (created_at, id) < (?1, ?2)
+         ORDER BY created_at DESC, id DESC LIMIT ?3",
+        dialect.indexed_by("landing_starts_by_time"),
+    )
+}
+
+/// The causal boundary walks starts by id, independently of their clocks.
+pub(super) const STARTS_BY_ID_DOWN_SQL: &str = "SELECT * FROM run_events
   WHERE kind = 'integration_started' AND id < ?1 ORDER BY id DESC LIMIT ?2";
 
 /// The session rows of the keys in `[?1, ?2)` the read leaves out, on the
@@ -332,24 +343,49 @@ fn run_records(conn: &impl SqlRead, from: &RowsFrom, key: &str) -> Result<Vec<Ru
         .collect()
 }
 
-/// What [`earlier_run_record_sql`] keeps of the run row of the last
-/// `integration_started` of a time at or before the read's, by id, among
-/// those the run rows it leaves out hold: a walk down the ids of the kind
-/// past those timed after it, those of a row read (of the range, as many as
-/// it holds) or of no row, and those no row holds yet (as many as the
-/// builder is behind), judged in the same snapshot.
+/// The omitted run of the last landing start at or before the read's time,
+/// ordered by `(time, id)`. A later id of an earlier time cannot replace
+/// the start that closes a retained attempt before the range. Starts of
+/// rows read whole and of invisible rows are skipped in the same snapshot.
 fn last_start(conn: &impl SqlRead, from: &RowsFrom) -> Result<Vec<RunEvent>> {
+    const PAGE: i64 = 64;
+    let sql = starts_down_sql(SqlRead::dialect(conn));
+    let mut time = from.time_text();
+    let mut below = i64::MAX;
+    loop {
+        let page = events(conn, &sql, sql_params![time.as_str(), below, PAGE])?;
+        let Some(last) = page.last() else {
+            return Ok(Vec::new());
+        };
+        let next = (last.created_at.clone(), last.id.as_i64());
+        for start in visible(conn, &page)? {
+            if let Some(run) = start.run_id {
+                let records = run_records(conn, from, run.as_str())?;
+                if !records.is_empty() {
+                    return Ok(records);
+                }
+            }
+        }
+        (time, below) = next;
+    }
+}
+
+/// The last omitted start by id is a separate causal boundary: after a
+/// retained start whose clock was ahead, a later id of an older time
+/// closes that attempt. The time boundary alone cannot supply that close.
+fn last_start_by_id(conn: &impl SqlRead, from: &RowsFrom) -> Result<Vec<RunEvent>> {
     const PAGE: i64 = 64;
     let mut below = i64::MAX;
     loop {
-        let page = events(conn, STARTS_DOWN_SQL, sql_params![below, PAGE])?;
+        let page = events(conn, STARTS_BY_ID_DOWN_SQL, sql_params![below, PAGE])?;
         let Some(last) = page.last().map(|event| event.id.as_i64()) else {
             return Ok(Vec::new());
         };
         for start in visible(conn, &page)? {
-            let before = crate::domain::stats::timestamp_millis(&start.created_at)
-                .is_some_and(|at| at <= from.ended_before_ms);
-            if let (true, Some(run)) = (before, start.run_id) {
+            if crate::domain::stats::timestamp_millis(&start.created_at)
+                .is_some_and(|at| at <= from.ended_before_ms)
+                && let Some(run) = start.run_id
+            {
                 let records = run_records(conn, from, run.as_str())?;
                 if !records.is_empty() {
                     return Ok(records);
@@ -416,6 +452,7 @@ pub(crate) fn earlier_named_in(
             records.extend(run_records(conn, from, &key)?);
         }
         records.extend(last_start(conn, from)?);
+        records.extend(last_start_by_id(conn, from)?);
     } else {
         records.extend(whole_run_records_in(conn, from)?);
     }

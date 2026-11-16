@@ -466,7 +466,11 @@ pub struct Earlier {
     /// What the landings' attempts and waits read of the runs left out
     /// ([`landing_utilization::reads`]), ascending id and with their runs: an
     /// attempt starts after the one before it, of any run, and ends with the
-    /// next start ([`landing_utilization::Attempts::add`]).
+    /// next start ([`landing_utilization::Attempts::add`]). The omitted
+    /// run sought before the range is the last start by `(time, id)`,
+    /// so a clock returning on a later id cannot hide that boundary. The
+    /// last by id is also kept: a later start with an older clock can
+    /// close a retained attempt whose clock was ahead.
     pub landings: Vec<RunEvent>,
 }
 

@@ -678,3 +678,63 @@ fn a_report_window_with_a_query_of_no_range_reads_every_row() {
     };
     assert_eq!(queries[1].read_from_ms, Some(start(&day).min(start(&week))));
 }
+
+/// The same late clock return as the store's KPI regression, through the
+/// breach entry: the whole baseline always reads every row independently.
+#[test]
+fn breaches_after_a_late_clock_return_match_every_row() {
+    let now = T0 + 100 * DAY;
+    let setup = setup();
+    let from = [Period::Day, Period::Week]
+        .map(|period| {
+            read_from_ms(
+                &KpiQuery {
+                    period,
+                    last: 2,
+                    ..Default::default()
+                },
+                &setup.config,
+                now,
+                setup.host.utc_offset_secs,
+            )
+            .unwrap()
+        })
+        .into_iter()
+        .min()
+        .unwrap()
+        / 1000
+        - T0;
+    let mut log = Log::default();
+    log.add(
+        Some(68),
+        Some(&run_id(68)),
+        "integration_started",
+        json!({}),
+        from - 20 * DAY,
+    );
+    for (run, at) in [(79, from - 2000), (76, from + 1000), (77, from - 5000)] {
+        log.landed(i64::from(run), &run_id(run), at);
+    }
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s8"}),
+        from - 6000,
+    );
+    let mut rows = build(&log.events, now * 1000, "2030-01-01T00:00:00.000Z");
+    for row in &mut rows {
+        row.is_final = row.ended_at.is_some();
+    }
+    let bounded = Records::default();
+    let whole = Records::default();
+    let token = crate::domain::LeaseToken::new("s");
+    let ranged = probe(rows.clone(), false);
+    let every = probe(rows, true);
+    let a = check_breaches(&bounded, &ranged, &setup, None, now, &token).unwrap();
+    let b = check_breaches(&whole, &every, &setup, None, now, &token).unwrap();
+    assert_eq!(a, b);
+    assert!(!bounded.checked.borrow().is_empty());
+    assert!(ranged.store.read.get() < every.store.read.get());
+    assert_eq!(*bounded.recorded.borrow(), *whole.recorded.borrow());
+}
