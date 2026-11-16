@@ -9,6 +9,7 @@
 //! records is the store's, behind the port of
 //! `crate::application::audit`.
 
+pub mod administration;
 pub mod chain;
 pub mod record;
 pub mod redact;
@@ -72,7 +73,8 @@ pub enum Sender {
     /// the corrections and the service's lifecycle.
     QueueService,
     /// The supervisor, in its calls to the queue service: a landing's
-    /// judgment and the handoff of the service's lifecycle.
+    /// judgment, the handoff of the service's lifecycle and the settings
+    /// it observes at its passes.
     Supervisor,
     /// The integrator, in its calls to the queue service: the comparison
     /// with the approval, the merge, the push (waiting for the attempted
@@ -174,7 +176,9 @@ string_enum!(
     /// disabling, plan review's bypass, a force, a recovery by hand.
     AuthzPrivileged => "authz.privileged",
     /// A landed change of `dagq.toml`, a policy, `.dagq/agents` or the
-    /// definition of the protected paths.
+    /// definition of the protected paths; or, `observed`, a change of the
+    /// settings the supervisor found at its pass
+    /// ([`administration::settings_changed`]).
     ConfigChanged => "config.changed",
     /// `install` or an automatic update: the versions and digests before
     /// and after, and the changes of protected paths between them.
@@ -263,8 +267,8 @@ impl AuditAction {
             | Self::LandingMerged
             | Self::LandingRewritten
             | Self::PushAttempted
-            | Self::PushCompleted
-            | Self::ConfigChanged => &[Integrate],
+            | Self::PushCompleted => &[Integrate],
+            Self::ConfigChanged => &[Integrate, Supervisor],
             Self::BinaryInstalled => &[Updater],
             Self::AuditChecked => &[Reconciliation],
             Self::ServiceLifecycle => &[QueueService, Supervisor],

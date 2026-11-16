@@ -38,6 +38,13 @@ pub(super) fn dispatch_once(
                 &*store, None, kind, payload, record,
             ))
         }
+        "audit_administration" => {
+            let (fact,): (crate::domain::audit::administration::AdministrationFact,) =
+                read(op, args)?;
+            answer(EventStore::audit_administration_once(
+                &*store, &fact, record,
+            ))
+        }
         "open_update_ask" => {
             let (kind, question, options, asked_by, subject, details): (
                 crate::domain::AskKind,
@@ -1127,6 +1134,21 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         "audit_privileged_operation" => {
             let (operation,): (String,) = read(op, args)?;
             answer(EventStore::audit_privileged_operation(&*store, &operation))
+        }
+        "audit_administration" => {
+            let (fact,): (crate::domain::audit::administration::AdministrationFact,) =
+                read(op, args)?;
+            answer(EventStore::audit_administration(&*store, &fact))
+        }
+        "observe_settings" => {
+            let (snapshot,): (crate::domain::audit::administration::SettingsSnapshot,) =
+                read(op, args)?;
+            answer(EventStore::observe_settings(&*store, &snapshot))
+        }
+        "verify_audit_chain" => answer(EventStore::verify_audit_chain(&*store)),
+        "apply_audit_check" => {
+            let (checked,): (crate::domain::audit::administration::AuditCheck,) = read(op, args)?;
+            answer(EventStore::apply_audit_check(&*store, checked))
         }
         "record_queue_events" => {
             let (events,): (Vec<(EventKind, serde_json::Value)>,) = read(op, args)?;

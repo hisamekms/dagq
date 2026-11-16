@@ -452,6 +452,114 @@ pub fn up(
     environment: &UpEnvironment,
     options: &UpOptions,
 ) -> Result<Value> {
+    let reached = std::cell::Cell::new(false);
+    let result = up_unrecorded(
+        ports,
+        claude,
+        location,
+        repo,
+        environment,
+        options,
+        &reached,
+    );
+    // The administration's record of `up` once it ended, with how: who,
+    // with which settings. One that failed before it reached the queue
+    // changed nothing there and records nothing.
+    if reached.get() {
+        let audited = audit_lifecycle(
+            ports,
+            &location.db,
+            crate::domain::audit::administration::LifecycleOperation::Up,
+            result.as_ref().err(),
+        );
+        if let Err(error) = audited {
+            return Err(match result {
+                Ok(_) => error.context("up started the supervisor"),
+                Err(failed) => failed.context(format!("{error:#}")),
+            });
+        }
+    }
+    result
+}
+
+/// The audit's record of the lifecycle command `operation` that ended with
+/// `error` (none for a success), sent on the queue at `db` as the caller
+/// ([`audit_written`]).
+fn audit_lifecycle(
+    ports: &Ports,
+    db: &Path,
+    operation: crate::domain::audit::administration::LifecycleOperation,
+    error: Option<&anyhow::Error>,
+) -> Result<()> {
+    let queue = (ports.queues)(db).open()?;
+    if let Some(error) = error {
+        tracing::warn!(error = %format_args!("{error:#}"), "the lifecycle operation failed");
+    }
+    audit_lifecycle_on(
+        &*queue,
+        operation,
+        error.map(|_| crate::domain::audit::administration::LifecycleFailure::OperationFailed),
+    )
+}
+
+/// [`audit_lifecycle`] on an open `queue`.
+fn audit_lifecycle_on(
+    queue: &(dyn LifecycleQueue + Send),
+    operation: crate::domain::audit::administration::LifecycleOperation,
+    error: Option<crate::domain::audit::administration::LifecycleFailure>,
+) -> Result<()> {
+    audit_written(
+        queue.audit_administration(
+            &crate::domain::audit::administration::AdministrationFact::Lifecycle {
+                operation,
+                error,
+            },
+        ),
+        &format!("{operation:?}"),
+    )
+}
+
+/// The result of sending an administration's audit record of `what`: the
+/// command's caller sent it again under one identity while the service
+/// did not answer or its queue was busy, and the queue admits it once
+/// ([`crate::application::supervisor_service::resend::RESENT_OPS`]). The
+/// refusal of a service whose build takes no such record
+/// ([`refused_by_an_older_build`]) is warned of and leaves the command's
+/// result as it is; any other failure is the command's.
+pub(crate) fn audit_written(sent: Result<()>, what: &str) -> Result<()> {
+    match sent {
+        Ok(()) => Ok(()),
+        Err(error) if refused_by_an_older_build(&error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "the audit's record of {what} was not written: the queue service's build takes no such record: {error:#}");
+            Ok(())
+        }
+        Err(error) => Err(error.context(format!("the audit's record of {what} was not written"))),
+    }
+}
+
+/// Whether `error` is a queue service's refusal of a request its build
+/// does not read: a bad request (a service of a build before the record
+/// knows no `audit_administration`).
+pub(crate) fn refused_by_an_older_build(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::application::supervisor_service::Refused>()
+            .is_some_and(|refused| {
+                refused.code == crate::domain::queue_service::ServiceErrorCode::BadRequest
+            })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn up_unrecorded(
+    ports: &Ports,
+    claude: &dyn AgentProvider,
+    location: &QueuePaths,
+    repo: &Path,
+    environment: &UpEnvironment,
+    options: &UpOptions,
+    reached: &std::cell::Cell<bool>,
+) -> Result<Value> {
     ensure!(
         options.parallel.is_none_or(|parallel| parallel >= 1),
         "parallel must be at least 1"
@@ -558,6 +666,7 @@ pub fn up(
     };
     let queue = (ports.queues)(&db).open()?;
     let queue = &*queue;
+    reached.set(true);
     if let Some(report) = &queue_service
         && report["outcome"] != "reused"
     {
@@ -3050,9 +3159,47 @@ fn down_services(options: &DownOptions, drained: bool) -> DownServices {
 /// Install's `keep_service` leaves both running, sends no stop request
 /// and reports `kept`: install inspects queue use before stopping them.
 pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Result<Value> {
+    // The administration's record of `down`, taken before the service can
+    // stop: before `down` tells the supervisors to drain (and asks them to
+    // stop it at the end of their drain), or before it stops it itself;
+    // otherwise at its end. A `down` that fails after attempting its
+    // record sends no second fact: the first may have committed despite a
+    // lost response. One that failed before it reached the queue records
+    // nothing.
+    let recorded = std::cell::Cell::new(false);
+    let reached = std::cell::Cell::new(false);
+    let result = down_unrecorded(ports, location, options, &reached, &recorded);
+    if let Err(error) = &result {
+        tracing::warn!(error = %format_args!("{error:#}"), "down failed");
+    }
+    if reached.get() && !recorded.get() {
+        let audited = audit_lifecycle(
+            ports,
+            &location.db,
+            crate::domain::audit::administration::LifecycleOperation::Down,
+            result.as_ref().err(),
+        );
+        if let Err(error) = audited {
+            return Err(match result {
+                Ok(_) => error.context("down stopped the supervisors"),
+                Err(failed) => failed.context(format!("{error:#}")),
+            });
+        }
+    }
+    result
+}
+
+fn down_unrecorded(
+    ports: &Ports,
+    location: &QueuePaths,
+    options: &DownOptions,
+    reached: &std::cell::Cell<bool>,
+    recorded: &std::cell::Cell<bool>,
+) -> Result<Value> {
     let (launchd, processes) = (ports.launchd, ports.processes);
     let queue = (ports.queues)(&location.db).open()?;
     let queue = &*queue;
+    reached.set(true);
     if options.force {
         queue.audit_privileged_operation("down_force")?;
     }
@@ -3090,7 +3237,30 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     let broker = (ports.queue_broker)(&location.db, Path::new("dagq"));
     let broker_running =
         broker.probe().state != crate::domain::queue_service::ServiceState::Stopped;
-    if down_services(options, false) == DownServices::Drain && !live.is_empty() {
+    // `down`'s record, once, before anything here can stop the service.
+    let record_down = || -> Result<()> {
+        if !recorded.get() {
+            // Attempted, including an answer lost after commit. The caller
+            // retries this fact under one identity; outer error handling
+            // must not create a contradictory second fact.
+            recorded.set(true);
+            audit_lifecycle_on(
+                queue,
+                crate::domain::audit::administration::LifecycleOperation::Down,
+                None,
+            )?;
+        }
+        Ok(())
+    };
+    let services = down_services(options, false);
+    // Before the supervisors are told to drain, so a record not taken
+    // stops none of them (install's drain then fails with nothing
+    // drained); from the stop request on, the last supervisor's drain may
+    // stop the service.
+    if services != DownServices::Stop && !live.is_empty() {
+        record_down()?;
+    }
+    if services == DownServices::Drain && !live.is_empty() {
         let tokens: Vec<LeaseToken> = live.iter().map(|r| r.token.clone()).collect();
         if service_running
             && let Err(error) = queue.record_queue_event(
@@ -3129,6 +3299,8 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if !drained {
             return Some(json!({"outcome": "left_to_the_drain"}));
         }
+        // `down` succeeded up to the stop of the service, which takes its
+        // record before it stops, if the stop request did not take it.
         // Recorded before the stop, on the service that stops: nothing is
         // opened after it. The service took `down`'s caller on its first
         // step, so one out of reach (the last supervisor's drain stopped
@@ -3170,14 +3342,21 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         }
     };
     // The broker before the service it passes requests on to.
-    let stop_both = |report: &mut Value, drained: bool| {
+    let stop_both = |report: &mut Value, drained: bool| -> Result<()> {
         if !strays.is_empty() {
             report["stray_agents"] = stray_reports(&strays);
         }
+        // Kept running for install: `down`'s record was taken before the
+        // drain, or is taken at its end when no supervisor drained.
         if down_services(options, drained) == DownServices::Keep {
             report["queue_broker"] = json!({"outcome": "kept"});
             report["queue_service"] = json!({"outcome": "kept"});
-            return;
+            return Ok(());
+        }
+        // Audit failure fails down before either daemon is stopped. Do
+        // not turn it into a successful report with a nested error value.
+        if service_running && drained {
+            record_down()?;
         }
         if let Some(queue_broker) = stop_broker(drained) {
             report["queue_broker"] = queue_broker;
@@ -3185,6 +3364,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if let Some(queue_service) = stop_service(drained) {
             report["queue_service"] = queue_service;
         }
+        Ok(())
     };
     if live.is_empty() {
         if options.force {
@@ -3199,7 +3379,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "pruned_supervisors": pruned,
             "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
-        stop_both(&mut report, true);
+        stop_both(&mut report, true)?;
         return Ok(report);
     }
     // launchd's bootout delivers the SIGTERM to each agent's own process; a
@@ -3233,7 +3413,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "pruned_supervisors": pruned,
             "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
-        stop_both(&mut report, true);
+        stop_both(&mut report, true)?;
         return Ok(report);
     }
     if options.wait {
@@ -3250,7 +3430,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if !pruned.is_empty() {
             report["pruned_supervisors"] = json!(pruned);
         }
-        stop_both(&mut report, true);
+        stop_both(&mut report, true)?;
         return Ok(report);
     }
     let mut report = json!({
@@ -3263,7 +3443,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     if !pruned.is_empty() {
         report["pruned_supervisors"] = json!(pruned);
     }
-    stop_both(&mut report, false);
+    stop_both(&mut report, false)?;
     Ok(report)
 }
 
@@ -3528,6 +3708,43 @@ mod tests {
         fn reach_queue_service(&self, _: &mut CommandSpec, socket: &Path) {
             self.reached.lock().unwrap().push(socket.to_owned());
         }
+    }
+
+    /// An administration's audit record the service did not take fails the
+    /// command, but for the refusal of a service whose build takes no such
+    /// record (a bad request), which leaves the command's result.
+    #[test]
+    fn an_audit_record_not_taken_fails_the_command_but_for_an_older_builds_refusal() {
+        use crate::application::supervisor_service::Refused;
+        use crate::domain::queue_service::ServiceErrorCode;
+        let refused = |code| -> anyhow::Error {
+            Refused {
+                code,
+                message: "audit_administration is not an operation of the supervisor".into(),
+                rejected: false,
+                held: None,
+            }
+            .into()
+        };
+        assert!(audit_written(Ok(()), "up").is_ok());
+        assert!(audit_written(Err(refused(ServiceErrorCode::BadRequest)), "up").is_ok());
+        let failed = audit_written(
+            Err(anyhow::anyhow!("audit failed").context("INSERT INTO audit_records")),
+            "up",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{failed:#}").contains("the audit's record of up was not written"),
+            "{failed:#}"
+        );
+        assert!(
+            audit_written(
+                Err(anyhow::anyhow!("busy").context(crate::application::QueueBusy)),
+                "down"
+            )
+            .is_err()
+        );
+        assert!(audit_written(Err(refused(ServiceErrorCode::Failed)), "down").is_err());
     }
 
     /// `dagq inbox` for a control side: the agent in the directory it was

@@ -67,10 +67,9 @@ pub fn control_queues(client: Client, control: ControlCall) -> Result<ControlQue
 /// start|stop` on `caller` ([`ControlCall::command`] one whose
 /// [`lifecycle`](crate::domain::queue_service::ControlCommand::lifecycle)
 /// holds): the service names the principal's actor first, so a principal
-/// the command is not for is refused before anything is done. A record the
-/// service does not take is the command's error, sent no more: the command
-/// stops rather than waits for a service that is not there, and the queue is
-/// not opened instead (fail closed).
+/// the command is not for is refused before anything is done. Retry is
+/// selected by the caller: the lifecycle socket resends only audit facts,
+/// and an install resends its result records. Neither opens the DB instead.
 pub(super) fn lifecycle_queues(caller: Arc<dyn ServiceCaller>) -> Result<SupervisorQueues> {
     let begun = caller.call(UseCase::Supervisor, json!({"op": CONTROL_QUEUE}))?;
     let role: ActorRole = serde_json::from_value(begun["role"].clone())
@@ -86,7 +85,19 @@ pub(super) fn lifecycle_queues(caller: Arc<dyn ServiceCaller>) -> Result<Supervi
 
 /// [`lifecycle_queues`] of `control`'s steps on `client`'s socket.
 pub(super) fn lifecycle_socket(client: Client, control: ControlCall) -> Result<SupervisorQueues> {
-    lifecycle_queues(Arc::new(ControlCaller::new(client, control)?))
+    lifecycle_queues(Arc::new(lifecycle_caller(
+        Arc::new(ControlCaller::new(client, control)?),
+        clock::system(),
+    )))
+}
+
+/// Lifecycle commands resend only their audit fact, under the identity of
+/// its first send. Reads and pre-stop operational events still fail closed.
+pub(super) fn lifecycle_caller(
+    caller: Arc<dyn ServiceCaller>,
+    generators: crate::application::Generators,
+) -> crate::application::supervisor_service::resend::Resending {
+    control::resending(caller, generators).only_operations(&["audit_administration"])
 }
 
 /// [`lifecycle_queues`] of the steps of `install` or an update job on

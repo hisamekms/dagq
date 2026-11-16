@@ -29,12 +29,14 @@ use std::time::Duration;
 /// takes once however often they are sent: an event and an update's ask
 /// (by their record's identity, [`super::SupervisorParams::record`]), the
 /// landing (by its commit), the follow-ups (by their keys), the asks a
-/// landing closes (closed once), and a job command's finding (its same
-/// evidence is no new occurrence).
-pub const RESENT_OPS: [&str; 10] = [
+/// landing closes (closed once), a job command's finding (its same
+/// evidence is no new occurrence) and a command's audit record of the
+/// administration (by its record's identity).
+pub const RESENT_OPS: [&str; 11] = [
     "record_runtime_event",
     "record_queue_event",
     "open_update_ask",
+    "audit_administration",
     "finish_integration",
     "register_follow_ups",
     "close_approve_landing_asks",
@@ -72,12 +74,14 @@ pub const OWN_RETRY_KINDS: [&str; 17] = [
 ];
 
 /// The ones of [`RESENT_OPS`] the queue takes once by their record's
-/// identity: an event, which nothing in it tells from another alike, and
-/// an update's ask, which supersedes the one of its kind open before it.
-pub const MATCHED_OPS: [&str; 3] = [
+/// identity: an event, which nothing in it tells from another alike, an
+/// update's ask, which supersedes the one of its kind open before it, and
+/// an audit record of the administration, which the audit admits once.
+pub const MATCHED_OPS: [&str; 4] = [
     "record_runtime_event",
     "record_queue_event",
     "open_update_ask",
+    "audit_administration",
 ];
 
 /// The supervisor's operation that ends a job's row: not sent again by
@@ -322,6 +326,8 @@ pub fn with_record(mut params: Value, record: String) -> Value {
 /// keeps them in `held` until they are.
 pub struct Resending {
     inner: Arc<dyn ServiceCaller>,
+    /// A narrow command's result operations; none uses all of RESENT_OPS.
+    operations: Option<&'static [&'static str]>,
     mode: Resend,
     waits: Waits,
     /// How long a record was sent ([`Waits::next`]), and the identity of
@@ -351,6 +357,7 @@ impl Resending {
     ) -> Self {
         Self {
             inner,
+            operations: None,
             mode,
             waits,
             generators,
@@ -359,6 +366,21 @@ impl Resending {
             behind: Mutex::new(None),
             sending: Mutex::new(()),
         }
+    }
+
+    /// Restrict retry and identity assignment to these result operations.
+    /// Other steps still fail immediately if the service does not answer.
+    #[must_use]
+    pub fn only_operations(mut self, operations: &'static [&'static str]) -> Self {
+        self.operations = Some(operations);
+        self
+    }
+
+    fn resends(&self, use_case: UseCase, params: &Value) -> bool {
+        resent(use_case, params)
+            && self
+                .operations
+                .is_none_or(|ops| params["op"].as_str().is_some_and(|op| ops.contains(&op)))
     }
 
     /// This caller with its waits between sendings made by `pause` (a
@@ -540,7 +562,7 @@ impl ServiceCaller for Resending {
     /// a caller meets an error only where its own sending would have. One
     /// that cannot be kept is sent, late rather than lost.
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
-        if !resent(use_case, &params) {
+        if !self.resends(use_case, &params) {
             return self.inner.call(use_case, params);
         }
         let params = with_record(params, self.generators.ids.uuid());
@@ -582,7 +604,7 @@ impl ServiceCaller for Resending {
     /// sends it again under one identity while it waits, the queue taking
     /// it once, and past the wait answers the error.
     fn call_now(&self, use_case: UseCase, params: Value) -> Result<Value> {
-        if !resent(use_case, &params) {
+        if !self.resends(use_case, &params) {
             return self.inner.call(use_case, params);
         }
         match self.mode {

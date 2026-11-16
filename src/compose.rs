@@ -88,6 +88,26 @@ where
     host::run_command_with_policy(queue, db, command, answer_policy)
 }
 
+/// The lifecycle commands' resending caller over `caller`, for
+/// [`wiring_tests`] (rule L9: a context module reaches another through the
+/// root).
+#[cfg(test)]
+fn wiring_lifecycle_caller(
+    caller: std::sync::Arc<dyn crate::application::supervisor_service::ServiceCaller>,
+    generators: Generators,
+) -> crate::application::supervisor_service::resend::Resending {
+    control::lifecycle_caller(caller, generators)
+}
+
+/// The queues of a lifecycle command's steps on `caller`, for
+/// [`wiring_tests`] (rule L9).
+#[cfg(test)]
+fn wiring_lifecycle_queues(
+    caller: std::sync::Arc<dyn crate::application::supervisor_service::ServiceCaller>,
+) -> Result<crate::application::supervisor_service::SupervisorQueues> {
+    control::lifecycle_queues(caller)
+}
+
 /// The binary's limit of a planner's revise ([`PLANNER_TIMEOUT`]), for
 /// [`wiring_tests`]' loop.
 #[cfg(test)]

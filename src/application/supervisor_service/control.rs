@@ -58,7 +58,8 @@
 //! [`handoff_refusal`].
 //!
 //! Lifecycle commands (`up`, `down`, `inbox`, service and broker start/stop)
-//! do not resend: a failed step fails the command. The pre-stop record is
+//! resend only their audit fact under one identity; other failed steps
+//! fail the command. The pre-stop operational record is
 //! the exception: `down` warns and stops; `service stop` uses
 //! [`crate::application::queue_service::stop_record`], distinguishing a
 //! refusal from an unreachable service or failed record. During
@@ -359,6 +360,41 @@ pub fn scope(command: ControlCommand, op: &str, args: &[Value]) -> Result<(), St
             (ControlCommand::Down, Some("down_force"))
                 | (ControlCommand::Inbox, Some("guardrail_disable"))
         ),
+        // The administration's fact of the command itself: `up`'s, `down`'s,
+        // and an install's (a person's, or an update's binary that stayed
+        // though not every supervisor took it).
+        "audit_administration" => {
+            let fact = args.first().cloned().and_then(|fact| {
+                serde_json::from_value::<crate::domain::audit::administration::AdministrationFact>(
+                    fact,
+                )
+                .ok()
+            });
+            use crate::domain::audit::administration::{
+                AdministrationFact as F, LifecycleOperation as L,
+            };
+            matches!(
+                (command, fact),
+                (
+                    ControlCommand::Up,
+                    Some(F::Lifecycle {
+                        operation: L::Up,
+                        ..
+                    })
+                ) | (
+                    ControlCommand::Down,
+                    Some(F::Lifecycle {
+                        operation: L::Down,
+                        ..
+                    })
+                ) | (
+                    ControlCommand::Install
+                        | ControlCommand::AutoUpdate
+                        | ControlCommand::ReleaseUpdate,
+                    Some(F::Installed(_))
+                )
+            )
+        }
         "record_queue_event" => kind(0).is_some_and(|kind| queue_kinds.contains(&kind)),
         "record_runtime_event" => kind(1).is_some_and(|kind| run_kinds.contains(&kind)),
         BEGIN_LANDING | END_LANDING | APPROVE_INTEGRATION => command == ControlCommand::Integrate,

@@ -1351,6 +1351,12 @@ impl SqliteQueue {
             [schema::recorded_floor(BINARY_SCHEMA)?],
         )?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+        // A migration of a queue (not its creation) is the audit's record,
+        // committed with it, once the audit's table is there.
+        if version > 0 && has_table(&tx, "audit_records")? {
+            let applied: Vec<i64> = ((version + 1)..=BINARY_SCHEMA).collect();
+            super::audit::migrated(&tx, version, BINARY_SCHEMA, &applied)?;
+        }
         let violations: i64 =
             tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
                 r.get(0)
@@ -2499,6 +2505,60 @@ mod queue_use_tests {
 mod origin_migration_tests {
     use super::*;
     use crate::domain::plan_request::{Origin, OriginKind};
+
+    /// A migration of a queue is one audit record of the schema's versions
+    /// before and after, committed with it; the queue's creation is none.
+    #[test]
+    fn a_migration_is_one_audit_record_of_its_versions_and_a_creation_none() {
+        let records = |path: &Path| -> Vec<crate::domain::audit::AuditRecord> {
+            let raw = Connection::open(path).unwrap();
+            let mut statement = raw
+                .prepare("SELECT record FROM audit_records ORDER BY seq")
+                .unwrap();
+            statement
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+                .collect()
+        };
+        let migrated = |records: &[crate::domain::audit::AuditRecord]| {
+            records
+                .iter()
+                .filter(|r| r.action == crate::domain::audit::AuditAction::SchemaMigrated)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let created = tempfile::tempdir().unwrap();
+        SqliteQueue::init(created.path().join("queue.db")).unwrap();
+        assert!(migrated(&records(&created.path().join("queue.db"))).is_empty());
+        let at = MIGRATIONS.len() - 1;
+        let before = i64::try_from(at).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        let raw = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..at] {
+            raw.execute_batch(migration).unwrap();
+        }
+        raw.execute_batch(&format!(
+            "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+             INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});",
+            floor = schema::floor_for(before),
+        ))
+        .unwrap();
+        drop(raw);
+        SqliteQueue::migrate(&path, None, 0).unwrap();
+        SqliteQueue::migrate(&path, None, 0).unwrap();
+        let all = records(&path);
+        let migrated = migrated(&all);
+        assert_eq!(migrated.len(), 1, "{all:?}");
+        let change = migrated[0].change.as_ref().unwrap();
+        assert_eq!(change.before, Some(json!({"schema_version": before})));
+        assert_eq!(
+            change.after,
+            Some(json!({"schema_version": BINARY_SCHEMA, "applied": [BINARY_SCHEMA]}))
+        );
+        assert_eq!(migrated[0].sender_id, "queue_service:migrate");
+    }
 
     /// The migration that records origins fills the rows already queued
     /// from their records (ADR-t1975-1 decision 6): the creation event's

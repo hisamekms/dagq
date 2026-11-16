@@ -5,6 +5,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlDialect, SqlRead, SqlWrite, sql_params};
 use crate::application::audit::{self, AuditAppend, Caller, ChainHead};
 use crate::domain::audit::{
@@ -128,12 +129,7 @@ pub(super) fn control(tx: &impl SqlWrite, mut input: SenderInput) -> Result<()> 
     if tx.dialect() != SqlDialect::Sqlite {
         return Ok(());
     }
-    let principal = tx.query_row("SELECT dagq_actor_role(), dagq_actor_id()", &[], |r| {
-        Ok(Principal {
-            role: r.get(0)?,
-            id: r.get(1)?,
-        })
-    })?;
+    let principal = connection_principal(tx)?;
     let evidence: Option<String> = tx.query_row("SELECT dagq_direct_human()", &[], |r| r.get(0))?;
     let mut assurance_evidence = std::collections::BTreeMap::new();
     if let Some(evidence) = evidence {
@@ -142,25 +138,303 @@ pub(super) fn control(tx: &impl SqlWrite, mut input: SenderInput) -> Result<()> 
             input.answered_via = Some(crate::domain::audit::AnsweredVia::HumanAttested);
         }
     }
-    input.sender_seq = tx.query_row("SELECT COALESCE(MAX(sender_seq),0)+1 FROM audit_records WHERE sender_id='queue_service:decisions'", &[], |r| r.get(0))?;
+    admit_with(
+        tx,
+        (Sender::QueueService, "decisions"),
+        principal,
+        (Attestation::Enforced, assurance_evidence),
+        input,
+    )
+}
+
+/// The principal the connection writes as: the authenticated actor of the
+/// request the queue service serves.
+fn connection_principal(tx: &impl SqlWrite) -> Result<Principal> {
+    Ok(
+        tx.query_row("SELECT dagq_actor_role(), dagq_actor_id()", &[], |r| {
+            Ok(Principal {
+                role: r.get(0)?,
+                id: r.get(1)?,
+            })
+        })?,
+    )
+}
+
+/// Admit `input` from the control-side component `(sender, instance)` as
+/// `principal`, at `attestation`, its counter the next of that component's
+/// and its time now, in the caller's transaction.
+fn admit_as(
+    tx: &impl SqlWrite,
+    sender: (Sender, &str),
+    principal: Principal,
+    attestation: Attestation,
+    input: SenderInput,
+) -> Result<()> {
+    admit_with(
+        tx,
+        sender,
+        principal,
+        (attestation, Default::default()),
+        input,
+    )
+}
+
+/// [`admit_as`] with the attestation's `evidence`.
+fn admit_with(
+    tx: &impl SqlWrite,
+    (sender, instance): (Sender, &str),
+    principal: Principal,
+    (attestation, evidence): (Attestation, std::collections::BTreeMap<String, String>),
+    mut input: SenderInput,
+) -> Result<()> {
+    let sender_id = format!("{sender}:{instance}");
+    input.sender_seq = tx.query_row(
+        "SELECT COALESCE(MAX(sender_seq),0)+1 FROM audit_records WHERE sender_id=?1",
+        sql_params![sender_id],
+        |r| r.get(0),
+    )?;
     let at = crate::application::timestamp(std::time::SystemTime::now());
     input.at = at.clone();
     append_in(
         tx,
         input,
         Caller {
-            sender: Sender::QueueService,
-            sender_instance: "decisions".into(),
+            sender,
+            sender_instance: instance.into(),
             principal,
             on_behalf_of: Vec::new(),
             auth: "control_side".into(),
-            assurance: AssuranceClaim::Chained(Attestation::Enforced),
-            evidence: assurance_evidence,
+            assurance: AssuranceClaim::Chained(attestation),
+            evidence,
             clock_source: "host".into(),
         },
         at,
     )?;
     Ok(())
+}
+
+/// The principal of what the queue service does of itself (its start,
+/// a migration it applies before it serves): no request's actor.
+fn service_principal() -> Principal {
+    Principal {
+        role: "supervisor".into(),
+        id: "queue-service".into(),
+    }
+}
+
+/// An update's `update_installed`, in the transaction that records it:
+/// the binary it put in place, sent by the updater as the authenticated
+/// principal of the job. One that put only the plugin records nothing.
+pub(super) fn update_installed(tx: &impl SqlWrite, payload: &Value) -> Result<()> {
+    if tx.dialect() != SqlDialect::Sqlite {
+        return Ok(());
+    }
+    let Some(change) = crate::domain::audit::administration::binary_change_of_update(payload)
+    else {
+        return Ok(());
+    };
+    let principal = connection_principal(tx)?;
+    admit_as(
+        tx,
+        (Sender::Updater, "update"),
+        principal,
+        Attestation::Enforced,
+        crate::domain::audit::administration::binary_installed(&change),
+    )
+}
+
+/// A fact of the administration a control-side command sends
+/// ([`crate::domain::audit::administration::AdministrationFact`]): a
+/// person's install, by the updater; `up` and `down`, by the queue
+/// service, with the hash of the bound repository's `dagq.toml` as the
+/// service reads it now.
+///
+/// A fact sent under the result's record `record` (the command's caller
+/// sends it again under it while the service does not take it) keeps
+/// that identity in its attestation's evidence (`record`), and one
+/// admitted under it before is not admitted again.
+pub(super) fn administration(
+    tx: &impl SqlWrite,
+    fact: &crate::domain::audit::administration::AdministrationFact,
+    record: Option<&str>,
+) -> Result<()> {
+    use crate::domain::audit::administration::{self as admin, AdministrationFact};
+    if tx.dialect() != SqlDialect::Sqlite {
+        return Ok(());
+    }
+    let (sender, input) = match fact {
+        AdministrationFact::Installed(change) => (
+            (Sender::Updater, "install"),
+            admin::binary_installed(change),
+        ),
+        AdministrationFact::Lifecycle { operation, error } => {
+            let config = bound_settings(tx)?.map(|bytes| super::queue_service::sha256_hex(&bytes));
+            (
+                (Sender::QueueService, "lifecycle"),
+                admin::service_lifecycle(*operation, *error, config.as_deref()),
+            )
+        }
+    };
+    let mut evidence = std::collections::BTreeMap::new();
+    if let Some(record) = record {
+        let admitted: bool = tx.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM audit_records WHERE sender_id=?1
+                   AND {}=?2)",
+                tx.dialect()
+                    .json_field("record", "$.attestation.evidence.record", JsonType::Text)
+            ),
+            sql_params![format!("{}:{}", sender.0, sender.1), record],
+            |row| row.get(0),
+        )?;
+        if admitted {
+            return Ok(());
+        }
+        evidence.insert("record".to_owned(), record.to_owned());
+    }
+    let principal = connection_principal(tx)?;
+    admit_with(
+        tx,
+        sender,
+        principal,
+        (Attestation::Enforced, evidence),
+        input,
+    )
+}
+
+/// A migration of the schema from `before` to `after`, in the migration's
+/// own transaction once the audit's table is there.
+pub(super) fn migrated(tx: &impl SqlWrite, before: i64, after: i64, applied: &[i64]) -> Result<()> {
+    admit_as(
+        tx,
+        (Sender::QueueService, "migrate"),
+        service_principal(),
+        Attestation::Enforced,
+        crate::domain::audit::administration::schema_migrated(before, after, applied),
+    )
+}
+
+/// The instance of the supervisors' records of the settings they observe:
+/// one for all of them, so that each compares with the last any wrote.
+const SETTINGS_INSTANCE: &str = "settings";
+
+/// The snapshot of the last record of the settings any supervisor
+/// observed; `None` before the first (or with no audit to read).
+pub(super) fn last_settings(
+    tx: &impl SqlRead,
+) -> Result<Option<crate::domain::audit::administration::SettingsSnapshot>> {
+    if tx.dialect() != SqlDialect::Sqlite {
+        return Ok(None);
+    }
+    let last: Option<String> = tx
+        .query_row(
+            "SELECT record FROM audit_records WHERE sender_id=?1 ORDER BY seq DESC LIMIT 1",
+            sql_params![format!("{}:{SETTINGS_INSTANCE}", Sender::Supervisor)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(last
+        .map(|text| serde_json::from_str::<AuditRecord>(&text))
+        .transpose()?
+        .and_then(|record| {
+            crate::domain::audit::administration::snapshot_of(record.change.as_ref())
+        }))
+}
+
+/// The settings a supervisor observed at its pass, compared in the
+/// transaction with the snapshot of the last record of the observation
+/// ([`crate::domain::audit::administration::settings_changed`]); whether
+/// it recorded a change. The record is `observed`: no command changed
+/// them.
+pub(super) fn observe_settings(
+    tx: &impl SqlWrite,
+    snapshot: &crate::domain::audit::administration::SettingsSnapshot,
+) -> Result<bool> {
+    use crate::domain::audit::administration as admin;
+    if tx.dialect() != SqlDialect::Sqlite {
+        return Ok(false);
+    }
+    let before = last_settings(tx)?;
+    let Some(input) = admin::settings_changed(before.as_ref(), snapshot) else {
+        return Ok(false);
+    };
+    let principal = connection_principal(tx)?;
+    admit_as(
+        tx,
+        (Sender::Supervisor, SETTINGS_INSTANCE),
+        principal,
+        Attestation::Observed,
+        input,
+    )?;
+    Ok(true)
+}
+
+/// The settings of the checkout `root` as the audit observes them
+/// ([`crate::domain::audit::administration::SettingsSnapshot`]): its
+/// `dagq.toml`, each file under its `.dagq/agents` (a missing one is not
+/// in it) and the compiled authorization policy.
+pub fn settings_snapshot(
+    root: &std::path::Path,
+) -> Result<crate::domain::audit::administration::SettingsSnapshot> {
+    use crate::domain::audit::administration::{AGENTS_DIR, POLICY_KEY, SETTINGS_FILE};
+    use crate::domain::replan_snapshot::sha256;
+    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                files(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut snapshot = crate::domain::audit::administration::SettingsSnapshot::new();
+    let mut paths = vec![root.join(SETTINGS_FILE)];
+    files(&root.join(AGENTS_DIR), &mut paths)?;
+    for path in paths {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        snapshot.insert(relative.to_string_lossy().into_owned(), sha256(&bytes));
+    }
+    snapshot.insert(POLICY_KEY.into(), audit::policy_version());
+    Ok(snapshot)
+}
+
+/// The bytes of the `dagq.toml` of the bound repository's main checkout,
+/// as the queue service resolves it without Git
+/// ([`super::adapters::main_checkout_from_files`]): `None` with no binding
+/// or no main checkout (a bare repository, a separate Git directory),
+/// which reads no other directory's in its place; empty with no file.
+fn bound_settings(tx: &impl SqlRead) -> Result<Option<Vec<u8>>> {
+    let binding: Option<String> = tx
+        .query_row(
+            "SELECT git_common_dir FROM queue_repository LIMIT 1",
+            &[],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(checkout) = binding.and_then(|binding| {
+        super::adapters::main_checkout_from_files(std::path::Path::new(&binding))
+    }) else {
+        return Ok(None);
+    };
+    let path = checkout.join("dagq.toml");
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(Vec::new())),
+        Err(e) => Err(e).with_context(|| format!("read the settings {}", path.display())),
+    }
 }
 
 pub(super) use crate::application::audit::count_refusal_failure;
@@ -515,7 +789,8 @@ fn startup_input(at: String, config: &[u8]) -> SenderInput {
 
 /// Runs before the first fenced state write, inside that transaction. An
 /// empty chain gets one start record, without reading or replaying events.
-/// The hash covers the bound repository's dagq.toml bytes (empty if absent).
+/// The hash covers the dagq.toml bytes of the bound repository's main checkout
+/// (empty if absent, or with no main checkout to read it from).
 /// Old schemas remain usable by migration and compatibility inspection.
 pub(super) fn ensure_started(tx: &impl SqlWrite) -> Result<()> {
     let exists: bool = tx.query_row(
@@ -523,39 +798,21 @@ pub(super) fn ensure_started(tx: &impl SqlWrite) -> Result<()> {
         &[],
         |row| row.get(0),
     )?;
-    if !exists || SqliteAudit(tx).head()?.is_some() {
+    // Only emptiness matters here. Decoding a damaged head would prevent
+    // the verifier from writing its mismatch attention in this transaction.
+    if !exists
+        || tx.query_row("SELECT EXISTS(SELECT 1 FROM audit_records)", &[], |row| {
+            row.get::<_, bool>(0)
+        })?
+    {
         return Ok(());
     }
-    let binding: Option<String> = tx
-        .query_row(
-            "SELECT git_common_dir FROM queue_repository LIMIT 1",
-            &[],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let config = match binding.and_then(|p| {
-        std::path::PathBuf::from(p)
-            .parent()
-            .map(|p| p.join("dagq.toml"))
-    }) {
-        Some(path) => match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("read audit startup config {}", path.display()));
-            }
-        },
-        None => Vec::new(),
-    };
+    let config = bound_settings(tx)?.unwrap_or_default();
     let at = crate::application::timestamp(std::time::SystemTime::now());
     let caller = Caller {
         sender: Sender::QueueService,
         sender_instance: "audit-start".into(),
-        principal: Principal {
-            role: "supervisor".into(),
-            id: "queue-service".into(),
-        },
+        principal: service_principal(),
         on_behalf_of: Vec::new(),
         auth: "control_side".into(),
         assurance: AssuranceClaim::Chained(Attestation::Enforced),
@@ -581,10 +838,26 @@ pub fn verify(tx: &impl SqlRead, since: Option<u64>) -> Result<Value> {
         bail!("audit is not recorded on Postgres at stage zero");
     }
     let since = since.unwrap_or(1).max(1);
-    let rows = tx.query_map(
-        "SELECT seq,sender_id,sender_seq,hash,prev_hash,received_at,record FROM audit_records WHERE seq>=?1 ORDER BY seq",
-        sql_params![i64::try_from(since - 1)?], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?)),
+    // Decode malformed metadata as a verification mismatch, not a failed
+    // verification job. SQL/I/O failures still propagate as errors.
+    let raw = tx.query_map(
+        "SELECT seq,sender_id,sender_seq,hash,prev_hash,received_at,record FROM audit_records WHERE ?1=1 OR seq>=?1-1 ORDER BY seq",
+        sql_params![i64::try_from(since)?], |r| {
+            let seq = r.get::<_, i64>(0)?;
+            let decoded: super::sql_exec::SqlResult<_> = (|| {
+                Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?,
+                    r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?))
+            })();
+            Ok((seq, decoded))
+        },
     )?;
+    let mut rows = Vec::with_capacity(raw.len());
+    for (seq, decoded) in raw {
+        match decoded {
+            Ok(row) if seq > 0 => rows.push(row),
+            _ => return Ok(json!({"audit_verified": false, "seq": seq, "kind": "metadata"})),
+        }
+    }
     let mut anchor = chain::ChainAnchor::genesis();
     if since > 1 {
         let prev = rows
@@ -912,6 +1185,7 @@ mod tests {
     fn start_is_once_only_without_backfilling_events() {
         let (dir, q) = fixture();
         std::fs::write(dir.path().join("dagq.toml"), b"config").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
         q.conn
             .execute(
                 "INSERT INTO queue_repository (singleton,git_common_dir) VALUES (1,?1)",
@@ -999,6 +1273,34 @@ mod tests {
         assert_eq!(result["audit_verified"], false);
         assert_eq!(result["seq"], 2);
         assert_eq!(result["kind"], "Hash");
+    }
+
+    /// Metadata a writer around the CLI made unreadable as the record's
+    /// type (a negative sender counter or sequence, a hash that is not
+    /// text) is the verification's mismatch of that record's metadata, not
+    /// a failed verification: the sequence it names is the row's as stored.
+    #[test]
+    fn unreadable_metadata_is_a_mismatch_of_its_record() {
+        for (corruption, seq) in [("sender_seq=-1", 3), ("seq=-1", -1), ("hash=X'00'", 3)] {
+            let (_dir, q) = fixture();
+            {
+                let tx = q.write_tx("records").unwrap();
+                for n in 1..=3 {
+                    append_in(&tx, input(n), caller(Sender::QueueService), "now".into()).unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            q.conn
+                .execute_batch(&format!(
+                    "DROP TRIGGER audit_records_no_update; UPDATE audit_records SET {corruption} WHERE seq=3;"
+                ))
+                .unwrap();
+            assert_eq!(
+                verify(&q.read_tx("malformed").unwrap(), None).unwrap(),
+                json!({"audit_verified": false, "seq": seq, "kind": "metadata"}),
+                "{corruption}"
+            );
+        }
     }
 
     /// A queue with one task's run [`RUN`] and the user as its actor.
@@ -1208,5 +1510,320 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reviews, 0);
+    }
+
+    fn records(q: &SqliteQueue) -> Vec<AuditRecord> {
+        q.conn
+            .prepare("SELECT record FROM audit_records ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+            .collect()
+    }
+
+    fn of(q: &SqliteQueue, action: AuditAction) -> Vec<AuditRecord> {
+        records(q)
+            .into_iter()
+            .filter(|r| r.action == action)
+            .collect()
+    }
+
+    #[test]
+    fn an_updates_install_records_its_versions_and_digests_with_it_once() {
+        use crate::domain::EventKind;
+        let (_dir, q) = fixture();
+        let q = q.with_actor(crate::domain::ActorContext::new(
+            crate::domain::ActorRole::Updater,
+            "job-1",
+        ));
+        q.record_queue_event(
+            EventKind::UpdateInstalled,
+            json!({"pid": 9, "version": "0.2.0",
+                   "digest": "d-new", "replaced_binary": {"version": "0.1.0", "digest": "d-old"}, "commit": "abc",
+                   "e2e": {"status": "passed"}}),
+        )
+        .unwrap();
+        q.record_queue_event(
+            EventKind::UpdateInstalled,
+            json!({"pid": 9, "version": "0.2.0", "plugin_only": true}),
+        )
+        .unwrap();
+        q.record_queue_event(EventKind::UpdateStarted, json!({"pid": 9}))
+            .unwrap();
+        let installed = of(&q, AuditAction::BinaryInstalled);
+        assert_eq!(installed.len(), 1);
+        let record = &installed[0];
+        assert_eq!(record.sender_id, "updater:update");
+        assert_eq!(record.principal.role, "updater");
+        assert_eq!(record.attestation.level, Attestation::Enforced);
+        let change = record.change.as_ref().unwrap();
+        assert_eq!(
+            change.before,
+            Some(json!({"version": "0.1.0", "digest": "d-old"}))
+        );
+        let after = change.after.as_ref().unwrap();
+        assert_eq!(after["version_after"], "0.2.0");
+        assert_eq!(after["digest_after"], "d-new");
+        assert_eq!(after["of"], "abc");
+        assert_eq!(after["verification"]["status"], "passed");
+        // The update's record and the audit's commit together.
+        q.conn.execute_batch("CREATE TRIGGER audit_fail BEFORE INSERT ON audit_records BEGIN SELECT RAISE(ABORT, 'audit failed'); END;").unwrap();
+        let before: i64 = q
+            .conn
+            .query_row(
+                "SELECT count(*) FROM run_events WHERE kind='update_installed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            q.record_queue_event(EventKind::UpdateInstalled, json!({"version": "0.3.0"}))
+                .is_err()
+        );
+        assert_eq!(
+            q.conn
+                .query_row(
+                    "SELECT count(*) FROM run_events WHERE kind='update_installed'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn up_down_and_an_install_each_record_once_as_the_principal() {
+        use crate::domain::audit::administration::{
+            AdministrationFact, BinaryChange, LifecycleOperation,
+        };
+        let (dir, q) = fixture();
+        std::fs::write(dir.path().join("dagq.toml"), b"config").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        q.conn
+            .execute(
+                "INSERT INTO queue_repository (singleton,git_common_dir) VALUES (1,?1)",
+                [dir.path().join(".git").to_str().unwrap()],
+            )
+            .unwrap();
+        let q = q.with_actor(crate::domain::ActorContext::new(
+            crate::domain::ActorRole::User,
+            "person-a",
+        ));
+        q.audit_administration(&AdministrationFact::Lifecycle {
+            operation: LifecycleOperation::Up,
+            error: None,
+        })
+        .unwrap();
+        q.audit_administration(&AdministrationFact::Lifecycle {
+            operation: LifecycleOperation::Down,
+            error: Some(crate::domain::audit::administration::LifecycleFailure::OperationFailed),
+        })
+        .unwrap();
+        q.audit_administration(&AdministrationFact::Installed(Box::new(BinaryChange {
+            source: "install".into(),
+            version_after: Some("0.2.0".into()),
+            digest_after: Some("d".into()),
+            ..BinaryChange::default()
+        })))
+        .unwrap();
+        let lifecycle = of(&q, AuditAction::ServiceLifecycle);
+        // The audit's start and then `up` and `down`.
+        assert_eq!(lifecycle.len(), 3);
+        for (record, operation) in lifecycle[1..].iter().zip(["up", "down"]) {
+            assert_eq!(record.principal.id, "person-a");
+            assert_eq!(record.sender_id, "queue_service:lifecycle");
+            let after = record.change.as_ref().unwrap().after.as_ref().unwrap();
+            assert_eq!(after["operation"], operation);
+            assert_eq!(
+                after["config_hash"],
+                "b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910"
+            );
+        }
+        assert_eq!(lifecycle[1].outcome.status, OutcomeStatus::Succeeded);
+        assert_eq!(lifecycle[2].outcome.status, OutcomeStatus::Failed);
+        assert_eq!(
+            lifecycle[2].outcome.reason.as_deref(),
+            Some("operation_failed")
+        );
+        let installed = of(&q, AuditAction::BinaryInstalled);
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].sender_id, "updater:install");
+        assert_eq!(installed[0].principal.id, "person-a");
+    }
+
+    /// A binding with no main checkout (a separate Git directory) hashes no
+    /// other directory's `dagq.toml`: the record says it has none.
+    #[test]
+    fn a_binding_with_no_main_checkout_records_no_settings_hash() {
+        use crate::domain::audit::administration::{AdministrationFact, LifecycleOperation};
+        let (dir, q) = fixture();
+        // The parent of the separate Git directory has a dagq.toml that is
+        // no checkout's.
+        std::fs::write(dir.path().join("dagq.toml"), b"config").unwrap();
+        std::fs::create_dir(dir.path().join("repo.git")).unwrap();
+        q.conn
+            .execute(
+                "INSERT INTO queue_repository (singleton,git_common_dir) VALUES (1,?1)",
+                [dir.path().join("repo.git").to_str().unwrap()],
+            )
+            .unwrap();
+        q.audit_administration(&AdministrationFact::Lifecycle {
+            operation: LifecycleOperation::Up,
+            error: None,
+        })
+        .unwrap();
+        let lifecycle = of(&q, AuditAction::ServiceLifecycle);
+        let up = lifecycle
+            .iter()
+            .find(|r| r.sender_id == "queue_service:lifecycle")
+            .unwrap();
+        assert_eq!(
+            up.change.as_ref().unwrap().after.as_ref().unwrap()["config_hash"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn the_settings_are_recorded_observed_when_they_change_only() {
+        let (_dir, q) = fixture();
+        let snapshot = |hash: &str| -> crate::domain::audit::administration::SettingsSnapshot {
+            [("dagq.toml".to_owned(), hash.to_owned())].into()
+        };
+        assert!(q.observe_settings(&snapshot("a")).unwrap());
+        assert!(!q.observe_settings(&snapshot("a")).unwrap());
+        assert!(q.observe_settings(&snapshot("b")).unwrap());
+        assert!(!q.observe_settings(&snapshot("b")).unwrap());
+        let changed = of(&q, AuditAction::ConfigChanged);
+        assert_eq!(changed.len(), 2);
+        let last = &changed[1];
+        // Supervisor A sent `a` above; B observed `b` and recorded it; the
+        // settings go back to `a`, which A sends again: compared with B's
+        // record, the change back is recorded.
+        assert!(q.observe_settings(&snapshot("a")).unwrap());
+        let back = of(&q, AuditAction::ConfigChanged);
+        assert_eq!(back.len(), 3);
+        assert_eq!(
+            back[2].change.as_ref().unwrap().before,
+            Some(json!({"hashes": {"dagq.toml": "b"}}))
+        );
+        assert_eq!(last.attestation.level, Attestation::Observed);
+        assert_eq!(last.sender_id, "supervisor:settings");
+        let change = last.change.as_ref().unwrap();
+        assert_eq!(change.before, Some(json!({"hashes": {"dagq.toml": "a"}})));
+        assert_eq!(
+            change.after,
+            Some(json!({"hashes": {"dagq.toml": "b"}, "paths": ["dagq.toml"]}))
+        );
+    }
+
+    #[test]
+    fn the_settings_snapshot_hashes_the_settings_agents_and_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dagq.toml"), b"config").unwrap();
+        std::fs::create_dir_all(dir.path().join(".dagq/agents/security")).unwrap();
+        std::fs::write(dir.path().join(".dagq/agents/security/a.md"), b"agent").unwrap();
+        let snapshot = settings_snapshot(dir.path()).unwrap();
+        assert_eq!(
+            snapshot.keys().collect::<Vec<_>>(),
+            [
+                ".dagq/agents/security/a.md",
+                "authorization_policy",
+                "dagq.toml"
+            ]
+        );
+        assert_eq!(
+            snapshot["dagq.toml"],
+            "b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910"
+        );
+        assert_eq!(snapshot["authorization_policy"], audit::policy_version());
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(settings_snapshot(empty.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_change_around_the_cli_opens_one_attention_until_the_chain_verifies() {
+        use crate::domain::EventKind;
+        let (_dir, q) = fixture();
+        {
+            let tx = q.write_tx("records").unwrap();
+            for n in 1..=2 {
+                append_in(&tx, input(n), caller(Sender::QueueService), "now".into()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let mismatches = |q: &SqliteQueue| -> i64 {
+            q.conn
+                .query_row(
+                    "SELECT count(*) FROM run_events WHERE kind=?1",
+                    [EventKind::SupervisorAuditMismatch.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(q.check_audit_chain().unwrap()["audit_verified"], true);
+        assert_eq!(mismatches(&q), 0);
+        let text: String = q
+            .conn
+            .query_row("SELECT record FROM audit_records WHERE seq=2", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        q.conn
+            .execute_batch("DROP TRIGGER audit_records_no_update")
+            .unwrap();
+        q.conn
+            .execute(
+                "UPDATE audit_records SET record=?1 WHERE seq=2",
+                [text.replace("\"user\"", "\"intruder\"")],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            let found = q.check_audit_chain().unwrap();
+            assert_eq!(found["audit_verified"], false);
+            assert_eq!(found["seq"], 2);
+        }
+        assert_eq!(mismatches(&q), 1);
+        q.conn
+            .execute("UPDATE audit_records SET record=?1 WHERE seq=2", [&text])
+            .unwrap();
+        assert_eq!(q.check_audit_chain().unwrap()["audit_verified"], true);
+        // A check that verified a sound snapshot before the change and
+        // writes after another check found it: its older answer closes
+        // nothing.
+        let stale = q.verify_audit_chain().unwrap().unwrap();
+        assert_eq!(stale.0["audit_verified"], true);
+        q.conn
+            .execute(
+                "UPDATE audit_records SET record=?1 WHERE seq=2",
+                [text.replace("\"user\"", "\"intruder\"")],
+            )
+            .unwrap();
+        assert_eq!(q.check_audit_chain().unwrap()["audit_verified"], false);
+        assert_eq!(mismatches(&q), 2);
+        assert_eq!(q.apply_audit_check(stale).unwrap()["superseded"], true);
+        assert_eq!(
+            q.latest_queue_event(
+                &crate::domain::audit::administration::CHECK_KINDS.map(EventKind::as_str)
+            )
+            .unwrap()
+            .unwrap()
+            .kind,
+            EventKind::SupervisorAuditMismatch
+        );
+        q.conn
+            .execute("UPDATE audit_records SET record=?1 WHERE seq=2", [text])
+            .unwrap();
+        assert_eq!(q.check_audit_chain().unwrap()["audit_verified"], true);
+        assert_eq!(
+            q.latest_queue_event(
+                &crate::domain::audit::administration::CHECK_KINDS.map(EventKind::as_str)
+            )
+            .unwrap()
+            .unwrap()
+            .kind,
+            EventKind::SupervisorAuditVerified
+        );
     }
 }

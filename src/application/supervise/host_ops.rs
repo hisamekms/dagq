@@ -6,6 +6,7 @@
 use super::*;
 use crate::application::HostOpsQueue;
 
+pub(super) mod audit;
 pub(super) mod broker_relay;
 pub(super) mod cleanup;
 pub(super) mod disk;
@@ -86,6 +87,8 @@ pub(super) struct HostOpsState {
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
+    /// The audit's observation of the settings and check of the chain.
+    audit: audit::AuditWatch,
 }
 
 /// What a landing's retry of its verification reads the disk with
@@ -132,13 +135,17 @@ impl HostOpsState {
             max_load: settings.max_load,
             load_average: ports.load_average,
             host_versions: ports.host_versions,
+            audit: audit::AuditWatch::default(),
         }
     }
 
     /// A job of the context runs that a handoff waits for: the cleanup,
     /// the sample of the host's load and the release look.
     pub(super) const fn handoff_waits(&self) -> bool {
-        self.cleanup.running() || self.host_metrics.running() || self.release.running()
+        self.cleanup.running()
+            || self.host_metrics.running()
+            || self.release.running()
+            || self.audit.running()
     }
 
     /// Whether the queue service ran at the last look, or none is kept.
@@ -238,6 +245,12 @@ impl HostOpsState {
         clock: &dyn crate::application::Clock,
     ) {
         self.host_metrics.finish(deadline, clock);
+    }
+
+    /// Join verification while ending, bounded by the same shutdown grace
+    /// as the other background jobs. Normal passes never wait for it.
+    pub(super) fn audit_finish(&mut self, deadline: &EndBy, clock: &dyn crate::application::Clock) {
+        self.audit.finish(deadline, clock);
     }
 
     /// Join or leave the walk of the runs moving at the end of the loop

@@ -64,9 +64,11 @@ actionの意味・分類・OCSFのclassは`src/domain/audit/mod.rs`の`AuditActi
 
 ## 周期・閾値・二次の置き場（段0）
 
+supervisorの定期のchainの検証の周期は`src/domain/audit/administration.rs`の`CHAIN_VERIFY_PERIOD`のdoc commentが持つ。
+
 | 項目 | 候補の値 | 理由 |
 | --- | --- | --- |
-| 定期の検証（chainのverifyと突き合わせのjob） | 1時間ごと | 着地は1時間に数件で、見張りの毎時の見直しと同じ間隔で異常を出せる |
+| 突き合わせのjob | 1時間ごと | 着地は1時間に数件で、見張りの毎時の見直しと同じ間隔で異常を出せる |
 | checkpoint | 1,000件ごとか1時間ごとの早い方 | verifyを最後のcheckpointから始められる大きさ |
 | 二次の複製の遅れの閾値 | 10分か1,000件の早い方 | 複製は秒で終わるので、10分の遅れは止まっていると見てよい |
 | 拒否の書けなかった件数のattention | 1件でも | 段0の拒否は少なく、書けないこと自体が異常 |

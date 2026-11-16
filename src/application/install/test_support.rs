@@ -5,15 +5,36 @@ use crate::domain::{LeaseToken, SupervisorMode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The clock at `secs` after the epoch.
-pub(crate) struct At(pub(crate) i64);
+pub(crate) struct At {
+    seconds: i64,
+    origin: std::time::Instant,
+    ticks: std::sync::atomic::AtomicU64,
+}
+
+impl At {
+    pub(crate) fn new(seconds: i64) -> Self {
+        Self {
+            seconds,
+            // Only an opaque origin; elapsed time is entirely scripted.
+            origin: std::time::Instant::now(),
+            ticks: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
 
 impl Clock for At {
     fn system_time(&self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(self.0.unsigned_abs())
+        UNIX_EPOCH + Duration::from_secs(self.seconds.unsigned_abs())
     }
 
     fn monotonic(&self) -> std::time::Instant {
-        std::time::Instant::now()
+        self.origin
+    }
+
+    fn since(&self, _: std::time::Instant) -> Duration {
+        let tick = self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(tick < 100, "the scripted wait did not finish");
+        Duration::from_secs(tick)
     }
 }
 
@@ -95,6 +116,7 @@ pub(crate) struct InstallSteps {
     pub(crate) runs: Vec<Value>,
     pub(crate) processes: Vec<Value>,
     pub(crate) unsupported_job: Option<PathBuf>,
+    /// A distinct build identifier for the kept predecessor, when named.
     pub(crate) previous_version: Option<String>,
     pub(crate) job_checks: std::sync::Mutex<Vec<PathBuf>>,
     pub(crate) survives_failure: bool,
@@ -105,6 +127,25 @@ pub(crate) struct InstallSteps {
     pub(crate) watch_after_reads: std::sync::Mutex<Option<usize>>,
     pub(crate) events: std::sync::Mutex<Vec<(String, Value)>>,
     pub(crate) asks: std::sync::Mutex<Vec<crate::domain::Ask>>,
+    /// Whether each read of the registrations moves on the heartbeat of
+    /// the ones that run the new build, as live supervisors do.
+    pub(crate) heartbeats: bool,
+    /// The audit's facts of the administration sent, in order.
+    pub(crate) audited: std::sync::Mutex<Vec<Value>>,
+    /// What the replacement reads of the binaries it held, when a test
+    /// names it (another install's binary at the target by then).
+    pub(crate) replaced: std::sync::Mutex<Option<super::Replacement>>,
+    /// Whether putting the replaced binary back fails.
+    pub(crate) restore_fails: bool,
+    pub(crate) adopt_fails: bool,
+    pub(crate) keep_fails: bool,
+    /// A supervisor's independent watch starts the service before the
+    /// next command reaches it after the failed replacement start.
+    pub(crate) watch_on_open: bool,
+    /// One registration read after a handoff starts fails, by its index.
+    pub(crate) fail_handed_read: Option<usize>,
+    pub(crate) handed_reads: std::sync::atomic::AtomicUsize,
+    pub(crate) gate: Option<E2eOutcome>,
 }
 
 impl Default for InstallSteps {
@@ -138,7 +179,17 @@ impl Default for InstallSteps {
             restored_start_fails: false,
             watch_after_reads: std::sync::Mutex::new(None),
             events: Default::default(),
+            heartbeats: false,
+            audited: Default::default(),
             asks: Default::default(),
+            replaced: Default::default(),
+            restore_fails: false,
+            adopt_fails: false,
+            keep_fails: false,
+            watch_on_open: false,
+            fail_handed_read: None,
+            handed_reads: std::sync::atomic::AtomicUsize::new(0),
+            gate: None,
         }
     }
 }
@@ -161,7 +212,13 @@ impl InstallSteps {
 
 impl Binaries for InstallSteps {
     fn build(&self, _: &Path) -> Result<PathBuf> {
+        if self.gate.is_some() {
+            return Ok(PathBuf::from("/source"));
+        }
         bail!("the binary is already built")
+    }
+    fn e2e(&self, _: &Path, _: Option<&Path>, _: &E2eSettings) -> Result<E2eOutcome> {
+        self.gate.clone().context("no gate was configured")
     }
     fn version(&self, binary: &Path) -> Result<String> {
         if binary == Path::new("/to.previous")
@@ -258,16 +315,38 @@ impl Binaries for InstallSteps {
         self.service_running
             .load(std::sync::atomic::Ordering::SeqCst)
     }
-    fn replace(&self, _: &Path, _: &Path) -> Result<()> {
+    fn replace(&self, source: &Path, target: &Path) -> Result<()> {
+        self.replace_held(source, target).map(drop)
+    }
+    fn replace_held(&self, _: &Path, target: &Path) -> Result<super::Replacement> {
         self.note("replace");
-        Ok(())
+        let replacement =
+            self.replaced
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| super::Replacement {
+                    digest: Some(crate::domain::replan_snapshot::sha256(b"new")),
+                    replaced_version: self.version(target).ok(),
+                    replaced_digest: Some(crate::domain::replan_snapshot::sha256(b"old")),
+                });
+        if self.keep_fails {
+            return Err(anyhow::anyhow!("keep previous failed").context(replacement));
+        }
+        Ok(replacement)
     }
     fn adopt(&self, _: &Path, _: &Path) -> Result<()> {
         self.note("adopt");
+        if self.adopt_fails {
+            bail!("adopt failed");
+        }
         Ok(())
     }
     fn restore(&self, _: &Path) -> Result<()> {
         self.note("restore");
+        if self.restore_fails {
+            bail!("the replaced binary could not be put back");
+        }
         self.binary_restored
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -329,7 +408,31 @@ impl crate::application::supervisor_service::ServiceCaller for InstallSteps {
             );
         }
         match op {
-            "supervisors" => Ok(serde_json::to_value(&*self.registrations.lock().unwrap())?),
+            "supervisors" => {
+                let mut registrations = self.registrations.lock().unwrap();
+                if registrations
+                    .iter()
+                    .any(|r| r.binary_version.as_deref() == Some("new"))
+                {
+                    let read = self.handed_reads.fetch_add(1, SeqCst);
+                    if self.fail_handed_read == Some(read) {
+                        bail!("injected registration read {read} failed");
+                    }
+                }
+                if self.heartbeats {
+                    for registration in registrations.iter_mut() {
+                        if registration.binary_version.as_deref() == Some("new") {
+                            registration.heartbeat_at += 1;
+                        }
+                    }
+                }
+                Ok(serde_json::to_value(&*registrations)?)
+            }
+            "audit_administration" => {
+                self.note("audit");
+                self.audited.lock().unwrap().push(params["args"][0].clone());
+                Ok(Value::Null)
+            }
             "runs_page" => {
                 let offset = params["args"][0].as_u64().unwrap() as usize;
                 let limit = params["args"][1].as_u64().unwrap() as usize;
@@ -416,6 +519,12 @@ impl QueueOpener for InstallQueue {
             CommandUnknown, ServiceUnreachable, SupervisorQueues,
         };
         self.0.note("open");
+        if self.0.watch_on_open && !self.0.service_runs(Path::new("/queue")) {
+            self.0
+                .service_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.0.note("watch_service");
+        }
         match self.0.first_open.lock().unwrap().take() {
             Some(OpenFailure::Unknown) => {
                 return Err(CommandUnknown("old service".into()).into());

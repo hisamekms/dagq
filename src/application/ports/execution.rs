@@ -2811,6 +2811,16 @@ pub trait ContainerRuntime {
 /// Runs a task's verification commands for `integrate` (ADR-0023
 /// decision 1) with the `[run.env]` of the repository (ADR-0023 decision 3).
 pub trait Verifier {
+    /// The settings no command changes, as the audit observes them
+    /// ([`crate::domain::audit::administration::SettingsSnapshot`]): the
+    /// SHA-256 of the main checkout's `dagq.toml`, of each file under its
+    /// `.dagq/agents` and of the compiled authorization policy. `None`
+    /// observes none.
+    fn settings_snapshot(
+        &self,
+    ) -> Result<Option<crate::domain::audit::administration::SettingsSnapshot>> {
+        Ok(None)
+    }
     /// The environment of the run whose directory is `run_dir`.
     fn run_env(&self, run_dir: &Path) -> Result<Vec<(String, String)>>;
     /// Whether the programs that environment names resolve on this

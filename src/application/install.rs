@@ -62,6 +62,14 @@ pub struct SchemaCheck {
 
 /// Building, running and moving `dagq` binaries.
 pub trait Binaries {
+    /// Serialize installs of the same target across queues and manual
+    /// commands. Held from reading the old binary through replacement,
+    /// handoff and any immediate restore, so the recorded predecessor is
+    /// the binary actually replaced. Released on drop, including errors.
+    fn hold_target(&self, target: &Path) -> Result<Box<dyn std::any::Any + Send>> {
+        let _ = target;
+        Ok(Box::new(()))
+    }
     /// Build the checkout for release; the binary built.
     fn build(&self, checkout: &Path) -> Result<PathBuf>;
     /// The build identifier `binary --version` reports.
@@ -132,6 +140,15 @@ pub trait Binaries {
     /// directory, keeping what was there as [`previous_path`] (ADR-0045
     /// decision 11).
     fn replace(&self, source: &Path, target: &Path) -> Result<()>;
+    /// [`Self::replace`], with what it read of the two binaries while it
+    /// held them under names of its own ([`Replacement`]). One that reads
+    /// nothing gives no facts. The caller holds [`Self::hold_target`].
+    /// An error after the new binary's rename carries [`Replacement`] as
+    /// context, retaining its facts even when saving `.previous` fails.
+    fn replace_held(&self, source: &Path, target: &Path) -> Result<Replacement> {
+        self.replace(source, target)?;
+        Ok(Replacement::default())
+    }
     /// Put [`previous_path`] back at `target` after a failed handoff.
     fn restore(&self, target: &Path) -> Result<()>;
     /// Run `binary` with `arguments`; what it printed.
@@ -531,7 +548,17 @@ pub fn built(
     })
 }
 
-/// [`install`] of the binary [`built`] gave.
+/// [`install`] of the binary [`built`] gave. Its report, and the report
+/// of an install that failed with the binary it put in place left there
+/// ([`KeptBinary`], [`HandoffFailed`]'s `binary`, an
+/// [`super::update::InstallFailed`], [`UnsettledBinary`] or [`BinaryLeft`],
+/// [`stays_in_place`]), carry the facts of that binary as the replacement
+/// read them while it held the files ([`Replacement::facts`]), which the
+/// audit's record of the install keeps
+/// ([`crate::domain::audit::administration::BinaryChange`]). A binary
+/// already in place (another queue's answer installed it) is replaced by
+/// none of this install: its facts are read from the target and the kept
+/// `.previous`.
 pub fn install_built(
     ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
     db: Option<&Path>,
@@ -558,6 +585,74 @@ fn install_built_as(
     built: Built,
     update_job: bool,
 ) -> Result<Value> {
+    let _target = ports.binaries.hold_target(&options.target)?;
+    let verification = built.e2e.clone();
+    let mut put = None;
+    let result = install_built_unhashed(ports, db, options, built, update_job, &mut put);
+    let Some(mut put) = put else {
+        return result;
+    };
+    put["e2e"] = verification;
+    let tag = |report: &mut Value| {
+        for key in ["digest", "replaced_binary"] {
+            report[key] = put[key].clone();
+        }
+    };
+    match result {
+        Ok(mut report) => {
+            tag(&mut report);
+            Ok(report)
+        }
+        Err(mut error) => {
+            if let Some(kept) = error.downcast_mut::<KeptBinary>() {
+                tag(&mut kept.report);
+            } else if let Some(failed) = error.downcast_mut::<super::update::InstallFailed>() {
+                tag(&mut failed.report);
+            } else if let Some(handoff) = error.downcast_mut::<HandoffFailed>() {
+                handoff.binary = put.clone();
+            } else if let Some(unsettled) = error.downcast_mut::<UnsettledBinary>() {
+                unsettled.report = put.clone();
+            } else {
+                error = error.context(BinaryLeft { report: put });
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Replace under the caller's target lock, retaining the facts even when
+/// the adapter fails after putting the new binary in place.
+fn replace_with_facts(
+    binaries: &dyn Binaries,
+    source: &Path,
+    target: &Path,
+    version: &str,
+    put: &mut Option<Value>,
+) -> Result<()> {
+    match binaries.replace_held(source, target) {
+        Ok(replaced) => {
+            *put = Some(replaced.facts(version));
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(replaced) = error.downcast_ref::<Replacement>() {
+                *put = Some(replaced.facts(version));
+            }
+            Err(error)
+        }
+    }
+}
+
+/// [`install_built`], setting `put` to the facts of the binary it put in
+/// place once it did.
+fn install_built_unhashed(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+    built: Built,
+    update_job: bool,
+    put: &mut Option<Value>,
+) -> Result<Value> {
     let Ports {
         binaries, files, ..
     } = *ports;
@@ -583,10 +678,32 @@ fn install_built_as(
     // installed): only the handoff is left, and `.previous` stays the
     // build it replaced.
     let in_place = source == *target;
+    // Its facts are read before the install goes on, and are the install's
+    // only where it would have replaced the binary: one refused before
+    // that put nothing in place for this queue.
+    let in_place_facts = in_place.then(|| {
+        let digest = |path: &Path| {
+            files
+                .read(path)
+                .ok()
+                .map(|bytes| crate::domain::replan_snapshot::sha256(&bytes))
+        };
+        Replacement {
+            digest: digest(target),
+            replaced_version: files
+                .is_file(&previous)
+                .then(|| binaries.version(&previous).ok())
+                .flatten(),
+            replaced_digest: digest(&previous),
+        }
+        .facts(&version)
+    });
     let db = db.filter(|db| files.is_file(db));
     let Some(db) = db else {
-        if !in_place {
-            binaries.replace(&source, target)?;
+        if in_place {
+            *put = in_place_facts;
+        } else {
+            replace_with_facts(binaries, &source, target, &version, put)?;
         }
         return Ok(json!({
             "outcome": "installed",
@@ -625,7 +742,7 @@ wrappers could not open the queue after: nothing was replaced. `install --allow-
 the supervisor (waits for its runs), migrates with a backup and starts it again",
             breaking.join(", ")
         );
-        return install_breaking(ports, db, &source, &version, replaced_version, options).map(
+        return install_breaking(ports, db, &source, &version, replaced_version, options, put).map(
             |mut report| {
                 report["e2e"] = e2e;
                 report
@@ -693,8 +810,10 @@ start: nothing was replaced"
 running supervisor cannot be handed over to it; nothing was replaced. Stop the supervisor \
 (`down --wait`), put the binary in place and run `up`"
     );
-    if !in_place {
-        binaries.replace(&source, target)?;
+    if in_place {
+        *put = in_place_facts;
+    } else {
+        replace_with_facts(binaries, &source, target, &version, put)?;
     }
     // Finish the service replacement before asking any supervisor to exec:
     // its first requests must not race with our stopping the service. The
@@ -769,10 +888,13 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
             Ok(handed) => handed,
             // One of them may run it: the binary stays.
             Err(error) if super::lifecycle::HandoffUnsettled::is(&error) => {
-                return Err(error.context(format!(
-                    "{version} stays at {}, as a supervisor asked to take it may run it; check `status`, then `down --force` and `up` to start every supervisor with it, or `install --rollback` to put the binary it replaced back for every supervisor",
-                    target.display()
-                )));
+                return Err(error.context(UnsettledBinary {
+                    message: format!(
+                        "{version} stays at {}, as a supervisor asked to take it may run it; check `status`, then `down --force` and `up` to start every supervisor with it, or `install --rollback` to put the binary it replaced back for every supervisor",
+                        target.display()
+                    ),
+                    report: Value::Null,
+                }));
             }
             Err(error) => return Err(undo.error(error, None)),
         }
@@ -921,6 +1043,102 @@ fn e2e_gate<Q: HostOpsQueue + ?Sized>(
     Ok(report)
 }
 
+/// What [`Binaries::replace`] read of the two binaries while it held each
+/// under a name of its own, so that no other install's replacement of the
+/// same target comes between its facts and the files it moved: the SHA-256
+/// of the copy it put in place (`digest`), and the version and SHA-256 of
+/// the binary it kept as [`previous_path`] (`None` with none in place, or
+/// a fact it could not read).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replacement {
+    pub digest: Option<String>,
+    pub replaced_version: Option<String>,
+    pub replaced_digest: Option<String>,
+}
+
+impl std::fmt::Display for Replacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the new binary is in place, but keeping its predecessor failed")
+    }
+}
+
+/// Facts retained as error context for any failure after replacement that
+/// did not restore the old binary, including adopt and a breaking build's
+/// restart. The original error stays in the chain for its caller.
+#[derive(Debug)]
+pub struct BinaryLeft {
+    pub report: Value,
+}
+
+impl std::fmt::Display for BinaryLeft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the new binary remains in place after the install failed")
+    }
+}
+
+impl Replacement {
+    /// The facts of the binary put in place as an install's report and the
+    /// audit's record of it read them: `version` (the new binary's),
+    /// `digest` and `replaced_binary`.
+    fn facts(&self, version: &str) -> Value {
+        json!({
+            "version": version,
+            "digest": self.digest,
+            "replaced_binary": {"version": self.replaced_version, "digest": self.replaced_digest},
+        })
+    }
+}
+
+/// The error of an install whose handoff a supervisor asked to take may
+/// have taken ([`super::lifecycle::HandoffUnsettled`]), as the context of
+/// that error: the binary stays, and `report` holds its facts
+/// ([`Replacement::facts`]) for the audit's record of it.
+#[derive(Debug)]
+pub struct UnsettledBinary {
+    pub message: String,
+    pub report: Value,
+}
+
+impl std::fmt::Display for UnsettledBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The report of the binary an install that failed left in place, with
+/// how it ended (`kept_outcome`), for the audit's record of it: one whose
+/// handoff every supervisor failed and whose binary did not go back
+/// (`not_restored`), one whose service could not start before the handoff
+/// and whose binary did not go back (`not_restored`), and one whose
+/// handoff may have been taken (`handoff_unsettled`), or another failure
+/// after replacement (`failed_after_replacement`). `None` for an error
+/// before replacement or after a successful restore, or a [`KeptBinary`],
+/// whose report is its own.
+pub fn stays_in_place(error: &anyhow::Error) -> Option<Value> {
+    let with = |mut report: Value, outcome: &str| {
+        report["kept_outcome"] = json!(outcome);
+        report
+    };
+    if let Some(unsettled) = error.downcast_ref::<UnsettledBinary>() {
+        return Some(with(unsettled.report.clone(), "handoff_unsettled"));
+    }
+    if let Some(left) = error.downcast_ref::<BinaryLeft>() {
+        return Some(with(left.report.clone(), "failed_after_replacement"));
+    }
+    if let Some(handoff) = HandoffFailed::of(error)
+        && handoff.restored["restored"] != json!(true)
+        && !handoff.binary.is_null()
+    {
+        return Some(with(handoff.binary.clone(), "not_restored"));
+    }
+    super::update::InstallFailed::of(error)
+        .filter(|failed| {
+            failed.report["restored"]["restored"] != json!(true)
+                && !failed.report["version"].is_null()
+        })
+        .map(|failed| with(failed.report.clone(), "not_restored"))
+}
+
 /// The error of an install that put the new binary in place and handed
 /// some of the supervisors over to it, but not all (ADR-t632-1): the binary
 /// stays, and `report` is what `install` reports, with `kept: true` and each
@@ -994,15 +1212,13 @@ impl Undo<'_> {
     fn error(&self, error: anyhow::Error, supervisors: Option<Vec<Value>>) -> anyhow::Error {
         let (error, restored) =
             self.restore(error, &format!("the handoff to {} failed", self.version));
-        match supervisors {
-            Some(supervisors) => HandoffFailed {
-                message: format!("{error:#}"),
-                supervisors,
-                restored,
-            }
-            .into(),
-            None => error,
+        HandoffFailed {
+            message: format!("{error:#}"),
+            supervisors: supervisors.unwrap_or_default(),
+            restored,
+            binary: Value::Null,
         }
+        .into()
     }
 
     /// Restore the binary before returning a failed handoff or a service
@@ -1074,6 +1290,9 @@ pub struct HandoffFailed {
     pub supervisors: Vec<Value>,
     /// `restored` and `version`, or `reason` when the binary did not go back.
     pub restored: Value,
+    /// The facts of the binary it put in place ([`Replacement::facts`]),
+    /// `null` until [`install_built`] gives them.
+    pub binary: Value,
 }
 
 impl std::fmt::Display for HandoffFailed {
@@ -1123,6 +1342,7 @@ fn install_breaking(
     version: &str,
     replaced_version: Option<String>,
     options: &InstallOptions,
+    put: &mut Option<Value>,
 ) -> Result<Value> {
     let binaries = ports.binaries;
     // Without an answering service there are no known supervisors to
@@ -1172,7 +1392,7 @@ first (it replaces the service), then this install again",
             )),
         )
     })?;
-    binaries.replace(source, &options.target)?;
+    replace_with_facts(binaries, source, &options.target, version, put)?;
     binaries.adopt(db, &options.target)?;
     let service = (source != options.target).then(|| serve_in_place(binaries, &options.target, db));
     let started = match live.first() {
@@ -1452,6 +1672,9 @@ pub fn parse_version(output: &str) -> Result<String> {
 pub(crate) mod test_support;
 
 #[cfg(test)]
+mod replacement_tests;
+
+#[cfg(test)]
 mod tests {
     use super::test_support::*;
     use super::*;
@@ -1553,7 +1776,7 @@ mod tests {
                 binaries: &*steps,
                 files: &files,
                 processes: &OnlyOne,
-                clock: &At(10_000),
+                clock: &At::new(10_000),
                 queues: &queues,
                 down: &down,
                 stop_records: None,
@@ -1578,7 +1801,23 @@ mod tests {
             } else {
                 install(&ports, Some(Path::new("/queue")), &options).unwrap_err()
             };
-            let text = error.to_string();
+            let text = format!("{error:#}");
+            let retained = stays_in_place(&error);
+            if refuses {
+                assert!(retained.is_none(), "migration refused before replacement");
+            } else {
+                let retained = retained.expect("post-replacement failure retains binary facts");
+                assert_eq!(retained["version"], "new");
+                assert_eq!(retained["replaced_binary"]["version"], "old");
+                assert_eq!(
+                    retained["digest"],
+                    "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+                );
+                assert_eq!(
+                    retained["replaced_binary"]["digest"],
+                    "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4"
+                );
+            }
             let mut expected = if already_running {
                 vec![]
             } else if drain {
@@ -1728,7 +1967,7 @@ mod tests {
                 binaries: &*steps,
                 files: &files,
                 processes: &OnlyOne,
-                clock: &At(10_000),
+                clock: &At::new(10_000),
                 queues: &queues,
                 down: &down,
                 stop_records: None,
@@ -1823,7 +2062,7 @@ mod tests {
             ],
             ..SupervisorsAndEvents::default()
         };
-        let live = live_supervisors(&At(now), &OnlyOne, &queue).unwrap();
+        let live = live_supervisors(&At::new(now), &OnlyOne, &queue).unwrap();
         let tokens: Vec<&str> = live
             .iter()
             .map(|registration| registration.token.as_str())
@@ -1962,7 +2201,7 @@ mod tests {
                 binaries: &*steps,
                 files: &files,
                 processes: &OnlyOne,
-                clock: &At(10_000),
+                clock: &At::new(10_000),
                 queues: &queues,
                 down: &|| bail!("no drain"),
                 stop_records: None,
@@ -2114,7 +2353,7 @@ mod tests {
                     binaries: &*steps,
                     files: &files,
                     processes: &OnlyOne,
-                    clock: &At(10_000),
+                    clock: &At::new(10_000),
                     queues: &queues,
                     down: &|| bail!("no drain"),
                     stop_records: None,
@@ -2264,7 +2503,7 @@ mod tests {
                 binaries: &*steps,
                 files: &files,
                 processes: &OnlyOne,
-                clock: &At(10_000),
+                clock: &At::new(10_000),
                 queues: &queues,
                 restart: &|_| bail!("no supervisor was handed over"),
                 is_ancestor: &|_, _| bail!("no checkout is built"),

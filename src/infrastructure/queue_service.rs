@@ -6527,7 +6527,12 @@ pub struct ControlCaller {
     client: Client,
     socket: PathBuf,
     control: crate::domain::queue_service::ControlCall,
+    #[cfg(test)]
+    exchange: Option<ControlExchange>,
 }
+
+#[cfg(test)]
+type ControlExchange = Arc<dyn Fn(&ServiceRequest) -> Result<ServiceResponse> + Send + Sync>;
 
 impl ControlCaller {
     /// The caller of `control`'s steps through `client`, the host's
@@ -6548,7 +6553,25 @@ impl ControlCaller {
             socket: socket.clone(),
             client,
             control,
+            #[cfg(test)]
+            exchange: None,
         })
+    }
+
+    /// Inject only the transport; request construction, control wrapping,
+    /// response conversion and retry semantics remain the production ones.
+    #[cfg(test)]
+    pub(crate) fn exchanging_with(mut self, exchange: ControlExchange) -> Self {
+        self.exchange = Some(exchange);
+        self
+    }
+
+    fn exchange(&self, request: &ServiceRequest) -> Result<ServiceResponse> {
+        #[cfg(test)]
+        if let Some(exchange) = &self.exchange {
+            return exchange(request);
+        }
+        call_retry_in_process(&self.socket, request, CLIENT_TIMEOUT)
     }
 }
 
@@ -6589,6 +6612,20 @@ fn control_answer(response: ServiceResponse) -> Result<Value> {
             Err(anyhow::Error::new(
                 crate::application::supervisor_service::CommandUnknown(error.message),
             ))
+        }
+        (_, _, Some(error)) if error.code == ServiceErrorCode::BadRequest => {
+            // Preserve the transport-independent refusal for application
+            // compatibility decisions, and the CLI's ClientFailure too.
+            let failure = ClientFailure::new(error.code.as_str(), error.message.clone());
+            Err(
+                anyhow::Error::new(crate::application::supervisor_service::Refused {
+                    code: error.code,
+                    message: error.message,
+                    rejected: error.rejected,
+                    held: error.held.map(|held| *held),
+                })
+                .context(failure),
+            )
         }
         (_, _, Some(error)) => Err(ClientFailure {
             denied: error
@@ -6640,25 +6677,24 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             use_case: UseCase::Control,
             params,
         };
-        let response =
-            call_retry_in_process(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
-                use crate::application::supervisor_service::ServiceUnreachable;
-                let failure = self.client.not_answered(&error, UseCase::Control);
-                // A request past the limit was never sent, and an answer past it
-                // was given: neither is a service out of reach, nor sent again.
-                if error.downcast_ref::<RequestPastLimit>().is_some()
-                    || error.downcast_ref::<AnswerPastLimit>().is_some()
-                {
-                    return anyhow::Error::new(failure);
-                }
-                let lost = if error.downcast_ref::<NotConnected>().is_some() {
-                    // Nothing was sent: the service did not do it.
-                    ServiceUnreachable::not_done(format!("{error:#}"))
-                } else {
-                    ServiceUnreachable::maybe_done(format!("{error:#}"))
-                };
-                anyhow::Error::new(lost).context(failure)
-            })?;
+        let response = self.exchange(&request).map_err(|error| {
+            use crate::application::supervisor_service::ServiceUnreachable;
+            let failure = self.client.not_answered(&error, UseCase::Control);
+            // A request past the limit was never sent, and an answer past it
+            // was given: neither is a service out of reach, nor sent again.
+            if error.downcast_ref::<RequestPastLimit>().is_some()
+                || error.downcast_ref::<AnswerPastLimit>().is_some()
+            {
+                return anyhow::Error::new(failure);
+            }
+            let lost = if error.downcast_ref::<NotConnected>().is_some() {
+                // Nothing was sent: the service did not do it.
+                ServiceUnreachable::not_done(format!("{error:#}"))
+            } else {
+                ServiceUnreachable::maybe_done(format!("{error:#}"))
+            };
+            anyhow::Error::new(lost).context(failure)
+        })?;
         control_answer(response)
     }
 

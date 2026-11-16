@@ -257,6 +257,24 @@ pub(super) fn exit(code: i32) -> Exit {
 }
 
 impl Verifier for FakeVerifier {
+    /// The settings as the test's `dagq.toml` text alone.
+    fn settings_snapshot(
+        &self,
+    ) -> Result<Option<crate::domain::audit::administration::SettingsSnapshot>> {
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(Some(
+            [(
+                crate::domain::audit::administration::SETTINGS_FILE.to_owned(),
+                crate::domain::replan_snapshot::sha256(config.as_bytes()),
+            )]
+            .into(),
+        ))
+    }
+
     fn run_env(&self, _: &Path) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
     }

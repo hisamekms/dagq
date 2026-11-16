@@ -396,6 +396,9 @@ privileged_use_cases!(
     /// The queue's binding to a repository changed: `rebind`, and `init`
     /// binding an existing queue to the client's repository.
     Rebind,
+    /// The supervisor's observation, at its passes, of the settings no
+    /// command changes.
+    SettingsObservation,
 });
 
 /// What a privileged use case writes to the audit.
@@ -487,6 +490,7 @@ pub const USE_CASES: &[UseCaseRow] = &[
     row(U::GoalLandingMark, &[C::GoalLandingMark], NotWritten("the landing mark is the team version's gate (stage 2); stage 0 records the landings it holds")),
     row(U::TokenIssue, &[C::TokenIssue], NotWritten("a token is issued only to a child the policy lets its parent start; its refusal is authz.denied")),
     row(U::Rebind, &[C::QueueAdmin], Writes(&[A::AuthzPrivileged])),
+    row(U::SettingsObservation, &[C::Supervise], Writes(&[A::ConfigChanged])),
     row(U::TeamRegistry, &[C::RunnerRegister, C::RunnerRevoke, C::RunnerShare, C::DelegateWrite], NotWritten("the team version's records (stage 2); stage 0's host has no runner or delegate")),
 ];
 
@@ -591,7 +595,7 @@ pub const SERVICE_ENTRIES: &[(UseCase, Entry)] = &[
     (UseCase::WatchPoll, Ordinary(READ)), (UseCase::AgentCases, Ordinary(ACTOR)),
     (UseCase::AgentDecide, Ordinary(ACTOR)), (UseCase::AgentSets, Ordinary(READ)),
     (UseCase::AgentSet, Ordinary(READ)), (UseCase::TelemetryReport, Ordinary(ACTOR)),
-    (UseCase::Supervisor, Privileged(&[U::LandingJudgment, U::Integrate, U::Push, U::TokenIssue])),
+    (UseCase::Supervisor, Privileged(&[U::LandingJudgment, U::Integrate, U::Push, U::TokenIssue, U::SettingsObservation])),
     (UseCase::Control, Control),
     (UseCase::SessionRun, Ordinary(ACTOR)), (UseCase::SessionRecord, Ordinary(ACTOR)),
     (UseCase::DenialRecord, Privileged(&[U::Refusal])),

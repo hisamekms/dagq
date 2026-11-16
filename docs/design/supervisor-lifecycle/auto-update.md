@@ -117,6 +117,8 @@ jobには停止後にupを打つprincipalが無いので、askに載るコマン
 更新はtask・goal・runに属さないqueueのeventで記録し、kindの追加にmigrationは要らない（[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)決定17・19〜22）。
 旧い表binary_updatesは残すが読み書きしない。
 記録は`update::record`、supervisorとstatus向けの読取りは`SqliteQueue::update_events`、jobの段の並べ方は`domain::in_job_order`が入口になる。
+binaryを置いた記録は同じtransactionで監査の記録（前後の版とdigest）も書き、書けなければどちらも残らない。
+置換後の失敗でbinaryが残った場合も、その結果とともに監査に残す（[監査](../audit.md)）。
 
 成功の通知は人に知らせるだけで、roleなしのwatchは起きるがinboxのwatchを単独では起こさず、次に別件で起きたeventsに古い順に載る（[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)、[Events and watch](commands.md)）。
 失敗と承認待ちのevent自身はattentionにせず、askの通知がinboxを起こす。

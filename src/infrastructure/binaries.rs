@@ -153,6 +153,25 @@ fn up_command(binary: &Path, env: impl Fn(&str) -> Option<std::ffi::OsString>) -
 }
 
 impl Binaries for LocalBinaries {
+    /// `<target>.install.lock` is shared by every queue and manual
+    /// install of this target, independent of their build locks. Its
+    /// inode stays in place after release so later holders cannot split
+    /// into separate locks by removing and recreating it.
+    fn hold_target(&self, target: &Path) -> Result<Box<dyn std::any::Any + Send>> {
+        use crate::application::RunFiles;
+        let dir = target
+            .parent()
+            .context("the binary target has no directory")?;
+        fs::create_dir_all(dir)?;
+        let mut name = target
+            .file_name()
+            .context("the binary target has no name")?
+            .to_os_string();
+        name.push(".install.lock");
+        // A stable sibling, never renamed or removed: queues sharing the
+        // target contend on the same inode, unlike their build locks.
+        Ok(super::run_files::LocalRunFiles.lock(&dir.join(name))?)
+    }
     fn build(&self, checkout: &Path) -> Result<PathBuf> {
         let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .args(BUILD_ARGS)
@@ -315,6 +334,14 @@ impl Binaries for LocalBinaries {
     }
 
     fn replace(&self, source: &Path, target: &Path) -> Result<()> {
+        self.replace_held(source, target).map(drop)
+    }
+
+    fn replace_held(
+        &self,
+        source: &Path,
+        target: &Path,
+    ) -> Result<crate::application::install::Replacement> {
         let dir = target
             .parent()
             .with_context(|| format!("{} has no directory", target.display()))?;
@@ -329,10 +356,22 @@ impl Binaries for LocalBinaries {
         fs::copy(source, &staged)
             .with_context(|| format!("copy {} to {}", source.display(), staged.display()))?;
         fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        // Each binary's facts are read from the name this install alone
+        // holds it under, so another replacement of the target cannot come
+        // between them and the file it moves.
+        let digest = |path: &Path| {
+            fs::read(path)
+                .ok()
+                .map(|bytes| crate::domain::replan_snapshot::sha256(&bytes))
+        };
+        let mut replacement = crate::application::install::Replacement {
+            digest: digest(&staged),
+            ..Default::default()
+        };
         if !target.exists() {
             fs::rename(&staged, target)
                 .with_context(|| format!("move the new binary to {}", target.display()))?;
-            return Ok(());
+            return Ok(replacement);
         }
         // The binary in place keeps its inode (a running process keeps
         // using it) under a second name, which then becomes `.previous`.
@@ -342,11 +381,14 @@ impl Binaries for LocalBinaries {
             fs::copy(target, &kept)
                 .with_context(|| format!("keep {} as {}", target.display(), kept.display()))?;
         }
+        replacement.replaced_digest = digest(&kept);
+        replacement.replaced_version = self.version(&kept).ok();
         fs::rename(&staged, target)
             .with_context(|| format!("move the new binary to {}", target.display()))?;
         fs::rename(&kept, previous_path(target))
-            .with_context(|| format!("keep the replaced binary next to {}", target.display()))?;
-        Ok(())
+            .with_context(|| format!("keep the replaced binary next to {}", target.display()))
+            .map_err(|error| error.context(replacement.clone()))?;
+        Ok(replacement)
     }
 
     fn restore(&self, target: &Path) -> Result<()> {

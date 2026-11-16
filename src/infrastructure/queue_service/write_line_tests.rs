@@ -327,6 +327,42 @@ fn every_kind_of_read_is_answered_while_the_line_is_held() {
     assert!(wrote.ok, "{wrote:?}");
 }
 
+/// Go through handled's actual routing: verification completes while the
+/// writer is occupied, then only the short result confirmation uses it.
+#[test]
+fn audit_verification_reads_off_the_line_and_only_confirmation_writes_on_it() {
+    let fixture = service(no_commands);
+    let supervisor = token_of(&fixture.backend, &Principal::supervisor(&fixture.lease, 7));
+    let held = HeldLine::of(&fixture);
+    let verified = answered_from(
+        &fixture.backend,
+        request(
+            Some(supervisor.clone()),
+            UseCase::Supervisor,
+            json!({"op": "verify_audit_chain", "args": []}),
+        ),
+        Peer::Other,
+    );
+    assert!(verified.ok, "{verified:?}");
+    let checked = verified.result.unwrap();
+    assert!(checked.is_array());
+    assert_eq!(checked[0]["audit_verified"], true);
+    let params = json!({"op": "apply_audit_check", "args": [checked]});
+    assert!(crate::application::queue_service::on_write_line(
+        UseCase::Supervisor,
+        &params
+    ));
+    let confirmed = sent_from(
+        &fixture.backend,
+        request(Some(supervisor), UseCase::Supervisor, params),
+        Peer::Other,
+    );
+    held.let_go();
+    let answer = confirmed.recv_timeout(BOUND).unwrap().unwrap().response;
+    assert!(answer.ok, "{answer:?}");
+    assert_eq!(answer.result.unwrap()["audit_verified"], true);
+}
+
 /// Every operation sent to a read-only connection is answered on one with the
 /// line held: none of them writes or waits for the line, in so far as the
 /// arguments below read as its own. A write there fails as the first case

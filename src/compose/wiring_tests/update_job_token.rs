@@ -29,7 +29,7 @@ use crate::{
 
 /// `use_case` with `params` sent to `backend`'s service with `token`, from
 /// the process `process`.
-fn send(
+pub(super) fn send(
     backend: &MemoryBackend,
     token: &str,
     use_case: UseCase,
@@ -58,18 +58,18 @@ fn send(
 }
 
 /// The step `op` with `args` of the automatic update's job, process `pid`.
-fn job_step(op: &str, args: Value, pid: u32) -> Value {
+pub(super) fn job_step(op: &str, args: Value, pid: u32) -> Value {
     control_step(ControlCommand::AutoUpdate, op, args, pid)
 }
 
-fn control_step(command: ControlCommand, op: &str, args: Value, pid: u32) -> Value {
+pub(super) fn control_step(command: ControlCommand, op: &str, args: Value, pid: u32) -> Value {
     json!({
         "control": ControlCall { command, task: None, yes: false, pid },
         "call": {"op": op, "args": args},
     })
 }
 
-fn supervisor_op(op: &str, args: Value) -> Value {
+pub(super) fn supervisor_op(op: &str, args: Value) -> Value {
     json!({"op": op, "args": args})
 }
 
@@ -79,15 +79,15 @@ fn refused(response: &ServiceResponse) -> ServiceErrorCode {
     response.error.as_ref().expect("an error").code
 }
 
-struct Test {
-    wiring: Wiring,
-    backend: std::sync::Arc<MemoryBackend>,
-    lease: LeaseToken,
-    pid: u32,
+pub(super) struct Test {
+    pub(super) wiring: Wiring,
+    pub(super) backend: std::sync::Arc<MemoryBackend>,
+    pub(super) lease: LeaseToken,
+    pub(super) pid: u32,
 }
 
 impl Test {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let wiring = Wiring::new(
             name,
             Script {
@@ -107,12 +107,12 @@ impl Test {
     }
 
     /// The value of a token whose file is `file`.
-    fn read(&self, file: &std::path::Path) -> String {
+    pub(super) fn read(&self, file: &std::path::Path) -> String {
         self.wiring.tokens().read(file).expect("read the token")
     }
 
     /// The supervisor's sign-in, as the user's `up` has it issued.
-    fn sign_in(&self, lease: &LeaseToken) -> String {
+    pub(super) fn sign_in(&self, lease: &LeaseToken) -> String {
         let file = self
             .backend
             .issue_as(
@@ -135,7 +135,7 @@ impl Test {
         )
     }
 
-    fn issued(&self, token: &str, job: &str) -> String {
+    pub(super) fn issued(&self, token: &str, job: &str) -> String {
         let issued = self.issue(token, job);
         assert!(issued.ok, "{issued:?}");
         let file: PathBuf =
@@ -144,7 +144,7 @@ impl Test {
     }
 
     /// The job's binding of its own token `job` to its process `pid`.
-    fn bind(&self, job: &str, pid: u32) -> ServiceResponse {
+    pub(super) fn bind(&self, job: &str, pid: u32) -> ServiceResponse {
         send(
             &self.backend,
             job,

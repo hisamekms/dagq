@@ -4064,6 +4064,12 @@ pub struct ShellVerifier {
 }
 
 impl Verifier for ShellVerifier {
+    fn settings_snapshot(
+        &self,
+    ) -> Result<Option<crate::domain::audit::administration::SettingsSnapshot>> {
+        super::audit::settings_snapshot(&self.checkout).map(Some)
+    }
+
     fn run_env(&self, run_dir: &Path) -> Result<Vec<(String, String)>> {
         let queue_dir = self
             .db

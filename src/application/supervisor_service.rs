@@ -291,7 +291,8 @@ fn opened_for(
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes by those who read this; the connection a
 /// request runs on goes by the wider [`needs::only_reads`].
-const READ_OPS: [&str; 110] = [
+const READ_OPS: [&str; 111] = [
+    "verify_audit_chain",
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -1107,6 +1108,9 @@ pub fn answer(
     let needs = needs::supervisor_needs(&params.op, &params.args).map_err(BadOperation)?;
     if needs != Capability::Supervise {
         super::queue_service::authorize_supervisor_needs(&mut *queue, &actor, needs)?;
+    }
+    if params.op == "verify_audit_chain" {
+        super::queue_service::take_place(backend.heavy_reads(), UseCase::AuditVerify, notes)?;
     }
     let own = |token: &LeaseToken| {
         if *token == registration {

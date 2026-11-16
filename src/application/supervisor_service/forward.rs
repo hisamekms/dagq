@@ -2407,6 +2407,29 @@ impl EventStore for SupervisorQueue {
     fn audit_privileged_operation(&self, operation: &str) -> Result<()> {
         self.remote("audit_privileged_operation", vec![to_value(operation)?])
     }
+    fn audit_administration(
+        &self,
+        fact: &crate::domain::audit::administration::AdministrationFact,
+    ) -> Result<()> {
+        self.remote("audit_administration", vec![to_value(fact)?])
+    }
+    fn observe_settings(
+        &self,
+        snapshot: &crate::domain::audit::administration::SettingsSnapshot,
+    ) -> Result<bool> {
+        self.remote("observe_settings", vec![to_value(snapshot)?])
+    }
+    fn verify_audit_chain(
+        &self,
+    ) -> Result<Option<crate::domain::audit::administration::AuditCheck>> {
+        self.remote("verify_audit_chain", vec![])
+    }
+    fn apply_audit_check(
+        &self,
+        checked: crate::domain::audit::administration::AuditCheck,
+    ) -> Result<serde_json::Value> {
+        self.remote("apply_audit_check", vec![to_value(checked)?])
+    }
 
     fn request_as(&self, requester: Option<&ActorContext>) -> Option<String> {
         let requested = requester.map(|actor| actor.actor_id().to_owned());

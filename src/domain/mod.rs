@@ -2644,6 +2644,13 @@ pub enum AttentionNext {
     /// nothing set to the container runs. It ends once every relay runs
     /// again.
     QueueRelayMachine,
+    /// The supervisor's periodic check of the audit's chain found a record
+    /// changed, missing or out of order (`supervisor_audit_mismatch`,
+    /// [`audit::administration::verify_due`]): a change of the DB that
+    /// went around the CLI. A person runs `dagq audit verify` and looks at
+    /// the record it names. It ends when a later check verifies the chain
+    /// (`supervisor_audit_verified`).
+    VerifyAudit,
     /// Not a person's to act on: a run's turn or its landing's
     /// verification waits for the dagq machine's memory
     /// (`container_memory_waiting`, ADR-t3163-1 decision 4), in the
@@ -2807,6 +2814,7 @@ impl fmt::Display for AttentionNext {
             Self::QueueServiceStatus => f.write_str("dagq service status"),
             Self::QueueBrokerStatus => f.write_str("dagq queue-broker status"),
             Self::QueueRelayMachine => f.write_str("look at the dagq podman machine's relays"),
+            Self::VerifyAudit => f.write_str("dagq audit verify"),
             Self::WaitingForMemory => {
                 f.write_str("waiting for the dagq podman machine's memory (runtime)")
             }
@@ -2888,6 +2896,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     queue_service::QUEUE_SERVICE_DOWN,
     queue_broker::QUEUE_BROKER_DOWN,
     broker_relay::QUEUE_RELAY_DOWN,
+    // The periodic check of the audit's chain found it changed outside the
+    // CLI; its close `supervisor_audit_verified` is no attention.
+    EventKind::SupervisorAuditMismatch.as_str(),
     event_kind::TASK_HOLD_REMINDED,
     "ask_opened",
     "ask_answered",
@@ -3263,6 +3274,7 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         (Some(EventKind::QueueServiceDown), _) => Some(AttentionNext::QueueServiceStatus),
         (Some(EventKind::QueueBrokerDown), _) => Some(AttentionNext::QueueBrokerStatus),
         (Some(EventKind::QueueRelayDown), _) => Some(AttentionNext::QueueRelayMachine),
+        (Some(EventKind::SupervisorAuditMismatch), _) => Some(AttentionNext::VerifyAudit),
         // A hold past its `until` or a day on, told once per day
         // (ADR-t1879-1).
         (Some(EventKind::TaskHoldReminded), _) => payload
@@ -4617,6 +4629,12 @@ mod attention_tests {
             ("queue_broker_running", json!({}), None),
             ("queue_broker_denied", json!({"run": "r1"}), None),
             (
+                "supervisor_audit_mismatch",
+                json!({"seq": 2, "kind": "Hash"}),
+                Some(VerifyAudit),
+            ),
+            ("supervisor_audit_verified", json!({}), None),
+            (
                 "queue_relay_down",
                 json!({"reason": "start_failed"}),
                 Some(QueueRelayMachine),
@@ -5013,6 +5031,7 @@ mod attention_tests {
             QueueRelayMachine.to_string(),
             "look at the dagq podman machine's relays"
         );
+        assert_eq!(VerifyAudit.to_string(), "dagq audit verify");
         assert_eq!(
             WaitingForMemory.to_string(),
             "waiting for the dagq podman machine's memory (runtime)"

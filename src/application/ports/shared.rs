@@ -564,6 +564,70 @@ pub trait EventStore {
         Ok(())
     }
 
+    /// Retain a fact of the administration a control-side command sends
+    /// (`up`, `down`, a person's `install`) as the authenticated
+    /// principal's audit record. A store that keeps no audit records
+    /// nothing.
+    fn audit_administration(
+        &self,
+        _fact: &crate::domain::audit::administration::AdministrationFact,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// [`Self::audit_administration`] as the result's record `record`
+    /// (ADR-t3102-3 decision 5): a fact sent again under the identity it
+    /// was first sent with is admitted once. A store that cannot tell
+    /// takes it as a first sending.
+    fn audit_administration_once(
+        &self,
+        fact: &crate::domain::audit::administration::AdministrationFact,
+        _record: &str,
+    ) -> Result<()> {
+        self.audit_administration(fact)
+    }
+
+    /// Retain, as `observed`, the settings a supervisor's pass read when
+    /// they differ from the last observation's record
+    /// ([`crate::domain::audit::administration::settings_changed`]),
+    /// compared in the store's own transaction; whether it recorded one.
+    fn observe_settings(
+        &self,
+        _snapshot: &crate::domain::audit::administration::SettingsSnapshot,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Verify the audit's whole chain as `dagq audit verify` does, in one
+    /// read transaction, and record in a later write transaction the
+    /// attention of a new mismatch (`supervisor_audit_mismatch`) or its end
+    /// when the chain verifies again (`supervisor_audit_verified`), unless
+    /// another check recorded after the snapshot it verified; the
+    /// verification's answer (`null` for a store that keeps no audit).
+    fn check_audit_chain(&self) -> Result<serde_json::Value> {
+        match self.verify_audit_chain()? {
+            Some(checked) => self.apply_audit_check(checked),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// Heavy, read-only verification and the newest check id its snapshot
+    /// saw. Sent off the write line and off the supervisor's pass.
+    fn verify_audit_chain(
+        &self,
+    ) -> Result<Option<crate::domain::audit::administration::AuditCheck>> {
+        Ok(None)
+    }
+
+    /// Short confirmation of a verified snapshot, serialized with writes.
+    /// A result superseded by another check changes no attention.
+    fn apply_audit_check(
+        &self,
+        _checked: crate::domain::audit::administration::AuditCheck,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+
     /// The latest `limit` steps of the automatic update (its `update_*`
     /// queue events), newest first in their jobs' order: each job's
     /// `update_started` behind the steps the job wrote before it

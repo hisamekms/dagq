@@ -68,6 +68,9 @@ const TICK: Duration = Duration::from_millis(20);
 /// Where the repository of a test is checked out: made nowhere.
 const CHECKOUT: &str = "/wiring/repo";
 
+pub(super) type CallerWrap =
+    Arc<dyn Fn(Arc<dyn ServiceCaller>) -> Arc<dyn ServiceCaller> + Send + Sync>;
+
 thread_local! {
     /// The free bytes the supervisor started on this thread reads
     /// ([`Wiring::free`]); `u64::MAX`, and a thread that set none, read
@@ -181,6 +184,7 @@ pub(super) struct Wiring {
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     startup_fault: Option<Arc<super::startup::Fault>>,
+    caller_wrap: Option<CallerWrap>,
     handoff: Option<crate::domain::LeaseToken>,
     /// The free bytes the supervisors read; `u64::MAX` (the default) reads
     /// none, so the disk holds nothing.
@@ -196,6 +200,10 @@ pub(super) struct Wiring {
 }
 
 impl Wiring {
+    pub(super) fn with_caller_wrap(mut self, wrap: CallerWrap) -> Self {
+        self.caller_wrap = Some(wrap);
+        self
+    }
     /// The wiring test `name` whose agent does what `script` says and whose
     /// verification passes every command; its deadline starts now.
     pub(super) fn new(name: &str, script: Script) -> Self {
@@ -258,6 +266,7 @@ impl Wiring {
             ci_watch: None,
             pass_probe: None,
             startup_fault: None,
+            caller_wrap: None,
             handoff: None,
             free: Arc::new(AtomicU64::new(u64::MAX)),
             moving_sizes: Arc::new(|_: &Path| Ok(None)),
@@ -906,6 +915,7 @@ impl Wiring {
                 ci_watch: self.ci_watch.clone(),
                 pass_probe: self.pass_probe.clone(),
                 startup_fault: self.startup_fault.clone(),
+                caller_wrap: self.caller_wrap.clone(),
                 handoff: self.handoff.clone(),
                 planning: self.planning.get(),
                 supervisor_file: self.supervisor_file.clone(),
@@ -1000,6 +1010,7 @@ struct Parts {
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     startup_fault: Option<Arc<super::startup::Fault>>,
+    caller_wrap: Option<CallerWrap>,
     handoff: Option<crate::domain::LeaseToken>,
     planning: (Option<usize>, Duration),
     supervisor_file: Option<supervise::SupervisorFile>,
@@ -1034,6 +1045,10 @@ impl Parts {
             Some(fault) => fault.caller(service),
             None => service,
         };
+        let service = self
+            .caller_wrap
+            .as_ref()
+            .map_or_else(|| service.clone(), |wrap| wrap(service.clone()));
         let queues = SupervisorQueues::new(
             service.clone(),
             ActorContext::instance(ActorRole::Supervisor, self.pid),

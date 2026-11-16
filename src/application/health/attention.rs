@@ -735,6 +735,28 @@ pub fn attention(
             next: AttentionNext::QueueRelayMachine,
         });
     }
+    // The supervisor's periodic check found the audit's chain changed
+    // outside the CLI: it stands until a later check verifies it.
+    if let Some(event) = queue.latest_queue_event(
+        &crate::domain::audit::administration::CHECK_KINDS.map(EventKind::as_str),
+    )? && event.kind == EventKind::SupervisorAuditMismatch
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "mismatch".into(),
+            kind: EventKind::SupervisorAuditMismatch.as_str().into(),
+            last_error: Some(truncate_reason(&format!(
+                "the audit's chain does not verify at seq {} ({})",
+                event.payload["seq"], event.payload["kind"]
+            ))),
+            last_error_code: None,
+            next: AttentionNext::VerifyAudit,
+        });
+    }
     // A proposal whose plan review failed, or whose planner did not answer
     // a revise, waits for a person outside any ask (ADR-0041 decisions 13,
     // 17); it is shown on the proposal's first task.

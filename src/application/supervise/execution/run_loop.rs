@@ -133,6 +133,7 @@ impl Supervisor<'_> {
         }
         self.host
             .host_metrics_finish(&deadline, &*self.generators.clock);
+        self.host.audit_finish(&deadline, &*self.generators.clock);
         self.host
             .moving_sizes_finish(&deadline, &*self.generators.clock);
         self.on_observation(|observation, env| observation.ledger_finish(env, &deadline));
@@ -388,6 +389,9 @@ impl Supervisor<'_> {
             // And the sccache server, which no process given [run.env]
             // may start (ADR-t1215-1, ADR-t2086-1).
             self.on_host(|host, env| host.sccache_pass(env));
+            // And the audit: the settings observed, the chain checked
+            // every period (ADR-t4840-1's G).
+            self.on_host(|host, env| host.audit_pass(env, !stopping && !handing_off));
             self.check_landing_branch(options.landing_recheck);
             self.mark_run_env_change()?;
             // Every pass, before any claim: a change of `[conflicts]` takes

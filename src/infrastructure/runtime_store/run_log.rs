@@ -48,6 +48,36 @@ pub(super) fn update_events_sql(dialect: SqlDialect) -> String {
     )
 }
 
+/// The audit's record a queue event of `kind` carries, in the transaction
+/// that writes the event, whichever operation writes it (once, or once
+/// under a sender's record): the binary an update put in place is the
+/// updater's `binary.installed`, committed with `update_installed` or not
+/// at all, and written once with it.
+fn audit_of_queue_event(
+    tx: &impl SqlWrite,
+    kind: EventKind,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    if kind == EventKind::UpdateInstalled {
+        crate::infrastructure::audit::update_installed(tx, payload)?;
+    }
+    Ok(())
+}
+
+/// The newest of the periodic check's records
+/// ([`crate::domain::audit::administration::CHECK_KINDS`]).
+fn newest_check(tx: &impl SqlRead) -> Result<Option<RunEvent>> {
+    let mut newest: Option<RunEvent> = None;
+    for kind in crate::domain::audit::administration::CHECK_KINDS.map(EventKind::as_str) {
+        let event = SqlRead::query_row(tx, LATEST_QUEUE_EVENT_SQL, sql_params![kind], event_row)
+            .optional()?;
+        if event.as_ref().map(|e| e.id) > newest.as_ref().map(|e| e.id) {
+            newest = event;
+        }
+    }
+    Ok(newest)
+}
+
 /// The newest of the queue's events of the kind `?1`.
 pub(super) const LATEST_QUEUE_EVENT_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
      WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
@@ -503,8 +533,109 @@ impl<E: TransactionEntries> StoreQueue<E> {
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
         let tx = self.write_entry("record_queue_event")?;
         let id = queue_event(&tx, kind, &payload)?;
+        audit_of_queue_event(&tx, kind, &payload)?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// [`crate::application::EventStore::audit_administration`]: the
+    /// fact's audit record in its own write transaction.
+    pub fn audit_administration(
+        &self,
+        fact: &crate::domain::audit::administration::AdministrationFact,
+    ) -> Result<()> {
+        self.audit_administration_once(fact, None)
+    }
+
+    /// [`crate::application::EventStore::audit_administration_once`]: the
+    /// fact's audit record in its own write transaction, unless one was
+    /// admitted under `record` before.
+    pub fn audit_administration_once(
+        &self,
+        fact: &crate::domain::audit::administration::AdministrationFact,
+        record: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.write_entry("audit_administration")?;
+        crate::infrastructure::audit::administration(&tx, fact, record)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// [`crate::application::EventStore::observe_settings`]: compared
+    /// first in a read transaction with the last record any supervisor
+    /// wrote, so that a pass whose settings did not change takes no writer;
+    /// a change is compared again and recorded in one write transaction.
+    pub fn observe_settings(
+        &self,
+        snapshot: &crate::domain::audit::administration::SettingsSnapshot,
+    ) -> Result<bool> {
+        {
+            let read = self.read_entry("observe_settings_read")?;
+            let last = crate::infrastructure::audit::last_settings(&read)?;
+            if SqlRead::dialect(&read) != SqlDialect::Sqlite
+                || crate::domain::audit::administration::settings_changed(last.as_ref(), snapshot)
+                    .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        let tx = self.write_entry("observe_settings")?;
+        let recorded = crate::infrastructure::audit::observe_settings(&tx, snapshot)?;
+        tx.commit()?;
+        Ok(recorded)
+    }
+
+    /// [`crate::application::EventStore::check_audit_chain`]:
+    /// [`Self::verify_audit_chain`], then [`Self::apply_audit_check`].
+    pub fn check_audit_chain(&self) -> Result<serde_json::Value> {
+        match self.verify_audit_chain()? {
+            Some(checked) => self.apply_audit_check(checked),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// The chain verified as `dagq audit verify` does, in a read
+    /// transaction so that reading the whole chain holds no writer, with
+    /// the id of the newest of the check's records that snapshot holds;
+    /// `None` for a store that keeps no audit.
+    pub(crate) fn verify_audit_chain(&self) -> Result<Option<(serde_json::Value, Option<i64>)>> {
+        let read = self.read_entry("check_audit_chain_read")?;
+        if SqlRead::dialect(&read) != SqlDialect::Sqlite {
+            return Ok(None);
+        }
+        let found = crate::infrastructure::audit::verify(&read, None)?;
+        let seen = newest_check(&read)?.map(|event| event.id.as_i64());
+        Ok(Some((found, seen)))
+    }
+
+    /// The attention's record of a check's answer `found`, judged on the
+    /// newest of the check's records and written in one short write
+    /// transaction, unless another check recorded after the snapshot the
+    /// answer verified (`seen`,
+    /// [`crate::domain::audit::administration::check_applies`]): that
+    /// newer answer stands, and this one is answered `superseded`.
+    pub(crate) fn apply_audit_check(
+        &self,
+        (mut found, seen): (serde_json::Value, Option<i64>),
+    ) -> Result<serde_json::Value> {
+        use crate::domain::audit::administration::{check_applies, mismatch_is_new};
+        let tx = self.write_entry("check_audit_chain")?;
+        let newest = newest_check(&tx)?;
+        if !check_applies(seen, newest.as_ref().map(|event| event.id.as_i64())) {
+            found["superseded"] = serde_json::Value::Bool(true);
+            return Ok(found);
+        }
+        let standing = newest
+            .as_ref()
+            .filter(|event| event.kind == EventKind::SupervisorAuditMismatch)
+            .map(|event| &event.payload);
+        if mismatch_is_new(standing, &found) {
+            queue_event(&tx, EventKind::SupervisorAuditMismatch, &found)?;
+        } else if standing.is_some() && found["audit_verified"] == true {
+            queue_event(&tx, EventKind::SupervisorAuditVerified, &found)?;
+        }
+        tx.commit()?;
+        Ok(found)
     }
 
     /// Record `events`, each an event of the queue itself, in one write
@@ -523,7 +654,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
         let tx = self.write_entry("record_queue_events")?;
         let ids = events
             .iter()
-            .map(|(kind, payload)| queue_event(&tx, *kind, payload))
+            .map(|(kind, payload)| {
+                let id = queue_event(&tx, *kind, payload)?;
+                audit_of_queue_event(&tx, *kind, payload)?;
+                Ok(id)
+            })
             .collect::<Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(ids)
@@ -568,7 +703,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
                     |row| row.get(0),
                 )?)
             }
-            None => queue_event(&tx, kind, &payload)?,
+            None => {
+                let id = queue_event(&tx, kind, &payload)?;
+                audit_of_queue_event(&tx, kind, &payload)?;
+                id
+            }
         };
         SqlWrite::execute(
             &tx,
@@ -1720,6 +1859,39 @@ impl<E: TransactionEntries> EventStore for StoreQueue<E> {
     }
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         StoreQueue::record_queue_event(self, kind, payload)
+    }
+    fn audit_administration(
+        &self,
+        fact: &crate::domain::audit::administration::AdministrationFact,
+    ) -> Result<()> {
+        StoreQueue::audit_administration(self, fact)
+    }
+    fn audit_administration_once(
+        &self,
+        fact: &crate::domain::audit::administration::AdministrationFact,
+        record: &str,
+    ) -> Result<()> {
+        StoreQueue::audit_administration_once(self, fact, Some(record))
+    }
+    fn observe_settings(
+        &self,
+        snapshot: &crate::domain::audit::administration::SettingsSnapshot,
+    ) -> Result<bool> {
+        StoreQueue::observe_settings(self, snapshot)
+    }
+    fn check_audit_chain(&self) -> Result<serde_json::Value> {
+        StoreQueue::check_audit_chain(self)
+    }
+    fn verify_audit_chain(
+        &self,
+    ) -> Result<Option<crate::domain::audit::administration::AuditCheck>> {
+        StoreQueue::verify_audit_chain(self)
+    }
+    fn apply_audit_check(
+        &self,
+        checked: crate::domain::audit::administration::AuditCheck,
+    ) -> Result<serde_json::Value> {
+        StoreQueue::apply_audit_check(self, checked)
     }
     fn record_queue_events(
         &self,

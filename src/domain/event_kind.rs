@@ -488,6 +488,8 @@ event_kinds! {
     SlotsFullEnded => "slots_full_ended",
     SlotsFullStarted => "slots_full_started",
     SupervisionFinished => "supervision_finished",
+    SupervisorAuditMismatch => "supervisor_audit_mismatch",
+    SupervisorAuditVerified => "supervisor_audit_verified",
     SupervisorConfigChanged => "supervisor_config_changed",
     SupervisorDraining => "supervisor_draining",
     SupervisorHandedOff => "supervisor_handed_off",
@@ -807,6 +809,11 @@ impl EventKind {
                 // The `[supervisor]` a supervisor read again changed (task
                 // 698).
                 | SupervisorConfigChanged
+                // The supervisor's periodic check of the audit's chain
+                // found it changed outside the CLI, or verified again
+                // (`crate::domain::audit::administration`).
+                | SupervisorAuditMismatch
+                | SupervisorAuditVerified
                 | LandingHeld
                 | LandingResumed
                 // A supervisor's record of `stats`' judgments of now: the
@@ -2148,6 +2155,14 @@ mod tests {
             (EventKind::SlotsFullEnded, "slots_full_ended"),
             (EventKind::SlotsFullStarted, "slots_full_started"),
             (EventKind::SupervisionFinished, "supervision_finished"),
+            (
+                EventKind::SupervisorAuditMismatch,
+                "supervisor_audit_mismatch",
+            ),
+            (
+                EventKind::SupervisorAuditVerified,
+                "supervisor_audit_verified",
+            ),
             (
                 EventKind::SupervisorConfigChanged,
                 "supervisor_config_changed",

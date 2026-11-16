@@ -1075,10 +1075,17 @@ fn put_in_place(
         Settled::Failed(failure) => return Ok(failure),
     };
     let version = report["version"].as_str().unwrap_or_default().to_owned();
+    // A build of main's commit passed its e2e gate before it got here; a
+    // release runs none. With the versions and the binaries' digests, the
+    // audit's record of the update (`binary.installed`).
+    let e2e = matches!(job.subject, Subject::Commit(_)).then(|| json!({"status": "passed"}));
     let mut payload = json!({
         "pid": pid,
         "version": version,
         "previous_version": report["previous_version"],
+        "digest": report["digest"],
+        "replaced_binary": report["replaced_binary"],
+        "e2e": e2e,
         "migrated": report["migrated"],
         "supervisors": report["supervisors"],
         "log": job.log,
@@ -1156,6 +1163,100 @@ fn settle(
     handoff_from: i64,
     installed: Result<Value>,
 ) -> Result<Settled> {
+    let mut audit = RetainedInstall::of(&installed);
+    settle_inner(
+        ports,
+        queue,
+        db,
+        job,
+        registered,
+        before,
+        handoff_from,
+        installed,
+        &mut audit,
+    )
+    .map_err(|error| audit.error(&*queue, job, error))
+}
+
+/// Facts retained through observation/recovery failures. A successful
+/// restore clears them; each install attempts its audit at most once, so
+/// losing the answer cannot create a second record under another identity.
+struct RetainedInstall {
+    report: Option<Value>,
+    attempted: bool,
+}
+
+impl RetainedInstall {
+    fn of(installed: &Result<Value>) -> Self {
+        let report = match installed {
+            Ok(report) => Some(report.clone()),
+            Err(error) => install::KeptBinary::of(error)
+                .map(|kept| kept.report.clone())
+                .or_else(|| install::stays_in_place(error)),
+        };
+        Self {
+            report,
+            attempted: false,
+        }
+    }
+
+    fn write(
+        &mut self,
+        queue: &(impl RunLog + ?Sized),
+        job: &Job,
+        outcome: Option<&str>,
+    ) -> Result<()> {
+        if self.attempted {
+            return Ok(());
+        }
+        let Some(mut report) = self.report.clone() else {
+            return Ok(());
+        };
+        self.attempted = true;
+        job.subject.tag(&mut report);
+        if matches!(job.subject, Subject::Commit(_)) {
+            report["e2e"] = json!({"status": "passed"});
+        }
+        if let Some(outcome) = outcome {
+            report["kept_outcome"] = json!(outcome);
+        }
+        audit_install(queue, &report)
+    }
+
+    fn error(
+        &mut self,
+        queue: &(impl RunLog + ?Sized),
+        job: &Job,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if let Err(audit) = self.write(queue, job, Some("observation_failed")) {
+            tracing::warn!(error = %format_args!("{audit:#}"), "the retained binary's audit failed");
+        }
+        self.context(error)
+    }
+
+    fn context(&self, error: anyhow::Error) -> anyhow::Error {
+        match &self.report {
+            Some(report) => error.context(install::BinaryLeft {
+                report: report.clone(),
+            }),
+            None => error,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_inner(
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &mut (impl AskStore + SupervisorRegistry + RunLog + ?Sized),
+    db: &Path,
+    job: &Job,
+    registered: &[SupervisorRegistration],
+    before: Option<&SupervisorRegistration>,
+    handoff_from: i64,
+    installed: Result<Value>,
+    audit: &mut RetainedInstall,
+) -> Result<Settled> {
     // An install that handed some of the supervisors over but not all kept
     // the new binary for them (ADR-t632-1): the ones handed over are
     // watched, and the ones that did not take it fail as a watch would.
@@ -1164,6 +1265,20 @@ fn settle(
         Err(error) => match install::KeptBinary::of(&error) {
             Some(kept) => (kept.report.clone(), refused(&kept.report)),
             None => {
+                let stopped = InstallFailed::of(&error)
+                    .filter(|failed| failed.report["queue_service"]["outcome"] == "stopped");
+                // A job that cannot restore the old build must restart the
+                // kept build's service before sending its retained fact.
+                // Sending here would mark the fact attempted while the
+                // receiver is still stopped.
+                let audit_after_restart =
+                    stopped.is_some_and(|failed| failed.report["restored"]["kept_for_job"] == true);
+                // A binary that stayed in place though the install failed
+                // (it did not go back, or a supervisor may run it) is the
+                // audit's record of what was put in place, once, here.
+                if !audit_after_restart && let Err(error) = audit.write(&*queue, job, None) {
+                    tracing::warn!(error = %format_args!("{error:#}"), "{error:#}");
+                }
                 // `install` put the old binary back itself if it had
                 // replaced it; the supervisors it handed over may be gone
                 // or stuck with the new one, each brought back as after a
@@ -1222,8 +1337,6 @@ fn settle(
                 // It failed before any handoff: only the job's own
                 // supervisor can be in doubt.
                 let serving = before.map(|before| before.token.clone());
-                let stopped = InstallFailed::of(&error)
-                    .filter(|failed| failed.report["queue_service"]["outcome"] == "stopped");
                 let mut recovery = match stopped {
                     Some(stopped)
                         if stopped.report["restored"]["restored"] == true
@@ -1244,6 +1357,9 @@ fn settle(
                     Some(_) => return Err(error),
                     None => Recovery::read(&*queue, before)?,
                 };
+                if audit_after_restart && let Err(error) = audit.write(&*queue, job, None) {
+                    tracing::warn!(error = %format_args!("{error:#}"), "{error:#}");
+                }
                 let supervisor = recovery.bring_back(ports, before, serving.as_ref());
                 let mut details = json!({"supervisor": supervisor});
                 if let Some(stopped) = InstallFailed::of(&error) {
@@ -1283,6 +1399,9 @@ fn settle(
             ),
         })
     };
+    if restored["restored"] == true {
+        audit.report = None;
+    }
     let mut recovery = Recovery::read(&*queue, before)?;
     let mut supervisors = Vec::new();
     for watched in &watched {
@@ -1325,6 +1444,21 @@ fn settle(
                 "restored_version": restored["version"],
             }),
         );
+    }
+    // The binary in place changed though not every supervisor took it: the
+    // audit's record of what was put in place and how it ended, as the
+    // job's or the person's install (an update every supervisor took is
+    // recorded with its `update_installed`).
+    if restored["restored"] != json!(true) {
+        let outcome = if everyone {
+            "not_restored"
+        } else {
+            "partially_handed_off"
+        };
+        // The install failed already: a record not written is told with it.
+        if let Err(error) = audit.write(&*queue, job, Some(outcome)) {
+            tracing::warn!(error = %format_args!("{error:#}"), "{error:#}");
+        }
     }
     let error = anyhow::anyhow!(
         "{}",
@@ -1492,6 +1626,21 @@ pub fn install_watched(
             if install::KeptBinary::of(error).is_none()
                 && install::HandoffFailed::of(error).is_none() =>
         {
+            if let Some(stays) = install::stays_in_place(error) {
+                // No watch or recovery needs to read registrations here:
+                // the failure already establishes that the binary stays.
+                // Send its facts even if the service cannot answer reads.
+                if let Err(audit) = (ports.queues)(db)
+                    .open()
+                    .and_then(|queue| audit_install(&*queue, &stays))
+                {
+                    return installed.map_err(|error| {
+                        error.context(format!(
+                            "the install's audit could not be written: {audit:#}"
+                        ))
+                    });
+                }
+            }
             return installed;
         }
         // Nothing handed over (no live supervisor, or the drain of a
@@ -1504,13 +1653,11 @@ pub fn install_watched(
         {
             let mut report = report.clone();
             report["watch"] = json!([]);
+            audit_install(&*(ports.queues)(db).open()?, &report)?;
             return Ok(report);
         }
         _ => {}
     }
-    let mut queue = (ports.queues)(db).open()?;
-    let queue = &mut *queue;
-    let registered = registered_since(registered, queue.supervisors()?, &installed);
     let staged = UpdatePaths::under(db.parent().unwrap_or(Path::new("."))).staged;
     let job = Job {
         subject: Subject::Install,
@@ -1524,6 +1671,23 @@ pub fn install_watched(
         poll: options.poll,
         pid: std::process::id(),
     };
+    let mut retained = RetainedInstall::of(&installed);
+    let mut queue = match (ports.queues)(db).open() {
+        Ok(queue) => queue,
+        Err(error) => {
+            return Err(match (ports.queues)(db).open() {
+                Ok(queue) => retained.error(&*queue, &job, error),
+                Err(audit) => retained.context(error.context(format!(
+                    "the retained binary's audit could not be reached: {audit:#}"
+                ))),
+            });
+        }
+    };
+    let queue = &mut *queue;
+    let now = queue
+        .supervisors()
+        .map_err(|error| retained.error(&*queue, &job, error))?;
+    let registered = registered_since(registered, now, &installed);
     match settle(
         ports,
         queue,
@@ -1549,6 +1713,7 @@ pub fn install_watched(
                     }))
                     .collect::<Vec<_>>()
             );
+            audit_install(&*queue, &report)?;
             Ok(report)
         }
         Settled::Failed(report) => Err(InstallFailed {
@@ -1564,6 +1729,24 @@ pub fn install_watched(
         }
         .into()),
     }
+}
+
+/// The audit's record of an install that put its binary in place
+/// (`report`, [`install::install_built`]'s): the versions, the digests,
+/// its e2e gate and, for one that failed with the binary left in place,
+/// how it ended (`kept_outcome`), sent as
+/// [`super::lifecycle::audit_written`] says: a record the service does
+/// not take fails the install that is done, but for a service of a build
+/// before the record.
+fn audit_install(queue: &(impl RunLog + ?Sized), report: &Value) -> Result<()> {
+    use crate::domain::audit::administration::{AdministrationFact, binary_change_of_update};
+    let Some(change) = binary_change_of_update(report) else {
+        return Ok(());
+    };
+    super::lifecycle::audit_written(
+        queue.audit_administration(&AdministrationFact::Installed(Box::new(change))),
+        "the install",
+    )
 }
 
 /// The command line of the install `binary` does in this one's place, on
@@ -1753,7 +1936,9 @@ fn watch(
         if watched.iter().all(|w| w.done || w.error.is_some()) {
             return Ok(watched);
         }
-        thread::sleep(job.poll);
+        if !job.poll.is_zero() {
+            thread::sleep(job.poll);
+        }
     }
 }
 
@@ -1846,6 +2031,10 @@ fn restore(
     job: &Job,
     previous_version: Option<&str>,
 ) -> Value {
+    let _target = match ports.binaries.hold_target(job.target) {
+        Ok(guard) => guard,
+        Err(error) => return json!({"restored": false, "reason": format!("{error:#}")}),
+    };
     let previous = previous_path(job.target);
     let kept = ports.binaries.version(&previous).ok();
     if kept.is_none() || kept.as_deref() != previous_version {
@@ -2376,7 +2565,7 @@ mod tests {
                 binaries: &*steps,
                 files: &files,
                 processes: &OnlyOne,
-                clock: &At(10_000),
+                clock: &At::new(10_000),
                 queues: &queues,
                 restart: &|_| bail!("no restart"),
                 is_ancestor: &|_, _| bail!("no ancestry"),
@@ -2420,6 +2609,7 @@ mod tests {
                     )
                     .unwrap();
                     assert_eq!(failure["stage"], "check");
+                    assert!(steps.audited.lock().unwrap().is_empty());
                     assert_eq!(
                         failure["error"],
                         "/source does not accept the update job's principal"
@@ -2504,7 +2694,7 @@ mod tests {
                 binaries: &*steps,
                 files: &files,
                 processes: &processes,
-                clock: &At(10_000),
+                clock: &At::new(10_000),
                 queues: &queues,
                 restart: &|_| bail!("manual recovery"),
                 is_ancestor: &|_, _| bail!("no ancestry"),
@@ -2531,6 +2721,26 @@ mod tests {
                 PluginStep::Untouched,
             )
             .unwrap();
+            // A gate that leaves the new binary in place still records its
+            // actual predecessor and its outcome, once, for either job.
+            let audited = steps.audited.lock().unwrap();
+            assert_eq!(
+                audited.len(),
+                1,
+                "{subject:?}/{service_failures}: {audited:?}"
+            );
+            let change = &audited[0]["installed"];
+            assert_eq!(change["version_before"], "old");
+            assert_eq!(change["version_after"], "new");
+            assert_eq!(
+                change["digest_before"],
+                "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4"
+            );
+            assert_eq!(
+                change["digest_after"],
+                "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+            );
+            assert_eq!(change["outcome"], "not_restored");
             assert_eq!(failure["restored"]["restored"], false);
             assert!(
                 failure["restored"]["reason"]
@@ -2575,6 +2785,278 @@ mod tests {
             ] {
                 assert!(question.contains(text), "missing {text:?} in {question}");
             }
+        }
+    }
+
+    #[test]
+    fn manual_install_audits_allowlisted_gate_information_without_quarantine_credentials() {
+        use crate::application::install::{
+            E2eOutcome, E2eSettings,
+            test_support::{At, InstallQueue, InstallSteps, OnlyOne},
+        };
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use crate::domain::e2e_quarantine::QuarantineFile;
+        use std::sync::{Arc, Mutex};
+        let credential = "synthetic-audit-credential";
+        let quarantine = QuarantineFile::of(&format!("[access_token={credential}]"));
+        assert!(quarantine.error().unwrap().contains(credential));
+        let steps = Arc::new(InstallSteps {
+            registrations: Mutex::new(vec![]),
+            gate: Some(E2eOutcome {
+                passed: true,
+                secs: 7,
+                quarantine,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let files = MemoryFiles::default();
+        files.write(Path::new("/queue"), b"queue").unwrap();
+        files.write(Path::new("/to"), b"old").unwrap();
+        let queues = |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+        let report = install_watched(
+            &JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At::new(10_000),
+                queues: &queues,
+                restart: &|_| bail!("no restart"),
+                is_ancestor: &|_, _| bail!("no checkout"),
+            },
+            &|| bail!("no drain"),
+            None,
+            Some(Path::new("/queue")),
+            &InstallOptions {
+                source: Source::Checkout("/checkout".into()),
+                target: "/to".into(),
+                allow_breaking: false,
+                restart: vec![],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::Run(E2eSettings {
+                    command: None,
+                    timeout: Duration::from_secs(60),
+                    run_env_root: None,
+                    queue_dir: None,
+                    scratch: "/scratch".into(),
+                    log: "/gate.log".into(),
+                    utc_offset_secs: 0,
+                    lock: None,
+                    git_env: vec![],
+                    ended: None,
+                }),
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(report["outcome"], "installed");
+        assert!(
+            report["e2e"]["quarantine"]["error"]
+                .as_str()
+                .unwrap()
+                .contains(credential)
+        );
+        let audited = steps.audited.lock().unwrap();
+        assert_eq!(audited.len(), 1);
+        assert!(
+            !serde_json::to_string(&*audited)
+                .unwrap()
+                .contains(credential)
+        );
+        assert_eq!(
+            audited[0]["installed"]["verification"],
+            json!({"status": "passed", "secs": 7, "issues": ["invalid_quarantine"]})
+        );
+    }
+
+    #[test]
+    fn retained_installs_are_audited_when_registration_watch_or_recovery_reads_fail() {
+        use crate::application::install::test_support::{
+            At, Handoff, InstallQueue, InstallSteps, OnlyOne, registration,
+        };
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use crate::domain::replan_snapshot::sha256;
+        use std::sync::{Arc, Mutex};
+        for (manual, fail_at) in [(true, 1), (true, 2), (true, 4), (false, 1), (false, 3)] {
+            let steps = Arc::new(InstallSteps {
+                registrations: Mutex::new(vec![
+                    registration("first", 1, 10_000),
+                    registration("second", 1, 10_000),
+                ]),
+                handoff: Handoff::Partial,
+                heartbeats: true,
+                fail_handed_read: Some(fail_at),
+                ..Default::default()
+            });
+            let files = MemoryFiles::default();
+            let db = Path::new("/queue");
+            files.write(db, b"queue").unwrap();
+            files.write(Path::new("/to"), b"old").unwrap();
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let clock = At::new(10_000);
+            let ports = JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &clock,
+                queues: &queues,
+                restart: &|_| bail!("no restart"),
+                is_ancestor: &|_, _| bail!("no checkout"),
+            };
+            let token = LeaseToken::new("first");
+            let job = Job {
+                subject: Subject::Commit("abc"),
+                token: Some(&token),
+                target: Path::new("/to"),
+                staged: Path::new("/staged"),
+                log: None,
+                restart: &[],
+                handoff_timeout: Duration::ZERO,
+                watch_timeout: Duration::from_secs(30),
+                poll: Duration::ZERO,
+                pid: 77,
+            };
+            let result = if manual {
+                install_watched(
+                    &ports,
+                    &|| bail!("no drain"),
+                    None,
+                    Some(db),
+                    &InstallOptions {
+                        source: Source::Binary("/source".into()),
+                        target: "/to".into(),
+                        allow_breaking: false,
+                        restart: vec![],
+                        handoff_timeout: Duration::ZERO,
+                        poll: Duration::ZERO,
+                        e2e: E2eGate::NotApplicable,
+                    },
+                    Duration::from_secs(30),
+                )
+            } else {
+                let mut queue = queues(db).open().unwrap();
+                put_in_place(
+                    &ports,
+                    &mut *queue,
+                    db,
+                    &job,
+                    Path::new("/source"),
+                    PluginStep::Untouched,
+                )
+            };
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("injected registration read"),
+                "{manual}/{fail_at}: {error:#}"
+            );
+            let audited = steps.audited.lock().unwrap();
+            assert_eq!(audited.len(), 1, "{manual}/{fail_at}: {audited:?}");
+            let change = &audited[0]["installed"];
+            assert_eq!(change["outcome"], "observation_failed");
+            assert_eq!(change["version_before"], "old");
+            assert_eq!(change["digest_before"], sha256(b"old"));
+            assert_eq!(change["version_after"], "new");
+            assert_eq!(change["digest_after"], sha256(b"new"));
+        }
+    }
+
+    /// Exercise the manual entry, including its early returns: uncertainty,
+    /// a service start whose restore failed, and ordinary errors after the
+    /// rename all retain and audit the actual binary once.
+    #[test]
+    fn manual_install_records_every_failure_that_leaves_its_binary_in_place() {
+        use crate::application::install::test_support::{
+            At, Handoff, InstallQueue, InstallSteps, OnlyOne,
+        };
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use crate::domain::replan_snapshot::sha256;
+        use std::sync::{Arc, atomic::AtomicUsize};
+        for (case, outcome, reason) in [
+            ("unsettled", "handoff_unsettled", "handoff answer lost"),
+            ("service", "not_restored", "restart failed"),
+            ("adopt", "failed_after_replacement", "adopt failed"),
+            ("breaking_adopt", "failed_after_replacement", "adopt failed"),
+            ("breaking_up", "failed_after_replacement", "up failed"),
+            (
+                "previous",
+                "failed_after_replacement",
+                "keep previous failed",
+            ),
+        ] {
+            let breaking = case.starts_with("breaking");
+            let steps = Arc::new(InstallSteps {
+                handoff: if case == "unsettled" {
+                    Handoff::Unsettled
+                } else {
+                    Handoff::Taken
+                },
+                restart_failures: AtomicUsize::new(if case == "service" { 2 } else { 0 }),
+                restore_fails: case == "service",
+                watch_on_open: case == "service",
+                adopt_fails: case.ends_with("adopt"),
+                up_fails: case == "breaking_up",
+                keep_fails: case == "previous",
+                schema: Some(install::SchemaCheck {
+                    pending: vec![install::PendingMigration {
+                        version: 1,
+                        compatible: !breaking,
+                    }],
+                    opens: true,
+                }),
+                ..InstallSteps::default()
+            });
+            let files = MemoryFiles::default();
+            files.write(Path::new("/queue"), b"queue").unwrap();
+            files.write(Path::new("/to"), b"old").unwrap();
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let error = install_watched(
+                &JobPorts {
+                    binaries: &*steps,
+                    files: &files,
+                    processes: &OnlyOne,
+                    clock: &At::new(10_000),
+                    queues: &queues,
+                    restart: &|_| bail!("no watch recovery"),
+                    is_ancestor: &|_, _| bail!("no checkout comparison"),
+                },
+                // The drain ends the supervisor's registration, as the
+                // breaking install's check of the queue's use reads it.
+                &|| {
+                    steps.registrations.lock().unwrap().clear();
+                    Ok(json!({"drained": true}))
+                },
+                None,
+                Some(Path::new("/queue")),
+                &InstallOptions {
+                    source: Source::Binary(PathBuf::from("/source")),
+                    target: PathBuf::from("/to"),
+                    allow_breaking: breaking,
+                    restart: vec![],
+                    handoff_timeout: Duration::ZERO,
+                    poll: Duration::ZERO,
+                    e2e: E2eGate::NotApplicable,
+                },
+                Duration::ZERO,
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains(reason), "{case}: {error:#}");
+            let audited = steps.audited.lock().unwrap();
+            assert_eq!(audited.len(), 1, "{case}: {audited:?}");
+            let change = &audited[0]["installed"];
+            assert_eq!(change["source"], "install", "{case}");
+            assert_eq!(change["outcome"], outcome, "{case}");
+            assert_eq!(change["version_before"], "old", "{case}");
+            assert_eq!(change["digest_before"], sha256(b"old"), "{case}");
+            assert_eq!(change["version_after"], "new", "{case}");
+            assert_eq!(change["digest_after"], sha256(b"new"), "{case}");
+            assert_eq!(
+                change["verification"],
+                json!({"status": "not_applicable"}),
+                "{case}"
+            );
         }
     }
 
@@ -2741,6 +3223,307 @@ mod tests {
                 json!({"restored": true, "version": "old"})
             );
         }
+    }
+
+    /// The audit's facts an update job's install sent, its handoff going as
+    /// `handoff` and its restore failing when `restore_fails`, with the
+    /// replacement reading `replaced` (the fake's own when `None`).
+    fn audited_after(
+        handoff: crate::application::install::test_support::Handoff,
+        restore_fails: bool,
+        replaced: Option<install::Replacement>,
+    ) -> Vec<Value> {
+        use crate::application::install::test_support::{
+            At, InstallQueue, InstallSteps, OnlyOne, registration,
+        };
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use std::sync::{Arc, Mutex};
+        let steps = Arc::new(InstallSteps {
+            registrations: Mutex::new(vec![registration("first", 1, 10_000)]),
+            handoff,
+            restore_fails,
+            replaced: Mutex::new(replaced),
+            heartbeats: true,
+            ..InstallSteps::default()
+        });
+        let files = MemoryFiles::default();
+        let db = Path::new("/queue");
+        files.write(db, b"queue").unwrap();
+        files.write(Path::new("/to"), b"old").unwrap();
+        files.write(Path::new("/source"), b"new").unwrap();
+        let queues = |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+        let token = LeaseToken::new("first");
+        let job = Job {
+            subject: Subject::Commit("abc"),
+            token: Some(&token),
+            target: Path::new("/to"),
+            staged: Path::new("/staged"),
+            log: Some(Path::new("/job.log")),
+            restart: &[],
+            handoff_timeout: Duration::ZERO,
+            watch_timeout: Duration::from_secs(30),
+            poll: Duration::ZERO,
+            pid: 77,
+        };
+        let ports = JobPorts {
+            binaries: &*steps,
+            files: &files,
+            processes: &OnlyOne,
+            clock: &At::new(10_000),
+            queues: &queues,
+            restart: &|_| bail!("the supervisor is not started again here"),
+            is_ancestor: &|_, _| bail!("no checkout comparison is needed"),
+        };
+        let mut queue = queues(db).open().unwrap();
+        let _ = put_in_place(
+            &ports,
+            &mut *queue,
+            db,
+            &job,
+            Path::new("/source"),
+            PluginStep::Untouched,
+        );
+        steps.audited.lock().unwrap().clone()
+    }
+
+    /// A handoff every supervisor failed whose binary could not go back,
+    /// and one a supervisor may have taken, leave the new binary in place:
+    /// each is one audit record of it, with how it ended.
+    #[test]
+    fn a_binary_left_by_a_failed_restore_or_an_unsettled_handoff_is_audited_once() {
+        use crate::application::install::test_support::Handoff;
+        use crate::domain::replan_snapshot::sha256;
+        for (handoff, restore_fails, outcome) in [
+            (Handoff::Failed, true, "not_restored"),
+            (Handoff::Unsettled, false, "handoff_unsettled"),
+        ] {
+            let audited = audited_after(handoff, restore_fails, None);
+            assert_eq!(audited.len(), 1, "{outcome}: {audited:?}");
+            let change = &audited[0]["installed"];
+            assert_eq!(change["outcome"], outcome);
+            assert_eq!(change["of"], "abc");
+            assert_eq!(change["version_after"], "new");
+            assert_eq!(change["digest_after"], sha256(b"new"));
+            assert_eq!(change["version_before"], "old");
+            assert_eq!(change["digest_before"], sha256(b"old"));
+        }
+        // A handoff that failed and whose binary went back left nothing.
+        assert!(audited_after(Handoff::Failed, false, None).is_empty());
+    }
+
+    /// Another install put its binary at the target after this one read
+    /// it and before this one's replacement: the facts before are the
+    /// binary the replacement kept, not the one read first.
+    #[test]
+    fn a_replacement_records_the_binary_it_kept_not_one_read_before() {
+        use crate::application::install::test_support::Handoff;
+        use crate::domain::replan_snapshot::sha256;
+        let audited = audited_after(
+            Handoff::Unsettled,
+            false,
+            Some(install::Replacement {
+                digest: Some(sha256(b"new")),
+                replaced_version: Some("other".into()),
+                replaced_digest: Some(sha256(b"other")),
+            }),
+        );
+        let change = &audited[0]["installed"];
+        assert_eq!(change["version_before"], "other");
+        assert_eq!(change["digest_before"], sha256(b"other"));
+    }
+
+    /// A binary one supervisor took and another refused stays in place:
+    /// the audit records it put in place, with the versions and digests of
+    /// the two binaries and how it ended, though the update failed.
+    #[test]
+    fn a_binary_that_stays_after_a_partial_handoff_is_audited_as_put_in_place() {
+        use crate::application::install::test_support::{
+            At, Handoff, InstallQueue, InstallSteps, OnlyOne, registration,
+        };
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use crate::domain::replan_snapshot::sha256;
+        use std::sync::{Arc, Mutex};
+        let steps = Arc::new(InstallSteps {
+            registrations: Mutex::new(vec![
+                registration("first", 1, 10_000),
+                registration("second", 1, 10_000),
+            ]),
+            handoff: Handoff::Partial,
+            heartbeats: true,
+            ..InstallSteps::default()
+        });
+        let files = MemoryFiles::default();
+        let db = Path::new("/queue");
+        files.write(db, b"queue").unwrap();
+        files.write(Path::new("/to"), b"old").unwrap();
+        files.write(Path::new("/source"), b"new").unwrap();
+        let queues = |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+        let token = LeaseToken::new("first");
+        let job = Job {
+            subject: Subject::Commit("abc"),
+            token: Some(&token),
+            target: Path::new("/to"),
+            staged: Path::new("/staged"),
+            log: Some(Path::new("/job.log")),
+            restart: &[],
+            handoff_timeout: Duration::ZERO,
+            watch_timeout: Duration::from_secs(30),
+            poll: Duration::ZERO,
+            pid: 77,
+        };
+        let ports = JobPorts {
+            binaries: &*steps,
+            files: &files,
+            processes: &OnlyOne,
+            clock: &At::new(10_000),
+            queues: &queues,
+            restart: &|_| bail!("the supervisor is not started again here"),
+            is_ancestor: &|_, _| bail!("no checkout comparison is needed"),
+        };
+        let mut queue = queues(db).open().unwrap();
+        let _ = put_in_place(
+            &ports,
+            &mut *queue,
+            db,
+            &job,
+            Path::new("/source"),
+            PluginStep::Untouched,
+        );
+        let events = steps.events.lock().unwrap();
+        assert!(events.iter().all(|(kind, _)| kind != "update_installed"));
+        assert!(events.iter().any(|(kind, _)| kind == "update_failed"));
+        let audited = steps.audited.lock().unwrap();
+        assert_eq!(audited.len(), 1, "{audited:?}");
+        let change = &audited[0]["installed"];
+        assert_eq!(change["source"], "commit");
+        assert_eq!(change["of"], "abc");
+        assert_eq!(change["outcome"], "partially_handed_off");
+        assert_eq!(change["version_before"], "old");
+        assert_eq!(change["digest_before"], sha256(b"old"));
+        assert_eq!(change["version_after"], "new");
+        assert_eq!(change["digest_after"], sha256(b"new"));
+    }
+
+    /// A binary already in place (another queue's answer installed it):
+    /// the version and the digest before are both the kept `.previous`'s,
+    /// never the new version with the old binary's digest.
+    #[test]
+    fn a_binary_already_in_place_takes_both_facts_before_from_the_kept_previous() {
+        use crate::application::install::test_support::{InstallQueue, InstallSteps, OnlyOne};
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use std::sync::Arc;
+        let steps = Arc::new(InstallSteps {
+            in_place: true,
+            previous_version: Some("old".into()),
+            ..InstallSteps::default()
+        });
+        let files = MemoryFiles::default();
+        files.write(Path::new("/queue"), b"queue").unwrap();
+        files.write(Path::new("/to"), b"new").unwrap();
+        files.write(Path::new("/to.previous"), b"old").unwrap();
+        let queues = |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+        let report = install::install_built(
+            &install::Ports {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &crate::application::install::test_support::At::new(10_000),
+                queues: &queues,
+                down: &|| bail!("no drain"),
+                stop_records: None,
+            },
+            Some(Path::new("/queue")),
+            &InstallOptions {
+                source: Source::Binary(PathBuf::from("/to")),
+                target: PathBuf::from("/to"),
+                allow_breaking: false,
+                restart: vec![],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::NotApplicable,
+            },
+            install::Built {
+                binary: PathBuf::from("/to"),
+                e2e: json!({"status": "not_applicable"}),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            report["digest"],
+            "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+        );
+        assert_eq!(
+            report["replaced_binary"]["digest"],
+            "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4"
+        );
+        assert_eq!(report["replaced_binary"]["version"], "old");
+        let change =
+            crate::domain::audit::administration::binary_change_of_update(&report).unwrap();
+        assert_eq!(
+            change.digest_before.as_deref(),
+            Some("cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4")
+        );
+        assert_eq!(change.version_before.as_deref(), Some("old"));
+        assert_eq!(change.version_after.as_deref(), Some("new"));
+    }
+
+    /// A person's install of a binary already in place (another queue's
+    /// answer installed it) that is refused before it would have replaced
+    /// the binary put nothing in place for this queue: its error says so,
+    /// and the audit takes no record of a binary.
+    #[test]
+    fn a_binary_already_in_place_refused_before_its_replacement_is_not_audited() {
+        use crate::application::install::test_support::{At, InstallQueue, InstallSteps, OnlyOne};
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use std::sync::Arc;
+        let steps = Arc::new(InstallSteps {
+            in_place: true,
+            previous_version: Some("old".into()),
+            schema: Some(install::SchemaCheck {
+                pending: vec![install::PendingMigration {
+                    version: 1,
+                    compatible: false,
+                }],
+                opens: true,
+            }),
+            ..InstallSteps::default()
+        });
+        let files = MemoryFiles::default();
+        files.write(Path::new("/queue"), b"queue").unwrap();
+        files.write(Path::new("/to"), b"new").unwrap();
+        files.write(Path::new("/to.previous"), b"old").unwrap();
+        let queues = |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+        let error = install_watched(
+            &JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At::new(10_000),
+                queues: &queues,
+                restart: &|_| bail!("no restart"),
+                is_ancestor: &|_, _| bail!("no checkout"),
+            },
+            &|| bail!("no drain"),
+            None,
+            Some(Path::new("/queue")),
+            &InstallOptions {
+                source: Source::Binary(PathBuf::from("/to")),
+                target: PathBuf::from("/to"),
+                allow_breaking: false,
+                restart: vec![],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::NotApplicable,
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("nothing was replaced"),
+            "{error:#}"
+        );
+        assert!(install::stays_in_place(&error).is_none(), "{error:#}");
+        assert!(steps.audited.lock().unwrap().is_empty());
     }
 
     #[test]

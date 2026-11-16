@@ -303,6 +303,9 @@ const SUPERVISE: &[&str] = &[
     "record_queue_event",
     "record_queue_events",
     "expire_disk_relax",
+    "observe_settings",
+    "verify_audit_chain",
+    "apply_audit_check",
     "register_follow_ups",
     "register_recurring_draft",
     "record_draft_origin",
@@ -406,7 +409,8 @@ const READS_THAT_WRITE: [&str; 3] = [
 
 /// The operations the policy asks more than a read of ([`SUPERVISE`],
 /// [`OTHERS`]) that use no write entry of the queue all the same.
-pub(super) const OTHERS_THAT_READ: [&str; 6] = [
+pub(super) const OTHERS_THAT_READ: [&str; 7] = [
+    "verify_audit_chain",
     "answer_request",
     "ask_delivery_failed",
     "assert_repository",
@@ -617,6 +621,15 @@ pub(super) fn supervisor_needs(op: &str, args: &[Value]) -> Result<C, String> {
     let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
     if op == "audit_privileged_operation" {
         return Ok(C::ServiceLifecycle);
+    }
+    // A person's install is `service.install`'s; `up` and `down` are the
+    // service's lifecycle.
+    if op == "audit_administration" {
+        return Ok(if arg(0).get("installed").is_some() {
+            C::BinaryInstall
+        } else {
+            C::ServiceLifecycle
+        });
     }
     if writes_a_relaxation(op, args) {
         return Ok(C::DiskRelax);
