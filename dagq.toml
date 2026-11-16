@@ -80,6 +80,16 @@ max_spikes = 1
 # （runtime_planners 2 とも釣り合う）。
 max_investigations = 2
 
+[disk]
+# claim と着地の検証の前に確かめる空き容量の、run 1 本の想定の方式（ADR-t5059-1。振る舞いは
+# docs/design/supervisor-lifecycle/claim-hold.md の「空き容量」）。人の決定（request 329、2026-11-16）で一旦固定枠にする。
+# 予測方式では大きい run の標本で想定が 25.2 GiB に上がり、2 本走ると必要量が 71〜80 GiB になって claim がほぼ一日止まった。
+# 20 GiB は 11 月の run の大きさ（211 本で p95 20.2 GiB、11/10 以降 83 本で p90 20.7 GiB）に近い値。
+# 枠を超えた run は記録の event を読んで値を見直す。reserve は既定のままなので書かない。
+# estimate・run_size を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 5059 を含んでから足した。
+estimate = "fixed"
+run_size = "20GiB"
+
 [provider_fallback]
 # worker も使えない provider（使用量の上限など）から別の provider へ切り替える。人の判断（2026-11-03、request 226）で、
 # 2026-10-06 の人の判断（切り替えずに控えが解けるのを待って同じ provider で続ける）を見直した。
