@@ -1,0 +1,87 @@
+# Median seconds under the worker stress load: native debug build,
+# --test-threads 6 --stress-count 5. The task's paired serial comparison
+# is recorded separately; these entries retain the observed >5 s boundaries.
+
+# 5.703 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::counts"
+reason = "B 境界（守る境界）: 最終の形の同じ部分について 30・300 単位の読む行の数と 30 単位の全ての答えを全行の読みと比べる。小さい入力と大きい入力の両方を保ち、読む量が履歴に比例しないことを確かめる"
+task = 5011
+
+# 5.544 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::counts"
+reason = "B 境界（守る境界）: 最終の形の同じ部分について 30・300 単位の読む行の数と 30 単位の全ての答えを全行の読みと比べる。小さい入力と大きい入力の両方を保ち、読む量が履歴に比例しないことを確かめる"
+task = 5011
+
+# 5.094 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::counts"
+reason = "B 境界（守る境界）: 最終の形の同じ部分について 30・300 単位の読む行の数と 30 単位の全ての答えを全行の読みと比べる。小さい入力と大きい入力の両方を保ち、読む量が履歴に比例しないことを確かめる"
+task = 5011
+
+# 5.280 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold::queue_and_run_s3_readers::kpi_since"
+reason = "B 境界（守る境界）: 凍った入力の同じ shard の checkpoint ごとにこの reader の答えを sparse・reference・今の台帳の形で比べる。private な畳み込みを公開しないことと全件の公開を保ち、他の reader の組は別の test が確かめる"
+task = 5011
+
+# 7.424 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold::queue_and_run_s3_readers::stats"
+reason = "B 境界（守る境界）: 凍った入力の同じ shard の checkpoint ごとにこの reader の答えを sparse・reference・今の台帳の形で比べる。private な畳み込みを公開しないことと全件の公開を保ち、他の reader の組は別の test が確かめる"
+task = 5011
+
+# 5.555 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold::queue_and_run_s4_readers::kpi_since"
+reason = "B 境界（守る境界）: 凍った入力の同じ shard の checkpoint ごとにこの reader の答えを sparse・reference・今の台帳の形で比べる。private な畳み込みを公開しないことと全件の公開を保ち、他の reader の組は別の test が確かめる"
+task = 5011
+
+# 6.865 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold::queue_and_run_s4_readers::stats"
+reason = "B 境界（守る境界）: 凍った入力の同じ shard の checkpoint ごとにこの reader の答えを sparse・reference・今の台帳の形で比べる。private な畳み込みを公開しないことと全件の公開を保ち、他の reader の組は別の test が確かめる"
+task = 5011
+
+# 6.768 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold::queue_and_run_s6_readers::stats"
+reason = "B 境界（守る境界）: 凍った入力の同じ shard の checkpoint ごとにこの reader の答えを sparse・reference・今の台帳の形で比べる。private な畳み込みを公開しないことと全件の公開を保ち、他の reader の組は別の test が確かめる"
+task = 5011
+
+# 5.526 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads::queue_and_run::s2"
+reason = "B 境界（守る境界）: 同じ shard の引き継ぎ checkpoint ごとに stats・kpi の答えの組を sparse ledger と今の台帳の形で比べる。読み始めの範囲を全て残し、targets・report・queue の組は companion test が確かめる"
+task = 5011
+
+# 6.002 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads::queue_and_run::s3"
+reason = "B 境界（守る境界）: 同じ shard の引き継ぎ checkpoint ごとに stats・kpi の答えの組を sparse ledger と今の台帳の形で比べる。読み始めの範囲を全て残し、targets・report・queue の組は companion test が確かめる"
+task = 5011
+
+# 5.291 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads::queue_and_run::s5"
+reason = "B 境界（守る境界）: 同じ shard の引き継ぎ checkpoint ごとに stats・kpi の答えの組を sparse ledger と今の台帳の形で比べる。読み始めの範囲を全て残し、targets・report・queue の組は companion test が確かめる"
+task = 5011
+
+# 5.553 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads::queue_and_run::s6"
+reason = "B 境界（守る境界）: 同じ shard の引き継ぎ checkpoint ごとに stats・kpi の答えの組を sparse ledger と今の台帳の形で比べる。読み始めの範囲を全て残し、targets・report・queue の組は companion test が確かめる"
+task = 5011
+
+# 5.141 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads::queue_and_run::s7"
+reason = "B 境界（守る境界）: 同じ shard の引き継ぎ checkpoint ごとに stats・kpi の答えの組を sparse ledger と今の台帳の形で比べる。読み始めの範囲を全て残し、targets・report・queue の組は companion test が確かめる"
+task = 5011
+
+# 5.450 s
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads::queue_and_run::s8"
+reason = "B 境界（守る境界）: 同じ shard の引き継ぎ checkpoint ごとに stats・kpi の答えの組を sparse ledger と今の台帳の形で比べる。読み始めの範囲を全て残し、targets・report・queue の組は companion test が確かめる"
+task = 5011

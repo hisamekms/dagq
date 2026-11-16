@@ -10,7 +10,10 @@
 //! `phase.first_commit`; a host's `[kpi.targets."phase.startup"]` is read
 //! as `phase.first_commit`.
 use crate::domain::EventKind;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    cell::OnceCell,
+    collections::{BTreeMap, HashMap, HashSet},
+};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -31,7 +34,7 @@ use crate::domain::{
     recovery::FailureCause,
     satisfied,
     stats::{
-        self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery,
+        self, LiveSnapshot, RunStats,
         ask_seen::seen_waits,
         asks::human_waits,
         cancel_reasons,
@@ -193,8 +196,11 @@ pub(super) struct Context<'a> {
     /// Each run's first `run_claimed`, for the layers of a run that
     /// finished only in a window's reading.
     first_claims: HashMap<RunId, &'a RunEvent>,
-    /// What `stats` reads besides the events: only the drafts' origins.
-    live: LiveSnapshot,
+    /// The input's run facts and live snapshot, prepared once for every
+    /// period query of this derivation.
+    prepared: stats::Prepared<'a>,
+    /// Run-only measures of an empty set do not depend on a period's bounds.
+    empty_run_kpis: OnceCell<Vec<(String, Measure)>>,
     /// Unix seconds.
     now: i64,
     cores: Option<usize>,
@@ -498,6 +504,7 @@ impl<'a> Context<'a> {
                 landings
             });
         let mut context = Self {
+            empty_run_kpis: OnceCell::new(),
             events,
             edges: super::Edges::of(input),
             landings,
@@ -508,14 +515,20 @@ impl<'a> Context<'a> {
             cross,
             layers: HashMap::new(),
             first_claims,
-            live: LiveSnapshot {
-                draft_origins: input.draft_origins.clone(),
-                utc_offset_secs: input.utc_offset_secs,
-                ledger: input.ledger.cloned(),
-                earlier_executions: earlier
-                    .map_or_else(Vec::new, |earlier| earlier.executions.clone()),
-                ..LiveSnapshot::default()
-            },
+            prepared: stats::Prepared::new(
+                events,
+                input.goals,
+                input.now,
+                std::borrow::Cow::Owned(LiveSnapshot {
+                    draft_origins: input.draft_origins.clone(),
+                    utc_offset_secs: input.utc_offset_secs,
+                    ledger: input.ledger.cloned(),
+                    earlier_executions: earlier
+                        .map_or_else(Vec::new, |earlier| earlier.executions.clone()),
+                    ..LiveSnapshot::default()
+                }),
+                goal_id,
+            ),
             now: input.now,
             cores: input.cores,
             rust_toolchain: input.rust_toolchain,
@@ -555,7 +568,13 @@ impl<'a> Context<'a> {
             }
         }
         context.forecast = score::score(events, &context.marks);
-        let everything = context.stats(None, None);
+        let mut everything = context.prepared.finished_runs();
+        for run in &mut everything {
+            run.change = context.changes.get(&run.task_id).cloned().flatten();
+            if let Some(areas) = context.areas {
+                run.areas = Some(areas.get(&run.run_id).cloned().unwrap_or_default());
+            }
+        }
         let rows: HashMap<&str, ledger::read::LedgerValues> = input
             .rows
             .iter()
@@ -571,7 +590,6 @@ impl<'a> Context<'a> {
             .map(|(run, values)| ((*run).to_owned(), values.failure_cause))
             .collect();
         context.layers = everything
-            .runs
             .iter()
             .map(|run| {
                 let row = rows.get(run.run_id.as_str());
@@ -600,14 +618,12 @@ impl<'a> Context<'a> {
             .filter_map(|event| Some((event.id, event_ms(event)?)))
             .collect();
         let mut finishes: Vec<i64> = everything
-            .runs
             .iter()
             .filter_map(|run| times.get(&run.finished_event_id?).copied())
             .collect();
         finishes.sort_unstable();
         context.finishes = finishes;
         context.runs = everything
-            .runs
             .into_iter()
             .map(|run| (run.run_id.clone(), run))
             .collect();
@@ -670,25 +686,16 @@ impl<'a> Context<'a> {
             .map_or(UNKNOWN, TaskChange::as_str)
     }
 
-    /// What `stats` derives for the runs that finished after `since` up
-    /// to `until`, every one of them.
-    fn stats(&self, since: Option<Cursor>, until: Option<Cursor>) -> stats::Stats {
-        let mut stats = stats::stats_answering(
-            self.edges.answers(),
-            self.events,
-            self.goals,
-            self.now,
-            SlotSnapshot::default(),
-            &StatsQuery {
-                since,
-                until,
-                goal_id: self.goal_id,
-                full: true,
-            },
-            &self.live,
-        );
-        stats::with_changes(&mut stats, self.changes);
-        stats::with_areas(&mut stats, self.areas);
+    /// The values a KPI period consumes from stats, with every run that
+    /// finished after `start` up to `end` (unix milliseconds).
+    fn stats(&self, start: i64, end: i64) -> stats::KpiStats {
+        let mut stats = self.prepared.kpi_answer(self.edges.answers(), start, end);
+        stats.with_changes(self.changes);
+        for run in &mut stats.runs {
+            if let Some(areas) = self.areas {
+                run.areas = Some(areas.get(&run.run_id).cloned().unwrap_or_default());
+            }
+        }
         stats
     }
 
@@ -987,7 +994,7 @@ impl<'a> Context<'a> {
         // By the times, not their events: the cuts of the interactive
         // sessions count by the time they cut at, which the window's last
         // event may precede.
-        let stats = self.stats(Some(Cursor::Time(start)), Some(Cursor::Time(end)));
+        let stats = self.stats(start, end);
         let in_window =
             |event: &&RunEvent| event.id > after && event.id <= upto && self.counts(event.task_id);
         let mut kpis: Kpis<Measure> = BTreeMap::new();
@@ -1016,6 +1023,9 @@ impl<'a> Context<'a> {
         let mut by_tags: BTreeMap<String, Breakdown> = BTreeMap::new();
         let mut arrivals: BTreeMap<String, trial::PostLandingArrival> = BTreeMap::new();
         let mut pairs = pair::PairDetails::new();
+        // Different strata may contain the identical ordered run set. Keep
+        // multiplicity in the key; equal lengths alone do not identify a set.
+        let mut run_measures = BTreeMap::new();
         for (stratum, runs) in &groups {
             if pair::is_pair_stratum(stratum) {
                 let (pair_kpis, detail) = self.pair_kpis(runs);
@@ -1024,11 +1034,18 @@ impl<'a> Context<'a> {
                 }
                 pairs.insert(stratum.clone(), detail);
             }
-            for (name, measure) in self.run_kpis(runs) {
+            let measures = if runs.is_empty() {
+                self.empty_run_kpis.get_or_init(|| self.run_kpis(&[]))
+            } else {
+                run_measures
+                    .entry(runs.iter().map(|run| &run.run_id).collect::<Vec<_>>())
+                    .or_insert_with(|| self.run_kpis(runs))
+            };
+            for (name, measure) in measures {
                 if name == "landings" {
                     landings.insert(stratum, measure.n);
                 }
-                put(name.as_str(), stratum, measure);
+                put(name.as_str(), stratum, measure.clone());
             }
             let (trial_kpis, arrival) = self.trial_kpis(runs, end);
             for (name, measure) in trial_kpis {
@@ -1717,7 +1734,7 @@ impl<'a> Context<'a> {
     /// Returns the coverage.
     fn token_kpis(
         &self,
-        stats: &stats::Stats,
+        stats: &stats::KpiStats,
         axes: &[Axis],
         landed: &impl Fn(&str) -> usize,
         put: &mut impl FnMut(&str, &str, Measure),

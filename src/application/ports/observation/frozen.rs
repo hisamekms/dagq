@@ -72,141 +72,315 @@ fn config() -> KpiConfig {
     )
 }
 
+/// The ordered answers of the frozen readers.
+pub(crate) type Values = Vec<(String, FrozenValue)>;
+
+type ValueSource = Arc<dyn Fn() -> Value + Send + Sync>;
+
+/// One JSON answer, materialized only for inspection or when different byte
+/// strings need a semantic comparison. The owned DTO uses the ordinary Value
+/// serializer when inspected, preserving its numeric semantics. Object order
+/// does not affect equality. Clones share the immutable bytes and decoded
+/// value, so reusing a comparison does not copy its JSON tree.
+#[derive(Clone)]
+pub(crate) struct FrozenValue {
+    encoded: Arc<[u8]>,
+    decoded: Arc<std::sync::OnceLock<Value>>,
+    source: Option<ValueSource>,
+}
+
+impl FrozenValue {
+    pub(crate) fn encode<T: serde::Serialize + Send + Sync + 'static>(value: T) -> Self {
+        Self {
+            encoded: serde_json::to_vec(&value).unwrap().into(),
+            decoded: Arc::default(),
+            source: Some(Arc::new(move || serde_json::to_value(&value).unwrap())),
+        }
+    }
+}
+
+impl From<Value> for FrozenValue {
+    fn from(value: Value) -> Self {
+        Self {
+            encoded: serde_json::to_vec(&value).unwrap().into(),
+            decoded: Arc::new(std::sync::OnceLock::from(value)),
+            source: None,
+        }
+    }
+}
+
+impl std::ops::Deref for FrozenValue {
+    type Target = Value;
+
+    fn deref(&self) -> &Value {
+        self.decoded
+            .get_or_init(|| self.source.as_ref().expect("owned frozen answer")())
+    }
+}
+
+impl PartialEq for FrozenValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.encoded == other.encoded
+            || std::ops::Deref::deref(self) == std::ops::Deref::deref(other)
+    }
+}
+
+impl PartialEq<Value> for FrozenValue {
+    fn eq(&self, other: &Value) -> bool {
+        std::ops::Deref::deref(self) == other
+    }
+}
+
+impl PartialEq<FrozenValue> for Value {
+    fn eq(&self, other: &FrozenValue) -> bool {
+        self == std::ops::Deref::deref(other)
+    }
+}
+
+impl Eq for FrozenValue {}
+
+impl std::fmt::Debug for FrozenValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl serde::Serialize for FrozenValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&**self, serializer)
+    }
+}
+
+/// DTO field order can differ while the JSON value is identical. Inspection
+/// also retains Value's numeric semantics without parsing rounded text.
+#[test]
+fn serialized_frozen_answers_keep_json_value_equality() {
+    #[derive(serde::Serialize)]
+    struct A {
+        a: u64,
+        b: [Option<bool>; 2],
+    }
+    #[derive(serde::Serialize)]
+    struct B {
+        b: [Option<bool>; 2],
+        a: u64,
+    }
+    let a = FrozenValue::encode(A {
+        a: 1,
+        b: [Some(true), None],
+    });
+    let b = FrozenValue::encode(B {
+        b: [Some(true), None],
+        a: 1,
+    });
+    assert_eq!(a, b);
+    assert_eq!(a, json!({"a": 1, "b": [true, null]}));
+    assert_eq!(json!({"b": [true, null], "a": 1}), b);
+    assert_ne!(a, FrozenValue::from(json!({"a": 2, "b": [true, null]})));
+    assert_eq!(
+        serde_json::to_value(&a).unwrap(),
+        json!({"a": 1, "b": [true, null]})
+    );
+    for number in [-0.0, 0.3, f64::MIN_POSITIVE, f64::MAX] {
+        assert_eq!(
+            &*FrozenValue::encode(number),
+            &serde_json::to_value(number).unwrap()
+        );
+    }
+}
+
 /// The readers' values of the ledger `store` holds, read at `input`'s now,
 /// each by its name.
-pub(crate) fn values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Vec<(String, Value)> {
-    let now = T0 + input.now;
-    let mut out = Vec::new();
-    let sources = StatsSources {
-        config_file: &|| Ok(None),
-        conflicts_file: &|| Ok(None),
-        areas: None,
-        utc_offset_secs: 0,
-        counts_checks: true,
-        rust_toolchain: false,
-    };
-    let mut queries = vec![("stats".to_owned(), StatsQuery::default())];
-    for time in &input.times {
-        let since = Some(Cursor::Time(ms(*time)));
-        queries.push((
-            format!("stats --since t{time}"),
-            StatsQuery {
-                since,
-                ..StatsQuery::default()
-            },
-        ));
+pub(crate) fn values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Values {
+    values_of(store, input, Group::All)
+}
+
+/// The independent questions, in the order of the original frozen vector.
+/// Selecting one group executes only that group's actual readers.
+#[derive(Clone, Copy)]
+pub(crate) enum Group {
+    All,
+    Stats,
+    KpiDays,
+    KpiSince,
+    Targets,
+    Report,
+    Queue,
+}
+
+impl Group {
+    pub(crate) const PARTS: [Self; 6] = [
+        Self::Stats,
+        Self::KpiDays,
+        Self::KpiSince,
+        Self::Targets,
+        Self::Report,
+        Self::Queue,
+    ];
+
+    fn contains(self, name: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Stats => name.starts_with("stats"),
+            Self::KpiDays => name == "kpi",
+            Self::KpiSince => name.starts_with("kpi --since"),
+            Self::Targets => name.starts_with("targets "),
+            Self::Report => name == "report",
+            Self::Queue => name.starts_with("queue"),
+        }
     }
-    for until in &input.untils {
-        let until_at = Some(Cursor::Event(*until));
-        queries.push((
-            format!("stats --until {}", until.as_i64()),
-            StatsQuery {
-                until: until_at,
-                ..StatsQuery::default()
-            },
-        ));
-    }
-    for (name, mut query) in queries {
-        query.full = true;
-        let window = store.ledger_window(&window_query(&query, now)).unwrap();
-        let stats = stats::of_window(&window, now, &query, &sources).unwrap();
-        out.push((
-            format!("{name} position"),
-            json!({"next_cursor": stats.next_cursor.as_i64(), "window_ms": stats.window_ms,
-                   "after": window.after.as_i64(), "upto": window.upto.as_i64(),
-                   "start_ms": window.start_ms, "end_ms": window.end_ms}),
-        ));
-        out.push((name, serde_json::to_value(&stats).unwrap()));
-    }
-    let days = KpiQuery {
-        period: Period::Day,
-        last: 3,
-        ..KpiQuery::default()
-    };
-    let whole = kpi::kpi(store, now, host(), &config(), None, &days).unwrap();
-    out.push(("kpi".into(), serde_json::to_value(&whole).unwrap()));
-    for time in &input.times {
-        let since = KpiQuery {
-            since: Some(Cursor::Time(ms(*time))),
-            ..KpiQuery::default()
-        };
-        let kpi = kpi::kpi(store, now, host(), &config(), None, &since).unwrap();
-        out.push((
-            format!("kpi --since t{time}"),
-            serde_json::to_value(&kpi).unwrap(),
-        ));
-    }
-    // The check of the targets: a day and a week, the last two, read from
-    // the earlier of their times.
-    let checks: Vec<KpiQuery> = [Period::Day, Period::Week]
+}
+
+/// Read all groups without repeating the builder or takeover setup.
+pub(crate) fn grouped_values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Values {
+    Group::PARTS
         .into_iter()
-        .map(|period| KpiQuery {
-            period,
-            last: 2,
-            ..KpiQuery::default()
-        })
-        .collect();
-    let from = checks
-        .iter()
-        .filter_map(|query| read_from_ms(query, &config(), now, 0))
-        .min();
-    let read = store
-        .ledger_window(&WindowQuery {
-            now_ms: now_ms(now),
-            read_from_ms: from,
-            bounds: kpi::declared(checks.clone(), now, host(), &config(), None),
-            ..WindowQuery::default()
-        })
-        .unwrap();
-    for query in &checks {
-        let kpi = kpi::of_window(&read, now, host(), &config(), None, query).unwrap();
-        out.push((
-            format!("targets {}", query.period.as_str()),
-            serde_json::to_value(&kpi.targets).unwrap(),
-        ));
-    }
-    let setup = ReportSetup {
-        root: Default::default(),
-        host: host(),
-        config: config(),
-        keep: Default::default(),
-        build: "test".into(),
-        diagram: DiagramRenderer(Arc::new(|_| unreachable!())),
-        areas: None,
-    };
-    let section = DiagramSection {
-        tasks: Vec::new(),
-        d2_source: false,
-        reason: Some("not drawn".into()),
-        svg: None,
-    };
-    let window = report::window(
-        store,
-        now,
-        &setup,
-        vec![report::report_query(Period::Day, None)],
-    )
-    .unwrap();
-    let report = make_with(&window, &setup, now, Period::Day, None, section).unwrap();
-    out.push(("report".into(), serde_json::to_value(&report).unwrap()));
-    for time in &input.times {
-        let query = WindowQuery {
-            now_ms: now_ms(now),
-            read_from_ms: Some(ms(*time)),
-            ..WindowQuery::default()
+        .flat_map(|group| values_of(store, input, group))
+        .collect()
+}
+
+pub(crate) fn values_of(
+    store: &(impl LedgerStore + ?Sized),
+    input: &Input,
+    group: Group,
+) -> Values {
+    let now = T0 + input.now;
+    let mut out: Values = Vec::new();
+    if matches!(group, Group::All | Group::Stats) {
+        let sources = StatsSources {
+            config_file: &|| Ok(None),
+            conflicts_file: &|| Ok(None),
+            areas: None,
+            utc_offset_secs: 0,
+            counts_checks: true,
+            rust_toolchain: false,
         };
-        let before = super::rows_from_of(store, &query)
-            .unwrap()
-            .map(|from| from.inputs_through.as_i64());
-        out.push((format!("queue_before t{time}"), json!(before)));
+        let mut queries = vec![("stats".to_owned(), StatsQuery::default())];
+        for time in &input.times {
+            let since = Some(Cursor::Time(ms(*time)));
+            queries.push((
+                format!("stats --since t{time}"),
+                StatsQuery {
+                    since,
+                    ..StatsQuery::default()
+                },
+            ));
+        }
+        for until in &input.untils {
+            let until_at = Some(Cursor::Event(*until));
+            queries.push((
+                format!("stats --until {}", until.as_i64()),
+                StatsQuery {
+                    until: until_at,
+                    ..StatsQuery::default()
+                },
+            ));
+        }
+        for (name, mut query) in queries {
+            query.full = true;
+            let window = store.ledger_window(&window_query(&query, now)).unwrap();
+            let stats = stats::of_window(&window, now, &query, &sources).unwrap();
+            out.push((
+                format!("{name} position"),
+                json!({"next_cursor": stats.next_cursor.as_i64(), "window_ms": stats.window_ms,
+                       "after": window.after.as_i64(), "upto": window.upto.as_i64(),
+                       "start_ms": window.start_ms, "end_ms": window.end_ms})
+                .into(),
+            ));
+            out.push((name, FrozenValue::encode(stats)));
+        }
     }
-    let queue: Vec<Value> = store
-        .ledger_rows(LedgerKind::Queue)
-        .unwrap()
-        .iter()
-        .map(|row| serde_json::to_value(row).unwrap())
-        .collect();
-    out.push(("queue rows".into(), Value::Array(queue)));
+    if matches!(group, Group::All | Group::KpiDays) {
+        let days = KpiQuery {
+            period: Period::Day,
+            last: 3,
+            ..KpiQuery::default()
+        };
+        let whole = kpi::kpi(store, now, host(), &config(), None, &days).unwrap();
+        out.push(("kpi".into(), FrozenValue::encode(whole)));
+    }
+    if matches!(group, Group::All | Group::KpiSince) {
+        for time in &input.times {
+            let since = KpiQuery {
+                since: Some(Cursor::Time(ms(*time))),
+                ..KpiQuery::default()
+            };
+            let kpi = kpi::kpi(store, now, host(), &config(), None, &since).unwrap();
+            out.push((format!("kpi --since t{time}"), FrozenValue::encode(kpi)));
+        }
+    }
+    if matches!(group, Group::All | Group::Targets) {
+        // The check of the targets: a day and a week, the last two, read from
+        // the earlier of their times.
+        let checks: Vec<KpiQuery> = [Period::Day, Period::Week]
+            .into_iter()
+            .map(|period| KpiQuery {
+                period,
+                last: 2,
+                ..KpiQuery::default()
+            })
+            .collect();
+        let from = checks
+            .iter()
+            .filter_map(|query| read_from_ms(query, &config(), now, 0))
+            .min();
+        let read = store
+            .ledger_window(&WindowQuery {
+                now_ms: now_ms(now),
+                read_from_ms: from,
+                bounds: kpi::declared(checks.clone(), now, host(), &config(), None),
+                ..WindowQuery::default()
+            })
+            .unwrap();
+        for query in &checks {
+            let kpi = kpi::of_window(&read, now, host(), &config(), None, query).unwrap();
+            out.push((
+                format!("targets {}", query.period.as_str()),
+                FrozenValue::encode(kpi.targets),
+            ));
+        }
+    }
+    if matches!(group, Group::All | Group::Report) {
+        let setup = ReportSetup {
+            root: Default::default(),
+            host: host(),
+            config: config(),
+            keep: Default::default(),
+            build: "test".into(),
+            diagram: DiagramRenderer(Arc::new(|_| unreachable!())),
+            areas: None,
+        };
+        let section = DiagramSection {
+            tasks: Vec::new(),
+            d2_source: false,
+            reason: Some("not drawn".into()),
+            svg: None,
+        };
+        let window = report::window(
+            store,
+            now,
+            &setup,
+            vec![report::report_query(Period::Day, None)],
+        )
+        .unwrap();
+        let report = make_with(&window, &setup, now, Period::Day, None, section).unwrap();
+        out.push(("report".into(), FrozenValue::encode(report)));
+    }
+    if matches!(group, Group::All | Group::Queue) {
+        for time in &input.times {
+            let query = WindowQuery {
+                now_ms: now_ms(now),
+                read_from_ms: Some(ms(*time)),
+                ..WindowQuery::default()
+            };
+            let before = super::rows_from_of(store, &query)
+                .unwrap()
+                .map(|from| from.inputs_through.as_i64());
+            out.push((format!("queue_before t{time}"), json!(before).into()));
+        }
+        let queue = store.ledger_rows(LedgerKind::Queue).unwrap();
+        out.push(("queue rows".into(), FrozenValue::encode(queue)));
+    }
     out
 }
 
@@ -225,7 +399,17 @@ pub(crate) fn fixed(value: &Value) -> String {
 
 /// Whether the values of `input` differ from those fixed: if they do, the
 /// values now in the table's form.
-pub(crate) fn differs(input: &Input, values: &[(String, Value)]) -> Option<String> {
+pub(crate) fn differs(input: &Input, values: &[(String, FrozenValue)]) -> Option<String> {
+    differs_of(input, values, Group::All)
+}
+
+/// A reader group's complete answer against its part of the independent
+/// frozen table. Together the groups retain the whole-table anchor.
+pub(crate) fn differs_of(
+    input: &Input,
+    values: &[(String, FrozenValue)],
+    group: Group,
+) -> Option<String> {
     let now: Vec<(String, String)> = values
         .iter()
         .map(|(name, value)| (name.clone(), fixed(value)))
@@ -233,11 +417,15 @@ pub(crate) fn differs(input: &Input, values: &[(String, Value)]) -> Option<Strin
     let expected = FIXED
         .iter()
         .find(|(name, _)| *name == input.name)
-        .map_or(&[][..], |(_, values)| *values);
+        .map_or(&[][..], |(_, values)| *values)
+        .iter()
+        .copied()
+        .filter(|(name, _)| group.contains(name))
+        .collect::<Vec<_>>();
     let same = now.len() == expected.len()
         && now
             .iter()
-            .zip(expected)
+            .zip(&expected)
             .all(|((a, x), (b, y))| a == b && x == y);
     (!same).then(|| {
         let table: Vec<String> = now
@@ -255,7 +443,7 @@ pub(crate) fn differs(input: &Input, values: &[(String, Value)]) -> Option<Strin
 /// The values of every input of `each` (its name and its values) are
 /// those fixed, and no input fixed is left out.
 #[track_caller]
-pub(crate) fn check(each: &[(&Input, Vec<(String, Value)>)]) {
+pub(crate) fn check(each: &[(&Input, Values)]) {
     let differing: Vec<String> = each
         .iter()
         .filter_map(|(input, values)| differs(input, values))
@@ -264,6 +452,30 @@ pub(crate) fn check(each: &[(&Input, Vec<(String, Value)>)]) {
     let names: Vec<&str> = each.iter().map(|(input, _)| input.name).collect();
     let fixed: Vec<&str> = FIXED.iter().map(|(name, _)| *name).collect();
     assert_eq!(names, fixed);
+}
+
+/// Every independent frozen value belongs to exactly one group, in the
+/// original order. The ledger's direct golden anchor executes these groups
+/// for every canonical input and still compares with the untouched table.
+#[test]
+fn groups_partition_every_fixed_value() {
+    let inputs = crate::domain::ledger::testkit::frozen::inputs();
+    assert_eq!(
+        inputs.iter().map(|input| input.name).collect::<Vec<_>>(),
+        FIXED.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+    );
+    for input in &inputs {
+        for group in Group::PARTS {
+            assert!(differs_of(input, &[], group).is_some());
+        }
+    }
+    for (_, values) in FIXED {
+        let joined: Vec<_> = Group::PARTS
+            .into_iter()
+            .flat_map(|group| values.iter().filter(move |(name, _)| group.contains(name)))
+            .collect();
+        assert_eq!(joined, values.iter().collect::<Vec<_>>());
+    }
 }
 
 /// The values fixed, by input and name.

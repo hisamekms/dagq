@@ -3,9 +3,11 @@
 //! the readers' values of the ledger it made held to those fixed
 //! ([`crate::application::ports::frozen`]).
 
-use super::omitting::{ends_cut, none, of_old_form, of_old_form_of};
+use super::omitting::{ends_cut, none, of_old_form};
 use super::*;
-use crate::application::ports::frozen::{check, differs, values};
+use crate::application::ports::frozen::{
+    FrozenValue, Group, Values, check, differs, differs_of, grouped_values as values, values_of,
+};
 use crate::domain::ledger::owner::{self, Owner};
 use crate::domain::ledger::session::written::omitted::Omission;
 use crate::domain::ledger::testkit::frozen::{Input, Step, THREE, inputs};
@@ -71,7 +73,7 @@ pub(super) fn built_on(
     memory
 }
 
-fn named<'a>(values: &'a [(String, Value)], name: &str) -> &'a Value {
+fn named<'a>(values: &'a [(String, FrozenValue)], name: &str) -> &'a Value {
     &values.iter().find(|(n, _)| n == name).unwrap().1
 }
 
@@ -120,10 +122,15 @@ fn assert_published_omitted_rows_removed(memory: &Memory, through: EventId) {
 /// Compare all reader values (`now`, those of `memory`), giving back only physical queue-row JSON
 /// removed by publication's wider coverage. Windows still read the actual
 /// sparse store. Compare recorded input as rows plus public coverage too.
-fn compare_after_removal(
+fn compare_after_removal(memory: &Memory, now: Values, reference: &Memory, input: &Input) {
+    compare_known_values_after_removal(memory, now, reference, values(reference, input), input);
+}
+
+fn compare_known_values_after_removal(
     memory: &Memory,
-    now: Vec<(String, Value)>,
+    now: Values,
     reference: &Memory,
+    expected: Values,
     input: &Input,
 ) {
     let missing: Vec<_> = reference
@@ -137,7 +144,7 @@ fn compare_after_removal(
         .collect();
     assert_eq!(
         with_rows_given_back(now, memory, &missing),
-        values(reference, input),
+        expected,
         "{}",
         input.name
     );
@@ -154,16 +161,39 @@ fn compare_after_removal(
     assert_eq!(recorded(memory), recorded(reference));
 }
 
-/// Each input's readers' values of the ledger the builder of now makes
-/// are those fixed.
+/// Every canonical input is still checked against the original independent
+/// frozen table, with one build per input and every reader group together.
+mod the_readers_values_of_each_input_are_those_fixed {
+    super::each_frozen_input!(super::super::fixed_input;
+        reached => "reached" [s0 = 0],
+        cut => "cut" [s0 = 0],
+        on_its_way => "on its way" [s0 = 0],
+        store_ahead => "store ahead" [s0 = 0],
+        clock_back => "clock back" [s0 = 0],
+        no_r => "no r" [s0 = 0],
+        queue_and_run => "queue and run" [s0 = 0],
+        timeless => "timeless" [s0 = 0],
+    );
+}
+
+fn fixed_input(name: &str, _: usize, _: usize) {
+    let input = input_named(name);
+    if let Some(diff) = differs(&input, &values(&built(&input), &input)) {
+        panic!("{diff}");
+    }
+}
+
+/// The actual values of every group, including positions and physical
+/// queue JSON, concatenate to the original whole read. The independent
+/// frozen table separately anchors those values for every canonical input.
 #[test]
-fn the_readers_values_of_each_input_are_those_fixed() {
-    let all = inputs();
-    let each: Vec<_> = all
-        .iter()
-        .map(|input| (input, values(&built(input), input)))
-        .collect();
-    check(&each);
+fn the_reader_groups_together_equal_the_original_values() {
+    let input = input_named("reached");
+    let memory = built(&input);
+    assert_eq!(
+        values(&memory, &input),
+        crate::application::ports::frozen::values(&memory, &input)
+    );
 }
 
 /// The ledgers are those the inputs say: (ii) and (vii) (as its cut pass
@@ -590,13 +620,9 @@ fn split_and_single_r_builders_catch_up_to_the_same_rows_and_reader_values() {
     }
 }
 
-/// The store after `input`'s steps by the builder of now until step
-/// `from` and omitting the three kinds from it on (the builder of then sets
-/// them: C is where its next pass reads from), which writes no queue row of
-/// the omitted events in (C, S]; and the rows of those events of the ledger
-/// of now's form, those the builder of now wrote ([`built`]). The coverage,
-/// its points and every other row are the builder's.
-fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) {
+/// Build the sparse historical ledger alone. Rebuild setup does not use
+/// the restored queue rows, which require another full builder run.
+fn omitting_ledger(input: &Input, from: usize) -> Memory {
     let memory = Memory::default();
     let set = |n: usize| if n >= from { three() } else { none() };
     let mut builder = Builder::default();
@@ -636,6 +662,111 @@ fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) 
             }
         }
     }
+    memory
+}
+
+/// A new process's store at a frozen-history checkpoint. These inputs
+/// contain events alone: the builder persists their rows, marks, coverage and
+/// points. Costed clocks, read counters and failure switches belong to the
+/// process, so copying a prefix does not carry them into the next builder.
+pub(super) fn copy_frozen_store(source: &Memory) -> Memory {
+    assert!(source.samples.borrow().is_empty());
+    assert!(source.steps.borrow().is_empty());
+    assert!(source.owners.borrow().is_empty());
+    assert!(source.run_resources.borrow().is_empty());
+    assert!(source.inside.borrow().is_empty());
+    let memory = Memory::default();
+    memory.events.replace(source.events.borrow().clone());
+    memory.rows.replace(source.rows.borrow().clone());
+    memory.mark.replace(*source.mark.borrow());
+    memory.rows_mark.replace(*source.rows_mark.borrow());
+    memory.omitted.replace(source.omitted.borrow().clone());
+    memory.points.replace(source.points.borrow().clone());
+    memory
+}
+
+/// Reuse a reference read only when all persisted input is identical.
+/// The rebuilding side is always read afresh: a private fold leaking into a
+/// public answer must still fail against these unchanged reference values.
+struct ReferenceValues<'a> {
+    input: &'a Input,
+    group: Group,
+    previous: Option<(Memory, Values)>,
+}
+
+impl<'a> ReferenceValues<'a> {
+    fn new(input: &'a Input) -> Self {
+        Self::for_group(input, Group::All)
+    }
+
+    fn for_group(input: &'a Input, group: Group) -> Self {
+        Self {
+            input,
+            group,
+            previous: None,
+        }
+    }
+
+    fn read(&mut self, memory: &Memory) -> Values {
+        if let Some((previous, values)) = &self.previous {
+            let same = *memory.events.borrow() == *previous.events.borrow()
+                && *memory.rows.borrow() == *previous.rows.borrow()
+                && *memory.mark.borrow() == *previous.mark.borrow()
+                && *memory.rows_mark.borrow() == *previous.rows_mark.borrow()
+                && *memory.omitted.borrow() == *previous.omitted.borrow()
+                && *memory.points.borrow() == *previous.points.borrow();
+            if same {
+                return values.clone();
+            }
+        }
+        let read = reader_values(memory, self.input, self.group);
+        self.previous = Some((copy_frozen_store(memory), read.clone()));
+        read
+    }
+}
+
+/// A checkpoint's reader group, retaining the complete reader union for
+/// checkpoints that are not split into separate tests.
+fn reader_values(memory: &Memory, input: &Input, group: Group) -> Values {
+    match group {
+        Group::All => values(memory, input),
+        group => values_of(memory, input, group),
+    }
+}
+
+/// Equal marks alone are insufficient: changed row contents must be read.
+#[test]
+fn reference_reads_reuse_only_identical_frozen_store_contents() {
+    let input = input_named("reached");
+    let memory = built(&input);
+    let mut reference = ReferenceValues::new(&input);
+    let before = memory.queue_read.borrow().len();
+    let first = reference.read(&memory);
+    let reads = memory.queue_read.borrow().len();
+    assert!(reads > before);
+    assert_eq!(reference.read(&memory), first);
+    assert_eq!(memory.queue_read.borrow().len(), reads);
+    {
+        let mut rows = memory.rows.borrow_mut();
+        let row = rows
+            .values_mut()
+            .find(|row| row.kind == LedgerKind::Queue && !row.records.is_empty())
+            .unwrap();
+        row.records[0].payload["changed_at_the_same_mark"] = json!(true);
+    }
+    let changed = reference.read(&memory);
+    assert_ne!(changed, first);
+    assert_eq!(changed, values(&memory, &input));
+}
+
+/// The store after `input`'s steps by the builder of now until step
+/// `from` and omitting the three kinds from it on (the builder of then sets
+/// them: C is where its next pass reads from), which writes no queue row of
+/// the omitted events in (C, S]; and the rows of those events of the ledger
+/// of now's form, those the builder of now wrote ([`built`]). The coverage,
+/// its points and every other row are the builder's.
+fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) {
+    let memory = omitting_ledger(input, from);
     let omitted = super::omitting::omitted_of(&memory);
     let form = super::omitting::old_form(&memory, Some(&built(input)), ms(input.now));
     let taken = omitted
@@ -649,11 +780,10 @@ fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) 
 
 /// `values` with the queue rows of `left` given back the rows taken out,
 /// in the order the store holds them: what the store held before.
-fn with_rows_given_back(
-    mut values: Vec<(String, Value)>,
-    memory: &Memory,
-    taken: &[LedgerRow],
-) -> Vec<(String, Value)> {
+fn with_rows_given_back(mut values: Values, memory: &Memory, taken: &[LedgerRow]) -> Values {
+    if !values.iter().any(|(name, _)| name == "queue rows") {
+        return values;
+    }
     let mut queue: Vec<LedgerRow> = memory
         .rows
         .borrow()
@@ -663,14 +793,8 @@ fn with_rows_given_back(
         .chain(taken.iter().cloned())
         .collect();
     queue.sort_by(|a, b| a.key.cmp(&b.key));
-    let rows: Vec<Value> = queue
-        .iter()
-        .map(|row| serde_json::to_value(row).unwrap())
-        .collect();
-    for (name, value) in &mut values {
-        if name == "queue rows" {
-            *value = Value::Array(rows.clone());
-        }
+    if let Some((_, value)) = values.iter_mut().find(|(name, _)| name == "queue rows") {
+        *value = FrozenValue::encode(queue);
     }
     values
 }
@@ -734,7 +858,7 @@ fn the_ledger_without_the_omitted_rows_gives_the_values_fixed() {
 /// of its ledger of now's form ([`of_old_form`], which each input's `each`
 /// is). `cut` differs.
 #[track_caller]
-fn check_ended_whole(each: &[(&Input, Vec<(String, Value)>)]) {
+fn check_ended_whole(each: &[(&Input, Values)]) {
     let differing: Vec<(&str, String)> = each
         .iter()
         .filter_map(|(input, values)| Some((input.name, differs(input, values)?)))
@@ -960,9 +1084,14 @@ impl Shard {
 
     /// Whether the run's next checkpoint is this shard's.
     pub(super) fn next(&self) -> bool {
-        let next = self.next.get();
-        let mine = next % self.shards == self.shard;
-        self.next.set(next + 1);
+        self.at(self.next.get())
+    }
+
+    /// A checkpoint numbered independently of traversal order. Count calls
+    /// separately so `checked_some` still reports the number visited.
+    pub(super) fn at(&self, index: usize) -> bool {
+        let mine = index % self.shards == self.shard;
+        self.next.set(self.next.get() + 1);
         self.checked.set(self.checked.get() + usize::from(mine));
         mine
     }
@@ -993,8 +1122,8 @@ pub(super) fn input_named(name: &str) -> Input {
 /// the builder of now left its last pass cut ([`ends_cut`]), and `cut`'s
 /// differ.
 #[track_caller]
-fn check_ended_one(input: &Input, values: &[(String, Value)]) {
-    match differs(input, values) {
+fn check_ended_one(input: &Input, values: &[(String, FrozenValue)], group: Group) {
+    match differs_of(input, values, group) {
         Some(differs) => assert!(ends_cut(input), "{differs}"),
         None => assert_ne!(input.name, "cut", "cut's values differ"),
     }
@@ -1016,6 +1145,10 @@ fn check_ended_one(input: &Input, values: &[(String, Value)]) {
 /// pass's shard ([`Shard`]). So together they hold every check of every
 /// pass of every input, as one test of all of them did;
 /// `every_input_has_its_test` keeps every input.
+/// Queue-and-run shards three through six have one test per reader group:
+/// each numbered test keeps the queue answers, and its reader module checks
+/// the other five groups at the same checkpoints, including the canonical
+/// end's independent frozen table. Each part checks publication on every pass.
 mod rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold {
     super::each_frozen_input!(super::super::rebuilt;
         reached => "reached" [s0 = 0, s1 = 1, s2 = 2, s3 = 3],
@@ -1027,12 +1160,145 @@ mod rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold {
         queue_and_run => "queue and run" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5, s6 = 6],
         timeless => "timeless" [s0 = 0, s1 = 1],
     );
+
+    mod queue_and_run_s3_readers {
+        use super::super::*;
+
+        const _: () = assert!(Group::PARTS.len() == 6);
+
+        #[test]
+        fn stats() {
+            rebuilt_with_readers("queue and run", 3, 7, Group::Stats);
+        }
+
+        #[test]
+        fn kpi_days() {
+            rebuilt_with_readers("queue and run", 3, 7, Group::KpiDays);
+        }
+
+        #[test]
+        fn kpi_since() {
+            rebuilt_with_readers("queue and run", 3, 7, Group::KpiSince);
+        }
+
+        #[test]
+        fn targets() {
+            rebuilt_with_readers("queue and run", 3, 7, Group::Targets);
+        }
+
+        #[test]
+        fn report() {
+            rebuilt_with_readers("queue and run", 3, 7, Group::Report);
+        }
+    }
+
+    mod queue_and_run_s4_readers {
+        use super::super::*;
+
+        const _: () = assert!(Group::PARTS.len() == 6);
+
+        #[test]
+        fn stats() {
+            rebuilt_with_readers("queue and run", 4, 7, Group::Stats);
+        }
+
+        #[test]
+        fn kpi_days() {
+            rebuilt_with_readers("queue and run", 4, 7, Group::KpiDays);
+        }
+
+        #[test]
+        fn kpi_since() {
+            rebuilt_with_readers("queue and run", 4, 7, Group::KpiSince);
+        }
+
+        #[test]
+        fn targets() {
+            rebuilt_with_readers("queue and run", 4, 7, Group::Targets);
+        }
+
+        #[test]
+        fn report() {
+            rebuilt_with_readers("queue and run", 4, 7, Group::Report);
+        }
+    }
+
+    mod queue_and_run_s5_readers {
+        use super::super::*;
+
+        const _: () = assert!(Group::PARTS.len() == 6);
+
+        #[test]
+        fn stats() {
+            rebuilt_with_readers("queue and run", 5, 7, Group::Stats);
+        }
+
+        #[test]
+        fn kpi_days() {
+            rebuilt_with_readers("queue and run", 5, 7, Group::KpiDays);
+        }
+
+        #[test]
+        fn kpi_since() {
+            rebuilt_with_readers("queue and run", 5, 7, Group::KpiSince);
+        }
+
+        #[test]
+        fn targets() {
+            rebuilt_with_readers("queue and run", 5, 7, Group::Targets);
+        }
+
+        #[test]
+        fn report() {
+            rebuilt_with_readers("queue and run", 5, 7, Group::Report);
+        }
+    }
+
+    mod queue_and_run_s6_readers {
+        use super::super::*;
+
+        const _: () = assert!(Group::PARTS.len() == 6);
+
+        #[test]
+        fn stats() {
+            rebuilt_with_readers("queue and run", 6, 7, Group::Stats);
+        }
+
+        #[test]
+        fn kpi_days() {
+            rebuilt_with_readers("queue and run", 6, 7, Group::KpiDays);
+        }
+
+        #[test]
+        fn kpi_since() {
+            rebuilt_with_readers("queue and run", 6, 7, Group::KpiSince);
+        }
+
+        #[test]
+        fn targets() {
+            rebuilt_with_readers("queue and run", 6, 7, Group::Targets);
+        }
+
+        #[test]
+        fn report() {
+            rebuilt_with_readers("queue and run", 6, 7, Group::Report);
+        }
+    }
 }
 
 /// The steps of [`rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold`]
 /// for the input named `name`, checking the readers' values at the passes
 /// of `shard` of `shards`.
 fn rebuilt(name: &str, shard: usize, shards: usize) {
+    let group = if name == "queue and run" && (3..=6).contains(&shard) {
+        Group::Queue
+    } else {
+        Group::All
+    };
+    rebuilt_with_readers(name, shard, shards, group);
+}
+
+fn rebuilt_with_readers(name: &str, shard: usize, shards: usize, group: Group) {
     let input = &input_named(name);
     let shard = Shard::new(shard, shards);
     let (Step::Arrive(first), Step::Drain(secs)) = (input.steps[0], input.steps[1]) else {
@@ -1049,8 +1315,9 @@ fn rebuilt(name: &str, shard: usize, shards: usize) {
         Step::Arrive(first - 3),
         Step::Drain(secs),
     ];
+    let prefix = omitting_ledger(&setup, 2);
     let mut sides = [0, 1].map(|_| {
-        let (memory, _) = without_omitted_rows(&setup, 2);
+        let memory = copy_frozen_store(&prefix);
         let mut builder = start_builder(&memory, ms(secs)).unwrap();
         builder.set_omission(three());
         (memory, builder)
@@ -1088,6 +1355,9 @@ fn rebuilt(name: &str, shard: usize, shards: usize) {
     let mut moving_before_publication = 0;
     let mut arrival_passes = 0;
     let mut published = false;
+    let mut reader_checkpoints = 0;
+    let mut reference_values = ReferenceValues::for_group(input, group);
+    let mut form_values = ReferenceValues::for_group(input, group);
     let mut run_pass = |sides: &mut [(Memory, Builder); 2], secs| {
         let previous = sides[0].0.omitted.borrow().clone().unwrap();
         let new_events = sides[0].0.events.borrow().last().unwrap().id > previous.through;
@@ -1108,8 +1378,15 @@ fn rebuilt(name: &str, shard: usize, shards: usize) {
         assert_eq!(*memory.rows_mark.borrow(), *reference.rows_mark.borrow());
         assert_eq!(*memory.mark.borrow(), *reference.mark.borrow());
         if shard.next() {
-            let now = values(memory, input);
-            compare_after_removal(memory, now.clone(), reference, input);
+            reader_checkpoints += 1;
+            let now = reader_values(memory, input, group);
+            compare_known_values_after_removal(
+                memory,
+                now.clone(),
+                reference,
+                reference_values.read(reference),
+                input,
+            );
             // The row-given-back comparison reads every non-row value
             // from the sparse ledger, before and after publication.
             let form = super::omitting::old_form(memory, Some(&old), ms(input.now));
@@ -1121,8 +1398,8 @@ fn rebuilt(name: &str, shard: usize, shards: usize) {
                 .map(|(_, row)| row.clone())
                 .collect();
             assert_eq!(
-                with_rows_given_back(now.clone(), memory, &taken),
-                of_old_form_of(memory, now, Some(&old), input, input.name)
+                with_rows_given_back(now, memory, &taken),
+                form_values.read(&form)
             );
         }
         if held.from == EventId::new(0) {
@@ -1222,9 +1499,28 @@ fn rebuilt(name: &str, shard: usize, shards: usize) {
     }
     // At the canonical input's end, retain the frozen-value anchor
     // (and its existing same-input allowance for a cut pass).
-    if shard.next() {
-        let ended = of_old_form(&sides[0].0, Some(&old), input, input.name);
-        check_ended_one(input, &ended);
+    let canonical_checkpoint = shard.next();
+    if canonical_checkpoint {
+        let memory = &sides[0].0;
+        let ended = if matches!(group, Group::All) {
+            of_old_form(memory, Some(&old), input, input.name)
+        } else {
+            let form = super::omitting::old_form(memory, Some(&old), ms(input.now));
+            let taken = form
+                .rows
+                .borrow()
+                .iter()
+                .filter(|(key, _)| !memory.rows.borrow().contains_key(key))
+                .map(|(_, row)| row.clone())
+                .collect::<Vec<_>>();
+            let ended = reader_values(&form, input, group);
+            assert_eq!(
+                with_rows_given_back(reader_values(memory, input, group), memory, &taken),
+                ended
+            );
+            ended
+        };
+        check_ended_one(input, &ended, group);
     }
     // Drain private work too: ordinary backlog does not count it.
     for _ in 0..largest_kind + 3 {
@@ -1234,6 +1530,13 @@ fn rebuilt(name: &str, shard: usize, shards: usize) {
         }
     }
     assert!(published, "{}", input.name);
+    if !matches!(group, Group::All) {
+        assert!(
+            reader_checkpoints > 0 || canonical_checkpoint,
+            "{}: reader part checked no checkpoint",
+            input.name
+        );
+    }
     assert!(rounds > 1 && arrival_passes >= 2, "{}", input.name);
     assert!(
         moving_before_publication > 0,

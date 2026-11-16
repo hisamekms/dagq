@@ -22,7 +22,8 @@
 //! without a judgement of its own → [`stats`] here, which holds every
 //! rule of the counting and does no I/O → [`with_changes`], [`with_areas`],
 //! [`without_cargo_measures`] and [`without_rustc`] → JSON. The KPI
-//! windows and the forecast call [`stats`] directly, so they read the same
+//! windows use the same prepared run facts and period aggregation as
+//! [`stats_answering`]; the forecast calls [`stats`] directly. They read the same
 //! rules; plan review's and the claim deferral's conflict hotspots apply
 //! the same window rule ([`window`]) and the same counting
 //! ([`conflicts::conflict_hotspots_over`]) without the whole [`stats`].
@@ -92,6 +93,8 @@ pub mod main_log;
 pub mod measures;
 pub mod planner_routes;
 pub mod predictions;
+mod prepared;
+pub(super) use prepared::{KpiStats, Prepared};
 pub mod providers;
 pub mod recommendations;
 pub mod replans;
@@ -1113,38 +1116,43 @@ pub fn stats_answering(
     query: &StatsQuery,
     live: &LiveSnapshot,
 ) -> Stats {
-    let resolve = |cursor: Cursor| match cursor {
-        Cursor::Time(ms) => answers
-            .and_then(|answers| answers.last_at(ms))
-            .unwrap_or_else(|| cursor.event_id(events)),
-        Cursor::Event(_) => cursor.event_id(events),
-    };
-    let since = query.since.map(resolve);
-    let until = query.until.map(resolve);
-    let latest = events.iter().map(|e| e.id).max().unwrap_or(EventId::new(0));
-    let latest_event = latest;
-    // A `--since` past `--until` leaves nothing, and the cursor does not go back.
-    let latest = until.map_or(latest, |until| {
-        let capped = until.min(latest);
-        since.map_or(capped, |since| capped.max(since.min(latest)))
-    });
-    let in_goal = |task_id: TaskId| {
-        query
-            .goal_id
-            .is_none_or(|goal| goals.get(&task_id).copied().flatten() == Some(goal))
-    };
-    let mut tracks = runs(events, goals);
-    if let Some(ledger) = &live.ledger {
-        for track in &mut tracks {
-            track.take_ledger(ledger);
-        }
-    }
+    let prepared = Prepared::new(
+        events,
+        goals,
+        now,
+        std::borrow::Cow::Borrowed(live),
+        query.goal_id,
+    );
+    let page = prepared.page(answers, query);
+    let prepared::KpiStats {
+        runs: finished_values,
+        overall: run_overall,
+        backend_failures,
+        auto_repairs,
+        cancel_reasons,
+        review_reasons,
+        draft_flow,
+        execution_tokens,
+        follow_up_categories,
+        jobs,
+        planner_routes,
+        sessions,
+        worker_question_topics,
+        worker_routes,
+        asks: ask_stats,
+        waiting,
+    } = prepared.answer(&page);
+    let tracks = &prepared.tracks;
+    let finished = &page.finished;
+    let open = &page.open;
+    let next_cursor = page.next_cursor;
+    let in_goal = |task| prepared.in_goal(task);
     let judged_running = live
         .judged
         .as_ref()
         .map(|judged| judged.running_alerts.value.clone().unwrap_or_default());
     let running_alerts: Vec<RunningAlert> = judged_running
-        .unwrap_or_else(|| running_alerts(events, &tracks, now, live))
+        .unwrap_or_else(|| running_alerts(events, tracks, now, live))
         .into_iter()
         .filter(|alert| alert.task_id.is_none_or(in_goal))
         .collect();
@@ -1159,12 +1167,6 @@ pub fn stats_answering(
             }),
         None => workspace_check(events, &live.runs),
     };
-    let mut first_event: HashMap<&str, EventId> = HashMap::new();
-    for event in events {
-        if let Some(run_id) = &event.run_id {
-            first_event.entry(run_id.as_str()).or_insert(event.id);
-        }
-    }
     // Per task, over every run and not only this page: the `failed` count
     // and the latest run that failed.
     let mut failures: BTreeMap<TaskId, (i64, RunId)> = BTreeMap::new();
@@ -1175,91 +1177,10 @@ pub fn stats_answering(
         entry.0 += track.stats.failed;
         entry.1.clone_from(&track.stats.run_id);
     }
-    let (finished, open): (Vec<_>, Vec<_>) = tracks
-        .into_iter()
-        .filter(|track| in_goal(track.stats.task_id))
-        .partition(|track| track.stats.finished_event_id.is_some());
-    let mut finished = finished
-        .into_iter()
-        .filter(|track| {
-            since.is_none_or(|since| track.stats.finished_event_id > Some(since))
-                && until.is_none_or(|until| track.stats.finished_event_id <= Some(until))
-        })
-        .collect::<Vec<_>>();
-    finished.sort_by_key(|track| track.stats.finished_event_id);
-    let limit = if query.full {
-        finished.len()
-    } else {
-        DEFAULT_RUNS
-    };
-    let mut next_cursor = latest;
-    if finished.len() > limit {
-        if since.is_some() {
-            // Page forward: the oldest runs past the cursor, then the rest.
-            finished.truncate(limit);
-            next_cursor = finished
-                .last()
-                .and_then(|track| track.stats.finished_event_id)
-                .unwrap_or(latest);
-        } else {
-            finished.drain(..finished.len() - limit);
-        }
-    }
-
-    let spans = sessions::spans(events);
-    let all_executions = executions::executions(events);
-    let run_contexts = context::per_run(&context::records(&all_executions));
-    let mut reviews: HashMap<&str, Vec<RunEvent>> = HashMap::new();
-    for event in events.iter().filter(|event| {
-        matches!(
-            event.kind.known(),
-            Some(
-                EventKind::ReviewFinished
-                    | EventKind::ReviseRequested
-                    | EventKind::ReviseFinished
-                    | EventKind::ReviewOutcome
-            )
-        )
-    }) {
-        if let Some(run_id) = &event.run_id {
-            reviews
-                .entry(run_id.as_str())
-                .or_default()
-                .push(event.clone());
-        }
-    }
-    for track in &mut finished {
-        if let Some(run_events) = reviews.get(track.stats.run_id.as_str()) {
-            track.stats.review_reasons = review_reasons::per_run(run_events);
-        }
-        let run_spans = sessions::run_spans(&spans, &track.stats.run_id, now * 1000);
-        track.stats.sessions = sessions::per_run(&run_spans);
-        track.stats.work_breakdown =
-            work::per_run(run_spans.iter().filter_map(|s| s.work.as_ref()));
-        track.stats.tokens = tokens::per_run(
-            run_spans
-                .iter()
-                .filter_map(|s| Some((s.kind.as_str(), s.tokens.as_ref()?))),
-        );
-        track.stats.session_spans = run_spans;
-        track.stats.context = run_contexts.get(&track.stats.run_id).cloned();
-    }
-    predictions::attach(
-        events,
-        &first_event,
-        &mut finished
-            .iter_mut()
-            .map(|track| &mut track.stats)
-            .collect::<Vec<_>>(),
-    );
-
     let mut by_goal: BTreeMap<(bool, Option<GoalId>), Vec<&RunStats>> = BTreeMap::new();
-    for track in &finished {
-        let goal = track.stats.goal_id;
-        by_goal
-            .entry((goal.is_none(), goal))
-            .or_default()
-            .push(&track.stats);
+    for run in &finished_values {
+        let goal = run.goal_id;
+        by_goal.entry((goal.is_none(), goal)).or_default().push(run);
     }
     let goal_stats = by_goal
         .iter()
@@ -1268,13 +1189,13 @@ pub fn stats_answering(
             intervals: intervals(runs),
         })
         .collect::<Vec<_>>();
-    let page = finished.iter().map(|t| &t.stats).collect::<Vec<_>>();
-    let overall = intervals(&page);
-    let e2e = e2e_groups(&page);
-    let versions = measures::versions(&page);
-    let load_bands = measures::load_bands(&page);
-    let trial_groups = trial::trial_groups(&page);
-    let escalations = escalations::escalations(&page);
+    let page_values = finished_values.iter().collect::<Vec<_>>();
+    let overall = intervals_with_overall(&page_values, run_overall);
+    let e2e = e2e_groups(&page_values);
+    let versions = measures::versions(&page_values);
+    let load_bands = measures::load_bands(&page_values);
+    let trial_groups = trial::trial_groups(&page_values);
+    let escalations = escalations::escalations(&page_values);
 
     let mut alerts = Vec::new();
     let considered = finished.iter().chain(open.iter()).collect::<Vec<_>>();
@@ -1350,77 +1271,21 @@ pub fn stats_answering(
             });
         }
     }
-    let window_start = match since {
-        Some(since) => since,
-        None if query.full => EventId::new(0),
-        None => finished
-            .iter()
-            .filter_map(|track| first_event.get(track.stats.run_id.as_str()))
-            .min()
-            .map_or(EventId::new(0), |id| EventId::new(id.as_i64() - 1)),
-    };
-    let counts = |task_id: Option<TaskId>| query.goal_id.is_none() || task_id.is_some_and(in_goal);
+    let window_start = page.window.start;
+    let window_last = page.window.last;
+    let window_end = page.window.end;
+    let window_from = page.window.from;
+    let window_until = page.window.until;
+    let counts = |task| prepared.counts(task);
     // The period aggregates span the whole window asked for, up to
     // `--until` or else the latest event, not the page of runs: with
     // `--since` past more than a page of finished runs, `next_cursor` stops
     // at the page's last run and cut them short (tasks 1370 and 1379).
-    let window_last = latest;
-    let backend_failures = backend_failures(events, window_start, window_last, counts);
     let reason_codes = reason_codes(events, window_start, window_last, counts);
     let duplicate_cancels = duplicate_cancels(events, window_start, window_last, counts);
-    let cancel_reasons = cancel_reasons::cancel_reasons(events, window_start, window_last, counts);
-    let review_reasons = review_reasons::review_reasons(events, window_start, window_last, counts);
     let landing_rechecks = landing_rechecks(events, window_start, window_last, counts);
     let landing_waits = landing_waits::landing_waits(events, window_start, window_last, counts);
     let claim_waits = claim_waits::claim_waits(events, window_start, window_last, counts);
-    // The window ends now unless it stops at an earlier event.
-    let window_end = match events.iter().find(|event| event.id == window_last) {
-        Some(event) if until.is_some() || window_last < latest_event => {
-            timestamp_millis(&event.created_at).unwrap_or(now * 1000)
-        }
-        _ => now * 1000,
-    };
-    let ask_stats = asks::asks(events, window_start, window_last, window_end, counts);
-    // The host's load is read over this window in time: from `--since`'s
-    // time, else the window's first event; to `--until`'s time, else the
-    // window's end.
-    let cursor_ms = |cursor: &Option<Cursor>| match cursor {
-        Some(Cursor::Time(millis)) => Some(*millis),
-        Some(Cursor::Event(id)) => events
-            .iter()
-            .find(|event| event.id == *id)
-            .and_then(|event| timestamp_millis(&event.created_at)),
-        None => None,
-    };
-    let window_until = match query.until {
-        Some(Cursor::Time(millis)) => millis.min(now * 1000),
-        _ => window_end,
-    };
-    let first_of_events = || {
-        events
-            .iter()
-            .filter(|event| event.id > window_start && event.id <= window_last)
-            .filter_map(|event| timestamp_millis(&event.created_at))
-            .min()
-    };
-    let window_from = cursor_ms(&query.since)
-        .or_else(|| match answers {
-            // The page's first time is the window's answer for its ids.
-            Some(answers) if !query.full => answers
-                .first_in(window_start, window_last)
-                .unwrap_or_else(|| {
-                    crate::domain::ledger::window::bounds::missing(
-                        crate::domain::ledger::window::bounds::Bound::FirstIn(
-                            window_start,
-                            window_last,
-                        ),
-                    );
-                    first_of_events()
-                }),
-            _ => first_of_events(),
-        })
-        .unwrap_or(window_until)
-        .min(window_until);
     let landings = (!live.earlier_landings.is_empty()).then(|| {
         let mut landings: Vec<RunEvent> = events
             .iter()
@@ -1438,39 +1303,9 @@ pub fn stats_answering(
         now * 1000,
         counts,
     );
-    let auto_repairs = auto_repairs::auto_repairs(events, window_start, window_last, counts);
     let provider_switches = providers::provider_switches(events, window_start, window_last, counts);
     let replans = replans::replans(events, window_start, window_last, counts);
-    // A goal review is the goal's event, with no task.
-    let jobs = jobs::jobs(events, window_start, window_last, |event| {
-        match (event.task_id, event.goal_id) {
-            (None, Some(goal)) => query.goal_id.is_none_or(|only| only == goal),
-            (task_id, _) => counts(task_id),
-        }
-    });
     let updates = updates::updates(events, window_start, window_last, counts);
-    let draft_flow = drafts::draft_flow(
-        events,
-        &live.draft_origins,
-        window_start,
-        window_last,
-        window_end,
-        counts,
-    );
-    let follow_up_categories = follow_up_categories::follow_up_categories(
-        events,
-        window_start,
-        window_last,
-        window_end,
-        counts,
-    );
-    let worker_question_topics = worker_question_topics::worker_question_topics(
-        events,
-        window_start,
-        window_last,
-        live.utc_offset_secs,
-        counts,
-    );
     let recommendations =
         recommendations::recommendations(events, window_start, window_last, counts);
     let claim_holds =
@@ -1490,9 +1325,6 @@ pub fn stats_answering(
     let verification_failures =
         measures::verification_failures(events, window_start, window_last, counts);
     let failed_tests = failed_tests::failed_tests(events, window_start, window_last, counts);
-    let waiting = super::waiting::waiting_stats(events, window_start, window_last, counts);
-    let worker_routes =
-        routes::route_health(events, window_start, window_last, counts, &waiting.by_route);
     let stall_thresholds = thresholds::thresholds(
         &thresholds::detections(events, now * 1000),
         &thresholds::preemptions(events),
@@ -1507,93 +1339,6 @@ pub fn stats_answering(
         counts,
         &live.history,
         live.conflicts,
-    );
-    let mut sessions = sessions::by_kind(
-        &spans,
-        events,
-        SessionWindow {
-            after: window_start,
-            upto: window_last,
-        },
-        window_end,
-        |span| match query.goal_id {
-            None => true,
-            Some(_) if span.run_id.is_some() => span.task_id.is_some_and(in_goal),
-            Some(goal) => span.goal_ids.contains(&goal),
-        },
-    );
-    // The tokens per Execution (ADR-t1486-1), by when each ended (a cut by
-    // its time): from `--since`'s time, else the window's start event's,
-    // to the end of the window of `host`. The sessions per kind and route
-    // read theirs from them, so that a span open for days spreads its
-    // tokens over the days it used them.
-    let tokens_from = cursor_ms(&query.since).or_else(|| {
-        events
-            .iter()
-            .find(|event| event.id == window_start)
-            .and_then(|event| timestamp_millis(&event.created_at))
-    });
-    let execution_tokens = executions::window_after(
-        &all_executions,
-        &live.earlier_executions,
-        tokens_from,
-        window_until,
-        |execution| match (execution.task_id, execution.goal_id) {
-            (None, Some(goal)) => query.goal_id.is_none_or(|only| only == goal),
-            (task_id, _) => counts(task_id),
-        },
-    );
-    let mut kind_contexts = context::by_kind(
-        &context::records(&execution_tokens.executions),
-        tokens_from,
-        window_until,
-    );
-    for (kind, kind_sessions) in &mut sessions.by_kind {
-        if let Some(actor) = execution_tokens.by_actor.get(kind) {
-            kind_sessions.tokens = actor.totals.clone();
-        }
-        kind_sessions.context = kind_contexts.remove(*kind).unwrap_or_default();
-    }
-    // No inbox is of a goal.
-    if query.goal_id.is_some() {
-        sessions.inbox_launches.clear();
-    }
-    for (kind, providers) in &mut sessions.by_provider {
-        for (provider, provider_sessions) in providers.iter_mut() {
-            provider_sessions.tokens = execution_tokens
-                .by_actor
-                .get(kind)
-                .and_then(|actor| actor.by_provider.get(provider))
-                .map(|tokens| tokens.totals.clone())
-                .unwrap_or_default();
-        }
-    }
-    for (kind, routes) in &mut sessions.by_route {
-        for (route, route_sessions) in routes.iter_mut() {
-            route_sessions.tokens = execution_tokens
-                .by_route
-                .iter()
-                .find(|((of, on), _)| of == kind && on == route)
-                .map(|(_, totals)| totals.clone())
-                .unwrap_or_default();
-            let route_records =
-                context::records(execution_tokens.executions.iter().filter(|execution| {
-                    execution.actor == *kind && execution.route == Some(route)
-                }));
-            route_sessions.context = context::by_kind(&route_records, tokens_from, window_until)
-                .remove(*kind)
-                .unwrap_or_default();
-        }
-    }
-    // The planners' tokens are those of `sessions`, whose window is theirs.
-    let planner_routes = planner_routes::planner_routes(
-        events,
-        window_start,
-        window_last,
-        counts,
-        sessions
-            .by_route
-            .get(crate::domain::sessions::RUNTIME_PLANNER),
     );
     for file in conflict_hotspots.files.iter().filter(|file| file.alert) {
         alerts.push(Alert {
@@ -1645,7 +1390,7 @@ pub fn stats_answering(
     });
     Stats {
         ledger_missing,
-        runs: finished.into_iter().map(|track| track.stats).collect(),
+        runs: finished_values,
         goals: goal_stats,
         changes: Vec::new(),
         areas: Vec::new(),
@@ -2558,12 +2303,13 @@ fn e2e_of(payload: &Value) -> Option<String> {
 }
 
 fn intervals(runs: &[&RunStats]) -> Intervals {
+    intervals_with_overall(runs, prepared::KpiOverall::of(runs))
+}
+
+fn intervals_with_overall(runs: &[&RunStats], overall: prepared::KpiOverall) -> Intervals {
     Intervals {
         runs: runs.len(),
-        already_satisfied: runs
-            .iter()
-            .filter(|r| r.status.as_deref() == Some(ALREADY_SATISFIED))
-            .count(),
+        already_satisfied: overall.already_satisfied,
         work: summary(runs.iter().map(|r| r.work)),
         validate: summary(runs.iter().map(|r| r.validate)),
         wait_to_land: summary(runs.iter().map(|r| r.wait_to_land)),
@@ -2584,13 +2330,8 @@ fn intervals(runs: &[&RunStats]) -> Intervals {
                     .map(|r| r.without_held.map_or(r.wait_to_land, |w| w.wait_to_land)),
             ),
         },
-        land_phases: landing::breakdown(
-            runs.iter()
-                .filter_map(|r| Some((r.land_phases.as_ref()?, r.wait_to_land?))),
-        ),
-        resume_outcomes: retries::resume_breakdown(
-            runs.iter().flat_map(|r| &r.retries.resume_attempts),
-        ),
+        land_phases: overall.land_phases,
+        resume_outcomes: overall.resume_outcomes,
         sessions: sessions::per_goal(runs.iter().flat_map(|r| &r.session_spans)),
         work_breakdown: work::shares(runs.iter().filter_map(|r| r.work_breakdown.as_ref())),
         tokens: tokens::summary(runs.iter().filter_map(|r| r.tokens.as_ref())),
@@ -3022,6 +2763,49 @@ fn ask_key(event: &RunEvent) -> (Option<String>, Option<TaskId>, Option<RunId>) 
 /// Unix milliseconds of a queue timestamp `YYYY-MM-DDTHH:MM:SS[.fff]Z`
 /// (SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ')`); `None` when it does not parse.
 pub fn timestamp_millis(text: &str) -> Option<i64> {
+    // The ledger's canonical millisecond form is read repeatedly across KPI
+    // periods. Decode its fixed decimal positions without general integer
+    // parsing; other forms retain the general parser's behavior.
+    let b = text.as_bytes();
+    if b.len() == 24
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && (b[10] == b'T' || b[10] == b' ')
+        && b[13] == b':'
+        && b[16] == b':'
+        && b[19] == b'.'
+        && b[23] == b'Z'
+    {
+        let d = [
+            b[0], b[1], b[2], b[3], b[5], b[6], b[8], b[9], b[11], b[12], b[14], b[15], b[17],
+            b[18], b[20], b[21], b[22],
+        ];
+        if d.iter().all(u8::is_ascii_digit) {
+            let pair = |i: usize| i64::from(d[i] - b'0') * 10 + i64::from(d[i + 1] - b'0');
+            let year = pair(0) * 100 + pair(2);
+            let month = pair(4);
+            let day = pair(6);
+            if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+                return None;
+            }
+            let y = if month <= 2 { year - 1 } else { year };
+            let era = y.div_euclid(400);
+            let yoe = y - era * 400;
+            let mp = (month + 9) % 12;
+            let doy = (153 * mp + 2) / 5 + day - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            let days = era * 146_097 + doe - 719_468;
+            let millis = pair(14) * 10 + i64::from(d[16] - b'0');
+            return Some(
+                ((days * 24 + pair(8)) * 60 + pair(10)) * 60_000 + pair(12) * 1000 + millis,
+            );
+        }
+    }
+    timestamp_millis_general(text)
+}
+
+// Keep the general parser for the other accepted timestamp spellings.
+fn timestamp_millis_general(text: &str) -> Option<i64> {
     let text = text.strip_suffix('Z').unwrap_or(text);
     let (date, time) = text.split_once(['T', ' '])?;
     let mut date = date.splitn(3, '-').map(|part| part.parse::<i64>().ok());
@@ -3072,6 +2856,51 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    /// The fixed-position path keeps the general parser's answers, including
+    /// its permissive date/time fields. Noncanonical inputs still fall back.
+    #[test]
+    fn canonical_timestamps_keep_the_general_parsers_answers() {
+        for (text, expected) in [
+            ("1970-01-01T00:00:00.000Z", 0),
+            ("1969-12-31T23:59:59.999Z", -1),
+            ("2000-01-01T00:00:00.000Z", 946_684_800_000),
+            ("2038-01-19T03:14:07.123Z", 2_147_483_647_123),
+        ] {
+            assert_eq!(timestamp_millis(text), Some(expected));
+        }
+        let canonical = b"2026-09-26T08:52:00.123Z";
+        for at in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22] {
+            for byte in b"0123456789x" {
+                let mut text = *canonical;
+                text[at] = *byte;
+                let text = std::str::from_utf8(&text).unwrap();
+                assert_eq!(
+                    timestamp_millis(text),
+                    timestamp_millis_general(text),
+                    "{text}"
+                );
+            }
+        }
+        for text in [
+            "2026-09-26 08:52:00.123Z",
+            "2026-09-26T08:52:00Z",
+            "2026-09-26T08:52:00.123",
+            "2026-09-26T08:52:00.1Z",
+            "2026-09-26T08:52:00.123456Z",
+            "+123-09-26T08:52:00.123Z",
+            "2026-09-26T08:52:00.+12Z",
+            "2026-09-26T08:52:00.éZ",
+            "timeless",
+            "",
+        ] {
+            assert_eq!(
+                timestamp_millis(text),
+                timestamp_millis_general(text),
+                "{text}"
+            );
+        }
+    }
 
     fn event(id: i64, task_id: i64, kind: &str, payload: Value) -> RunEvent {
         RunEvent {

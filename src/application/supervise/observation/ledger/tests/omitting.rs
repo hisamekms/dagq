@@ -13,7 +13,7 @@
 //! separately compare enabled and disabled builders on the same arrivals.
 
 use super::*;
-use crate::application::ports::frozen::values;
+use crate::application::ports::frozen::{Group, Values, grouped_values as values, values_of};
 use crate::domain::ledger::owner::{self, Owner};
 use crate::domain::ledger::queue::{OMITTED_KINDS, Unwritten, queue_rows};
 use crate::domain::ledger::session::written::omitted::{Omission, POINT_EVERY};
@@ -105,7 +105,7 @@ pub(super) fn of_old_form(
     old: Option<&Memory>,
     input: &Input,
     label: &str,
-) -> Vec<(String, Value)> {
+) -> Values {
     of_old_form_of(memory, values(memory, input), old, input, label)
 }
 
@@ -114,13 +114,18 @@ pub(super) fn of_old_form(
 #[track_caller]
 pub(super) fn of_old_form_of(
     memory: &Memory,
-    mut now: Vec<(String, Value)>,
+    now: Values,
     old: Option<&Memory>,
     input: &Input,
     label: &str,
-) -> Vec<(String, Value)> {
+) -> Values {
     let form = old_form(memory, old, ms(input.now));
     let of_form = values(&form, input);
+    assert_form_values(now, of_form, label)
+}
+
+#[track_caller]
+fn assert_form_values(mut now: Values, of_form: Values, label: &str) -> Values {
     let rows = of_form
         .iter()
         .find(|(name, _)| name == "queue rows")
@@ -497,13 +502,16 @@ fn after_a_step_cut_the_values_are_those_of_the_ledger_of_now_s_form() {
 /// from (R, or 0 with no R), the omitted events up to C stay rows, and
 /// after every step (a) and (d) hold against the builder of now alone.
 ///
-/// A module of each input, a test of each of its shards: every shard
-/// takes over at every step of its input and holds C and (d) after every
-/// step, while (a), the comparison of the readers' values, is of the
-/// step's shard ([`super::frozen::Shard`]); so together they hold every
-/// check at every step of every input, as one test of all of them did.
-/// An input whose takeovers cover from R past 0 still does so in each
-/// shard; `every_input_has_its_test` keeps every input.
+/// A module of each input and a value test of each shard: each shard runs
+/// only the takeover curves needed to reach its assigned value checkpoints.
+/// Their original numbers are preserved by `takeover_checkpoint`, so every
+/// comparison remains assigned to exactly its original shard.
+/// The full range and nonzero-C assertions are kept once per input in
+/// `every_takeover_keeps_its_range_and_the_inputs_past_zero`.
+/// `every_input_has_its_test` keeps every input. All readers share the
+/// builder setup at each checkpoint. Queue-and-run value shards two and
+/// later, except four, split into stats/KPI and targets/report/queue parts;
+/// `queue_and_run_other_readers` keeps the latter at the same checkpoints.
 mod the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads {
     super::super::frozen::each_frozen_input!(super::super::taken_over;
         reached => "reached" [s0 = 0, s1 = 1, s2 = 2, s3 = 3],
@@ -515,6 +523,65 @@ mod the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads {
         queue_and_run => "queue and run" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5, s6 = 6, s7 = 7, s8 = 8, s9 = 9],
         timeless => "timeless" [s0 = 0],
     );
+    mod queue_and_run_other_readers {
+        use super::super::*;
+
+        #[test]
+        fn s2() {
+            run_takeovers("queue and run", 2, 10, Some(&TAKEOVER_OTHER));
+        }
+
+        #[test]
+        fn s3() {
+            run_takeovers("queue and run", 3, 10, Some(&TAKEOVER_OTHER));
+        }
+
+        #[test]
+        fn s5() {
+            run_takeovers("queue and run", 5, 10, Some(&TAKEOVER_OTHER));
+        }
+
+        #[test]
+        fn s6() {
+            run_takeovers("queue and run", 6, 10, Some(&TAKEOVER_OTHER));
+        }
+
+        #[test]
+        fn s7() {
+            run_takeovers("queue and run", 7, 10, Some(&TAKEOVER_OTHER));
+        }
+
+        #[test]
+        fn s8() {
+            run_takeovers("queue and run", 8, 10, Some(&TAKEOVER_OTHER));
+        }
+
+        #[test]
+        fn s9() {
+            run_takeovers("queue and run", 9, 10, Some(&TAKEOVER_OTHER));
+        }
+    }
+}
+
+/// Every original takeover/step pair still checks its starting range and
+/// recorded inputs, and the same inputs still have a takeover with C > 0.
+/// Keeping this independent of the value shards avoids repeating all the
+/// builders merely to repeat those assertions in each reader's test.
+mod every_takeover_keeps_its_range_and_the_inputs_past_zero {
+    super::super::frozen::each_frozen_input!(super::super::takeover_ranges;
+        reached => "reached" [s0 = 0],
+        cut => "cut" [s0 = 0],
+        on_its_way => "on its way" [s0 = 0],
+        store_ahead => "store ahead" [s0 = 0],
+        clock_back => "clock back" [s0 = 0],
+        no_r => "no r" [s0 = 0],
+        queue_and_run => "queue and run" [s0 = 0],
+        timeless => "timeless" [s0 = 0],
+    );
+}
+
+fn takeover_ranges(name: &str, _: usize, _: usize) {
+    run_takeovers(name, 0, 1, None);
 }
 
 /// The inputs of which a takeover covers from R past 0 (C > 0) at a step.
@@ -524,31 +591,99 @@ const TAKEN_OVER_PAST_ZERO: [&str; 4] = ["reached", "cut", "on its way", "queue 
 /// for the input named `name`, comparing the readers' values at the steps
 /// of `shard` of `shards`.
 fn taken_over(name: &str, shard: usize, shards: usize) {
+    let readers: &[Group] = if name == "queue and run" && shard >= 2 && shard != 4 {
+        &TAKEOVER_STATS_KPI
+    } else {
+        &Group::PARTS
+    };
+    run_takeovers(name, shard, shards, Some(readers));
+}
+
+/// The first three reader groups, in their original order.
+const TAKEOVER_STATS_KPI: [Group; 3] = [Group::Stats, Group::KpiDays, Group::KpiSince];
+/// The remaining three groups, including the physical queue-row comparison.
+const TAKEOVER_OTHER: [Group; 3] = [Group::Targets, Group::Report, Group::Queue];
+
+fn takeover_values(
+    memory: &Memory,
+    input: &crate::domain::ledger::testkit::frozen::Input,
+    groups: &[Group],
+) -> Values {
+    groups
+        .iter()
+        .flat_map(|group| values_of(memory, input, *group))
+        .collect()
+}
+
+/// Both takeover parts together equal the original whole reader (Group::All),
+/// which does not enumerate the split parts. Check the sparse ledger and its
+/// restored form after each step of a real takeover from a nonzero cursor,
+/// including write failure, restart and rereading from the beginning.
+/// The canonical-input golden tests independently anchor the reader answers.
+#[test]
+fn the_takeover_reader_parts_equal_all_reader_values() {
+    let input = super::frozen::input_named("reached");
+    let mut old = Side::new(none());
+    for step in &input.steps[..2] {
+        old.step(*step, &input);
+    }
+    let mut new = Side::new(version());
+    new.memory = super::frozen::copy_frozen_store(&old.memory);
+    new.start(input.now);
+    assert!(new.builder.events > EventId::new(0));
+    let combined = [TAKEOVER_STATS_KPI, TAKEOVER_OTHER].concat();
+    let mut covered_past_zero = false;
+    for (n, step) in input.steps.iter().enumerate().skip(2) {
+        old.step(*step, &input);
+        new.step(*step, &input);
+        covered_past_zero |= new
+            .memory
+            .omitted
+            .borrow()
+            .as_ref()
+            .is_some_and(|coverage| coverage.from > EventId::new(0));
+        let form = old_form(&new.memory, Some(&old.memory), ms(input.now));
+        for (label, memory) in [("sparse", &new.memory), ("restored", &form)] {
+            assert_eq!(
+                takeover_values(memory, &input, &combined),
+                crate::application::ports::frozen::values(memory, &input),
+                "{label} step {n}"
+            );
+        }
+    }
+    assert!(covered_past_zero);
+}
+
+/// Only curves containing this shard's checkpoints need their own builder.
+/// With no readers, visit every pair once for the structural assertions.
+fn run_takeovers(name: &str, shard: usize, shards: usize, readers: Option<&[Group]>) {
     let input = super::frozen::input_named(name);
+    let through = takeover_steps(input.steps.len(), shard, shards);
+    let last_step = *through.values().max().expect("shard has a checkpoint");
     let shard = super::frozen::Shard::new(shard, shards);
     let mut taken = 0;
-    for over in 1..input.steps.len() {
-        let mut old = Side::new(none());
-        let mut new = Side::new(none());
-        let mut from = None;
-        for (n, step) in input.steps.iter().enumerate() {
-            if n == over {
-                new.omission = version();
-                new.start(input.now);
-                from = Some(new.builder.events);
-            }
-            old.step(*step, &input);
+    let mut old = Side::new(none());
+    let mut takeovers = Vec::new();
+    // The ledger of now has the same steps for every takeover. Advance
+    // it once, starting a new process at each needed takeover step.
+    // Prefixes preceding a takeover have no assertions and need not be
+    // rebuilt on another store before that process restarts.
+    for (n, step) in input.steps.iter().enumerate().take(last_step + 1) {
+        if through.contains_key(&n) {
+            let mut new = Side::new(version());
+            new.memory = super::frozen::copy_frozen_store(&old.memory);
+            new.cut = old.cut;
+            new.start(input.now);
+            let from = new.builder.events;
+            takeovers.push((n, new, from));
+        }
+        old.step(*step, &input);
+        for (over, new, from) in &mut takeovers {
             new.step(*step, &input);
-            if n < over {
-                // Both the builder of now's, on stores of their own.
-                continue;
-            }
             let label = format!("{} over {over} step {n}", input.name);
             if let Some(coverage) = new.memory.omitted.borrow().as_ref() {
-                // Where its first pass read from, unless a step read
-                // from the cursors' start before it.
                 assert!(
-                    Some(coverage.from) == from || coverage.from == EventId::new(0),
+                    coverage.from == *from || coverage.from == EventId::new(0),
                     "{label}: C {:?} from {from:?}",
                     coverage.from
                 );
@@ -556,15 +691,93 @@ fn taken_over(name: &str, shard: usize, shards: usize) {
                     taken += 1;
                 }
             }
-            if shard.next() {
-                of_old_form(&new.memory, Some(&old.memory), &input, &label);
+            // Keep the original over-then-step numbering even though the
+            // stores are advanced in step-then-over order. Every old shard
+            // therefore still compares exactly its original checkpoints.
+            if shard.at(takeover_checkpoint(input.steps.len(), *over, n))
+                && let Some(groups) = readers
+            {
+                let form = old_form(&new.memory, Some(&old.memory), ms(input.now));
+                let now = takeover_values(&new.memory, &input, groups);
+                let expected = takeover_values(&form, &input, groups);
+                if groups.iter().any(|group| matches!(group, Group::Queue)) {
+                    assert_form_values(now, expected, &label);
+                } else {
+                    assert_eq!(now, expected, "{label}");
+                }
             }
             not_behind((&new.memory, &new.builder), &old.memory, &label);
         }
+        takeovers.retain(|(over, _, _)| n < through[over]);
     }
     shard.checked_some(name);
-    if TAKEN_OVER_PAST_ZERO.contains(&name) {
+    if readers.is_none() && TAKEN_OVER_PAST_ZERO.contains(&name) {
         assert!(taken > 0, "{name}");
+    }
+}
+
+/// The last needed step of each takeover curve, excluding curves with no
+/// checkpoint assigned to this shard. Prefixes still come from the real
+/// builder of now, and each included curve still runs every preceding step.
+fn takeover_steps(steps: usize, shard: usize, shards: usize) -> BTreeMap<usize, usize> {
+    (1..steps)
+        .filter_map(|over| {
+            (over..steps)
+                .rfind(|step| takeover_checkpoint(steps, over, *step) % shards == shard)
+                .map(|last| (over, last))
+        })
+        .collect()
+}
+
+/// The ordinal in the original traversal: every later step of takeover 1,
+/// then every later step of takeover 2, and so on.
+fn takeover_checkpoint(steps: usize, over: usize, step: usize) -> usize {
+    (1..over).map(|before| steps - before).sum::<usize>() + step - over
+}
+
+#[test]
+fn takeover_checkpoint_numbers_keep_the_step_shards() {
+    for steps in 2..16 {
+        let mut ordinal = 0;
+        for over in 1..steps {
+            for step in over..steps {
+                assert_eq!(takeover_checkpoint(steps, over, step), ordinal);
+                ordinal += 1;
+            }
+        }
+        let mut visited = Vec::new();
+        for step in 1..steps {
+            for over in 1..=step {
+                visited.push(takeover_checkpoint(steps, over, step));
+            }
+        }
+        visited.sort_unstable();
+        assert_eq!(visited, (0..ordinal).collect::<Vec<_>>());
+        for shards in 1..=steps {
+            for shard in 0..shards {
+                let mut wanted = Vec::new();
+                let mut ordinal = 0;
+                for over in 1..steps {
+                    for step in over..steps {
+                        if ordinal % shards == shard {
+                            wanted.push((over, step));
+                        }
+                        ordinal += 1;
+                    }
+                }
+                let plan = takeover_steps(steps, shard, shards);
+                let mut found = Vec::new();
+                for (&over, &last) in &plan {
+                    assert!(wanted.contains(&(over, last)));
+                    for step in over..=last {
+                        if takeover_checkpoint(steps, over, step) % shards == shard {
+                            found.push((over, step));
+                        }
+                    }
+                }
+                assert_eq!(found, wanted, "{steps} steps, shard {shard}/{shards}");
+            }
+        }
     }
 }
 

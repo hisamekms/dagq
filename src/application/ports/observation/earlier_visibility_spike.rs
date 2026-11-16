@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{Value, json};
 
+use super::frozen::FrozenValue;
+
 use crate::application::kpi::{Host, of_window as kpi_of_window};
 use crate::application::stats::{StatsSources, now_ms, of_window as stats_of_window};
 use crate::domain::kpi::{KpiConfig, KpiQuery, Period, read_from_ms};
@@ -3675,7 +3677,7 @@ fn queue_misses_of(
             continue;
         }
         let value = |window: &LedgerWindow, query: &KpiQuery| {
-            serde_json::to_value(
+            FrozenValue::encode(
                 kpi_of_window(
                     window,
                     NOW,
@@ -3686,7 +3688,6 @@ fn queue_misses_of(
                 )
                 .unwrap(),
             )
-            .unwrap()
         };
         let expected = value(
             &every,
@@ -3700,12 +3701,10 @@ fn queue_misses_of(
             reads = read;
             differences(&befell(&window), &befell(&every), "befell", &mut misses);
         }
-        differences(
-            &value(&window, query),
-            &expected,
-            &format!("kpi[{n}]"),
-            &mut misses,
-        );
+        let actual = value(&window, query);
+        if actual != expected {
+            differences(&actual, &expected, &format!("kpi[{n}]"), &mut misses);
+        }
     }
     if !of(Answer::Stats) {
         return (misses, reads);
@@ -3729,18 +3728,18 @@ fn queue_misses_of(
         now_ms: now_ms(NOW),
         ..WindowQuery::default()
     };
-    let expected = serde_json::to_value(
+    let expected = FrozenValue::encode(
         stats_of_window(&select(whole.to_vec(), &base), NOW, &query, &sources).unwrap(),
-    )
-    .unwrap();
+    );
     let from = WindowQuery {
         read_from_ms: Some((NOW - 2 * DAY) * 1000),
         ..base
     };
     let (window, _) = narrowed_shaped(got, &from, &PARTS, SHAPED);
-    let got =
-        serde_json::to_value(stats_of_window(&window, NOW, &query, &sources).unwrap()).unwrap();
-    differences(&got, &expected, "stats", &mut misses);
+    let got = FrozenValue::encode(stats_of_window(&window, NOW, &query, &sources).unwrap());
+    if got != expected {
+        differences(&got, &expected, "stats", &mut misses);
+    }
     (misses, reads)
 }
 
