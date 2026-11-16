@@ -596,6 +596,8 @@ pub struct Ports<'a> {
     /// file), read again each pass for the values the flags did not give
     /// (task 698); `None` reads nothing.
     pub supervisor_file: Option<SupervisorFile>,
+    /// Local settings reread before each pass measures resources.
+    pub operational_file: Option<super::repository_config::OperationalFile>,
     /// Deployment startup tables, retried until installed before claims.
     pub repository_startup_file: Option<super::repository_config::RepositoryStartupFile>,
     /// `[provider_fallback]` of the repository's `dagq.toml` (`None`
@@ -1387,6 +1389,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         last_turns: None,
         generators: ports.generators.clone(),
         stall: settings.stall,
+        operational_file: ports.operational_file.clone(),
+        operational_error: None,
         repository_startup_file: ports.repository_startup_file.clone(),
         wrapper_setting_warned: false,
         agent_eval: None,
@@ -1695,6 +1699,8 @@ struct Supervisor<'a> {
     utc_offset: fn(i64) -> i64,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4).
     stall: StallConfig,
+    operational_file: Option<super::repository_config::OperationalFile>,
+    operational_error: Option<String>,
     repository_startup_file: Option<super::repository_config::RepositoryStartupFile>,
     /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
     /// was warned of (ADR-t1433-3 decision 2).

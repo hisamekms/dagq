@@ -196,7 +196,7 @@ live worker alert (stalled, idle_process)
 ### 閾値（`[stall]`・`[conflicts]`）
 
 - 値と意味は定義のそばのdoc comment（`domain::stall::StallConfig`、`domain::stats::conflicts::ConflictConfig`）が持つ。
-- supervisorは`[stall]`を起動時に1回だけ読み、`[conflicts]`はpassごとに読み直す。
+- localのsupervisorは`[stall]`と`[conflicts]`をpassごとに読み直す（[Run environment](supervisor-lifecycle/run-environment.md)）。
 
 ### Landing recheck
 

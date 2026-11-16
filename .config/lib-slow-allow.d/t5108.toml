@@ -1,0 +1,9 @@
+[[test]]
+name = "compose::wiring_tests::local_config::local_operational_files_change_claims_and_reset_each_pass"
+reason = "境界: 実際のsupervisor・queue service・SQLiteの間で、main checkoutの層の追加・期限切れ・拒否・削除がclaim_held/claim_resumedと枠の登録まで届くことを確かめる。選択の判断はrepository_configのpure unit testに分離し、1つのmemdbとsupervisorで全passを通し、pollingも短縮したが、serviceの初期化と容量の掃除のjobの終了を含むため1秒を超える。"
+task = 5108
+
+[[test]]
+name = "compose::wiring_tests::local_config::a_running_session_uses_the_reloaded_stall_setting"
+reason = "境界: 実際のsupervisor・session wrapper・queue service・SQLiteの間で、起動後のmain checkoutの変更が保持するstall設定を替え、runのstall_nudgedに届くことを確かめる。1 taskのreceiptの無いturnと完了するturnだけを使い、pollingも短縮したが、memdbの初期化とwrapperの開始・終了を含むため1秒を超える。"
+task = 5108

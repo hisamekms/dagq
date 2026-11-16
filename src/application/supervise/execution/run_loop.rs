@@ -13,6 +13,40 @@
 use super::*;
 
 impl Supervisor<'_> {
+    /// Local files are reread before any resource measurement or claim. The
+    /// compose reader resolves flags; failed reads preserve all three values.
+    fn reread_operational_rules(&mut self) {
+        let Some(read) = &self.operational_file else {
+            return;
+        };
+        let loaded = match read() {
+            Ok(rules) => {
+                self.operational_error = None;
+                Some(rules)
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if self.operational_error.as_ref() != Some(&message) {
+                    warn!(error = %message, "operational dagq.toml not read; keeping settings in use");
+                    self.operational_error = Some(message);
+                }
+                None
+            }
+        };
+        use crate::application::supervise::repository_config::{
+            OperationalRules, next_operational_rules,
+        };
+        let current = OperationalRules {
+            stall: self.stall,
+            disk: self.host.disk_reader().config,
+            resume: self.resume.config,
+        };
+        let rules = next_operational_rules(current, Default::default(), loaded);
+        self.stall = rules.stall;
+        self.resume.config = rules.resume;
+        self.host.set_repository_disk(rules.disk);
+    }
+
     /// Apply startup-only tables exactly once from the first good snapshot.
     /// A failed read leaves claims held; setting the host disk precedes the
     /// pass's resource reading. The config event records applied values.
@@ -401,6 +435,7 @@ impl Supervisor<'_> {
             // `runtime_planners` takes effect without a restart (task 698,
             // task 941).
             let startup_missing = self.initialize_repository_rules()?;
+            self.reread_operational_rules();
             self.claim
                 .reread_limits(&*self.queue, self.registration.token())?;
             self.claim.repository_config_missing |= startup_missing;

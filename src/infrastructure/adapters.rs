@@ -1329,6 +1329,141 @@ pub fn main_checkout_of(path: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Whether the operational layer belongs to a main checkout and is absent
+/// from Git's index. No Git process is started: the queue service uses this
+/// same check. Linked worktrees (a commondir file) cannot supply a layer.
+/// Unknown/corrupt index formats and split indexes fail closed. A missing
+/// index is the empty index of a newly initialized checkout. Both SHA-1 and
+/// SHA-256 repositories and index versions 2 through 4 are supported.
+pub(super) fn local_config_is_untracked(root: &Path) -> Result<bool> {
+    let dot = root.join(".git");
+    let git_dir = if dot.is_dir() {
+        dot
+    } else {
+        let text = fs::read_to_string(&dot)?;
+        let path = text
+            .trim()
+            .strip_prefix("gitdir: ")
+            .context("invalid gitdir")?;
+        root.join(path)
+    };
+    if git_dir.join("commondir").exists() {
+        return Ok(false);
+    }
+    let config = fs::read_to_string(git_dir.join("config"))?;
+    let hash_bytes = if config.lines().any(|line| {
+        line.split_once('=').is_some_and(|(key, value)| {
+            key.trim().eq_ignore_ascii_case("objectformat")
+                && value.trim().eq_ignore_ascii_case("sha256")
+        })
+    }) {
+        32
+    } else {
+        20
+    };
+    let index = match fs::read(git_dir.join("index")) {
+        Ok(index) => index,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(!index_tracks_local(&index, hash_bytes)?)
+}
+
+fn index_tracks_local(index: &[u8], hash_bytes: usize) -> Result<bool> {
+    let word = |at: usize| -> Result<u32> {
+        Ok(u32::from_be_bytes(
+            index
+                .get(at..at + 4)
+                .context("truncated index")?
+                .try_into()?,
+        ))
+    };
+    ensure!(index.get(..4) == Some(b"DIRC"), "invalid index signature");
+    let version = word(4)?;
+    ensure!((2..=4).contains(&version), "unsupported index version");
+    let end = index
+        .len()
+        .checked_sub(hash_bytes)
+        .context("truncated index checksum")?;
+    let algorithm = if hash_bytes == 32 {
+        &ring::digest::SHA256
+    } else {
+        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY
+    };
+    ensure!(
+        ring::digest::digest(algorithm, &index[..end]).as_ref() == &index[end..],
+        "invalid index checksum"
+    );
+    let mut at = 12;
+    let mut previous = Vec::new();
+    let mut tracked = false;
+    for _ in 0..word(8)? {
+        let start = at;
+        let flags_at = at + 40 + hash_bytes;
+        let flags = u16::from_be_bytes(
+            index
+                .get(flags_at..flags_at + 2)
+                .context("truncated index entry")?
+                .try_into()?,
+        );
+        at = flags_at + 2;
+        if flags & 0x4000 != 0 {
+            ensure!(version >= 3, "extended v2 index entry");
+            at += 2;
+        }
+        let remove = if version == 4 {
+            let mut byte = *index.get(at).context("truncated index path")?;
+            at += 1;
+            let mut count = usize::from(byte & 0x7f);
+            while byte & 0x80 != 0 {
+                byte = *index.get(at).context("truncated index path")?;
+                at += 1;
+                count = count
+                    .checked_add(1)
+                    .and_then(|v| v.checked_mul(128))
+                    .and_then(|v| v.checked_add(usize::from(byte & 0x7f)))
+                    .context("index path overflow")?;
+            }
+            count
+        } else {
+            previous.len()
+        };
+        let keep = previous
+            .len()
+            .checked_sub(remove)
+            .context("invalid compressed index path")?;
+        previous.truncate(keep);
+        let length = index
+            .get(at..end)
+            .context("truncated index path")?
+            .iter()
+            .position(|b| *b == 0)
+            .context("unterminated index path")?;
+        previous.extend_from_slice(&index[at..at + length]);
+        // Refuse case variants too: the checkout may be case insensitive.
+        tracked |= previous.eq_ignore_ascii_case(super::run_env::LOCAL_CONFIG_FILE_NAME.as_bytes());
+        at += length + 1;
+        if version != 4 {
+            at = start + (at - start).div_ceil(8) * 8;
+        }
+        ensure!(at <= end, "truncated index padding");
+    }
+    while at < end {
+        let signature = index.get(at..at + 4).context("truncated index extension")?;
+        ensure!(
+            signature != b"link" && !signature.first().is_some_and(u8::is_ascii_lowercase),
+            "unsupported mandatory index extension"
+        );
+        let size = word(at + 4)? as usize;
+        at = at
+            .checked_add(8)
+            .and_then(|at| at.checked_add(size))
+            .context("index extension overflow")?;
+        ensure!(at <= end, "truncated index extension");
+    }
+    Ok(tracked)
+}
+
 /// The main checkout of the repository whose Git common directory is
 /// `common_dir`, as the queue service finds it with no Git run (ADR-t3102-3
 /// decision 5), from the binding alone and never from a path a client
@@ -5034,6 +5169,116 @@ mod landing_blobs_tests {
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
+    struct LocalConfigClock;
+    impl crate::application::Clock for LocalConfigClock {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+        }
+        fn monotonic(&self) -> std::time::Instant {
+            panic!("file loading does not read monotonic time")
+        }
+    }
+
+    /// Construct index bytes directly: these tests exercise the reader, never
+    /// Git or the host's index settings. Checksums are independent of parsing.
+    fn local_index(version: u32, hash_bytes: usize, paths: &[&str]) -> Vec<u8> {
+        let mut bytes = b"DIRC".to_vec();
+        bytes.extend_from_slice(&version.to_be_bytes());
+        bytes.extend_from_slice(&(paths.len() as u32).to_be_bytes());
+        let mut previous_path = "";
+        for path in paths {
+            let start = bytes.len();
+            bytes.resize(start + 40 + hash_bytes, 0);
+            bytes.extend_from_slice(&(path.len() as u16).to_be_bytes());
+            let prefix = if version == 4 {
+                let prefix = previous_path
+                    .bytes()
+                    .zip(path.bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                let remove = previous_path.len() - prefix;
+                assert!(remove < 128, "fixture uses short paths");
+                bytes.push(remove as u8);
+                prefix
+            } else {
+                0
+            };
+            previous_path = path;
+            bytes.extend_from_slice(&path.as_bytes()[prefix..]);
+            bytes.push(0);
+            if version != 4 {
+                bytes.resize(start + (bytes.len() - start).div_ceil(8) * 8, 0);
+            }
+        }
+        let algorithm = if hash_bytes == 32 {
+            &ring::digest::SHA256
+        } else {
+            &ring::digest::SHA1_FOR_LEGACY_USE_ONLY
+        };
+        let checksum = ring::digest::digest(algorithm, &bytes);
+        bytes.extend_from_slice(checksum.as_ref());
+        bytes
+    }
+
+    #[test]
+    fn local_index_refuses_tracked_files_and_unknown_or_corrupt_formats() {
+        for version in [2, 3, 4] {
+            for hash_bytes in [20, 32] {
+                assert!(
+                    index_tracks_local(
+                        &local_index(version, hash_bytes, &["dagq.local.toml"]),
+                        hash_bytes
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    !index_tracks_local(
+                        &local_index(version, hash_bytes, &["dagq.toml"]),
+                        hash_bytes
+                    )
+                    .unwrap()
+                );
+            }
+        }
+        assert!(
+            index_tracks_local(
+                &local_index(4, 20, &["dagq.later.toml", "dagq.local.toml"]),
+                20
+            )
+            .unwrap()
+        );
+        assert!(index_tracks_local(&local_index(2, 20, &["Dagq.local.toml"]), 20).unwrap());
+        let mut corrupt = local_index(2, 20, &["dagq.local.toml"]);
+        corrupt[15] ^= 1;
+        assert!(index_tracks_local(&corrupt, 20).is_err());
+        assert!(index_tracks_local(&local_index(5, 20, &[]), 20).is_err());
+        assert!(index_tracks_local(b"DIRC", 20).is_err());
+    }
+
+    #[test]
+    fn tracked_local_layer_is_discarded_by_the_config_loader() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]\nbare = false").unwrap();
+        fs::write(
+            dir.path().join(".git/index"),
+            local_index(2, 20, &["dagq.local.toml"]),
+        )
+        .unwrap();
+        fs::write(dir.path().join("dagq.toml"), "[disk]\nreserve = '5%'").unwrap();
+        fs::write(
+            dir.path().join("dagq.local.toml"),
+            "[local]\nexpires_at = '2027-01-16T08:00:00Z'\n[disk]\nreserve = '12%'",
+        )
+        .unwrap();
+        assert!(!local_config_is_untracked(dir.path()).unwrap());
+        // The clock is injected so this must reject tracking, not expiry.
+        let clock = LocalConfigClock;
+        let rules =
+            crate::infrastructure::run_env::load_operational_rules(dir.path(), &clock).unwrap();
+        assert_eq!(rules.disk.reserve, 0.05);
+    }
+
     /// The main worktree of a common directory is the directory it is the
     /// `.git` of; a common directory with another name has none.
     #[test]

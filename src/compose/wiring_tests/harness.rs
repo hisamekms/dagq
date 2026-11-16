@@ -72,6 +72,8 @@ pub(super) type CallerWrap =
     Arc<dyn Fn(Arc<dyn ServiceCaller>) -> Arc<dyn ServiceCaller> + Send + Sync>;
 
 thread_local! {
+    /// The volume size of the supervisor on this thread; absent by default.
+    static TOTAL: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// The free bytes the supervisor started on this thread reads
     /// ([`Wiring::free`]); `u64::MAX`, and a thread that set none, read
     /// none, so the disk holds nothing. Per thread, so no two tests share
@@ -195,11 +197,24 @@ pub(super) struct Wiring {
     /// `[disk]`; the production's default, whose reserve is its least
     /// (5 GiB) as the supervisors read no volume's size.
     disk: crate::domain::disk::DiskConfig,
+    total: Option<u64>,
     supervisor_file: Option<supervise::SupervisorFile>,
+    operational_file: Option<supervise::repository_config::OperationalFile>,
     repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
 }
 
 impl Wiring {
+    pub(super) fn with_volume(mut self, bytes: u64) -> Self {
+        self.total = Some(bytes);
+        self
+    }
+    pub(super) fn with_operational_file(
+        mut self,
+        read: supervise::repository_config::OperationalFile,
+    ) -> Self {
+        self.operational_file = Some(read);
+        self
+    }
     pub(super) fn with_caller_wrap(mut self, wrap: CallerWrap) -> Self {
         self.caller_wrap = Some(wrap);
         self
@@ -271,7 +286,9 @@ impl Wiring {
             free: Arc::new(AtomicU64::new(u64::MAX)),
             moving_sizes: Arc::new(|_: &Path| Ok(None)),
             disk: Default::default(),
+            total: None,
             supervisor_file: None,
+            operational_file: None,
             repository_startup_file: None,
         }
     }
@@ -919,11 +936,13 @@ impl Wiring {
                 handoff: self.handoff.clone(),
                 planning: self.planning.get(),
                 supervisor_file: self.supervisor_file.clone(),
+                operational_file: self.operational_file.clone(),
                 repository_startup_file: self.repository_startup_file.clone(),
                 stop: stop.clone(),
                 free: self.free.clone(),
                 moving_sizes: self.moving_sizes.clone(),
                 disk: self.disk,
+                total: self.total,
             };
             std::thread::Builder::new()
                 .name(format!("{} supervisor", self.name))
@@ -1014,11 +1033,13 @@ struct Parts {
     handoff: Option<crate::domain::LeaseToken>,
     planning: (Option<usize>, Duration),
     supervisor_file: Option<supervise::SupervisorFile>,
+    operational_file: Option<supervise::repository_config::OperationalFile>,
     repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
     stop: Arc<AtomicBool>,
     free: Arc<AtomicU64>,
     moving_sizes: supervise::MeasureTree,
     disk: crate::domain::disk::DiskConfig,
+    total: Option<u64>,
 }
 
 impl Parts {
@@ -1026,6 +1047,7 @@ impl Parts {
     /// root wires the binary's (`compose::supervisor`), each port that
     /// reaches the host a fake.
     fn supervise(self) -> Result<Value> {
+        TOTAL.with(|total| total.set(self.total));
         FREE.with(|free| *free.borrow_mut() = Some(self.free.clone()));
         let clock = self.generators.clock.clone();
         // Bounded by the end's deadline, behind the holding of the records
@@ -1137,7 +1159,7 @@ impl Parts {
             review_material: &review_material,
             load_average: || None,
             free_space,
-            total_space: |_| None,
+            total_space: |_| TOTAL.with(|total| total.get()),
             measure_tree: self.moving_sizes.clone(),
             scratchpad_roots: Arc::new(Vec::new),
             host_versions: |_, _, _| Default::default(),
@@ -1147,6 +1169,7 @@ impl Parts {
             held_verdicts: Arc::new(InMemory::default()),
             conflicts_file: None,
             supervisor_file: self.supervisor_file,
+            operational_file: self.operational_file,
             repository_startup_file: self.repository_startup_file,
             provider_fallback_file: None,
             fresh_session_file: None,
@@ -1168,7 +1191,9 @@ impl Parts {
             layout,
         };
         let mut settings = LoopSettings {
-            once: self.pass_probe.is_none() && ports.repository_startup_file.is_none(),
+            once: self.pass_probe.is_none()
+                && ports.repository_startup_file.is_none()
+                && ports.operational_file.is_none(),
             cleanup_jobs: self
                 .pass_probe
                 .as_ref()

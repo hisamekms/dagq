@@ -11,8 +11,9 @@ use super::{
         ReleaseIndexPort, SccacheOptions,
     },
     observation::{self, CiWatchOptions, EnvironmentOptions, LedgerOptions},
+    operational_file,
     planning::PLANNER_TIMEOUT,
-    provider_checks, worker_adapters,
+    provider_checks, supervisor_file, worker_adapters,
 };
 use crate::domain::LeaseToken;
 use crate::domain::slot_limits::SettingSource;
@@ -200,7 +201,7 @@ pub struct SuperviseOptions {
     pub generators: Generators,
     /// The thresholds of the stalled-session checks; `None` reads `[stall]`
     /// from the `dagq.toml` of the repository's main checkout (ADR-0043
-    /// decision 4). Tests set them.
+    /// decision 4), then rereads each local pass unless explicitly set.
     pub stall: Option<StallConfig>,
     /// The `[conflicts]` thresholds and the limit of a deferred claim
     /// (ADR-0069); `None` reads `[conflicts]` of the main checkout's
@@ -711,11 +712,11 @@ pub fn supervise_with_reviewer(
     // Read each pass even with every flag given: `light_changes` has no
     // flag (ADR-t1591-1).
     let supervisor_file = Some({
-        let checkout = main_checkout.clone();
+        let local = supervisor_file(main_checkout.clone(), options.generators.clock.clone());
         let remote = remote_rules.clone();
         Arc::new(move || match &remote {
             Some(source) => source.read().map(|rules| Some(rules.supervisor)),
-            None => load_supervisor_config(&checkout),
+            None => local(),
         }) as crate::application::supervise::SupervisorFile
     });
     // `[provider_fallback]` (ADR-t1857-1): a table that cannot be read at
@@ -1181,6 +1182,17 @@ pub fn supervise_with_reviewer(
             &db,
         )),
         conflicts_file,
+        operational_file: remote_rules.is_none().then(|| {
+            operational_file(
+                main_checkout.clone(),
+                options.generators.clock.clone(),
+                crate::application::supervise::repository_config::StartupOverrides {
+                    stall: options.stall,
+                    disk: options.disk,
+                    resume: options.resume,
+                },
+            )
+        }),
         repository_startup_file: remote_rules.clone().map(|source| {
             crate::infrastructure::github_app::repository_startup_file(
                 source,

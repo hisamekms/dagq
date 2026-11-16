@@ -110,7 +110,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 - 動いているrunの信頼できる今の大きさが想定を初めて超えたとき、runごとに1回eventを残す（supervisorの再起動後は再度1回を許す）。
 - 記録するかの判断の入口は`domain::disk::size_exceeded_expected`。
 - 空き（`statvfs(3)`）が読めないときは控えない。
-- `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。
+- `[disk]`はlocalのsupervisorが各passの資源の読みの前にmain checkoutから読み直す（[Run environment](run-environment.md)）。
 - 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。
 - 人とinboxは`dagq disk relax`で最低ライン以外の項を期限つきで緩め、記録はqueueのeventだけで、各passが最新の1件を読み再起動なしに効く（[ADR-t4727-1](../../adr/2026-11-11-t4727-1-disk-needs-may-be-relaxed-for-a-while-by-a-person-or-the-inbox.md)）。
 

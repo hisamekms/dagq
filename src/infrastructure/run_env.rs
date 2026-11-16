@@ -3126,6 +3126,29 @@ fn parse_positive_number(text: &str) -> Result<f64> {
     Ok(value)
 }
 
+/// Read the local supervisor's operational settings as one snapshot each pass.
+/// An absent file/table resets to defaults; a read error is left to the loop,
+/// which retains the settings in use and warns once per distinct error.
+pub fn load_operational_rules(
+    root: &Path,
+    clock: &dyn crate::application::Clock,
+) -> Result<crate::application::supervise::repository_config::OperationalRules> {
+    let config = match read_config_at(
+        &root.join(CONFIG_FILE_NAME),
+        crate::application::unix_millis(clock.system_time()),
+    )? {
+        Some(text) => parse_config(&text)?,
+        None => Config::default(),
+    };
+    Ok(
+        crate::application::supervise::repository_config::OperationalRules {
+            stall: config.stall,
+            disk: config.disk,
+            resume: config.resume,
+        },
+    )
+}
+
 /// `[disk]` of the `dagq.toml` in `root` (ADR-0047 decision 44,
 /// ADR-t4473-1), `None` when there is no file; no table or no key is the
 /// default ([`DiskConfig`] names each key, its type and default).
@@ -3135,15 +3158,19 @@ fn parse_positive_number(text: &str) -> Result<f64> {
 /// [`crate::domain::disk::parse_size`]; absent, invalid and zero values are
 /// errors with line numbers. Recent warns and ignores any `run_size` value,
 /// regardless of key order. Both callers use the method in [`DiskConfig`].
-/// The supervisor warns of a file it cannot read
-/// and runs on the defaults. A retired key ([`DiskConfig::RETIRED_KEYS`])
+/// The supervisor warns of a file it cannot read, using defaults at startup
+/// and retaining settings in use on later passes. A retired key ([`DiskConfig::RETIRED_KEYS`])
 /// is read on without its value, warned of once in a process
 /// ([`warns_of_retired_disk_keys`]). An older binary refuses the keys it
 /// does not know, so a new key goes into `dagq.toml` only once the
 /// installed binary reads it.
 pub fn load_disk_config(root: &Path) -> Result<Option<DiskConfig>> {
+    load_disk_config_at(root, config_now_millis())
+}
+
+pub(super) fn load_disk_config_at(root: &Path, now: i64) -> Result<Option<DiskConfig>> {
     let path = root.join(CONFIG_FILE_NAME);
-    let Some(text) = read_config(&path)? else {
+    let Some(text) = read_config_at(&path, now)? else {
         return Ok(None);
     };
     let config = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
@@ -3266,8 +3293,12 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig> {
 /// `[supervisor]` of the `dagq.toml` in `root` (task 698), `None` when
 /// there is no file; no table or no key sets nothing.
 pub fn load_supervisor_config(root: &Path) -> Result<Option<SupervisorConfig>> {
+    load_supervisor_config_at(root, config_now_millis())
+}
+
+pub(crate) fn load_supervisor_config_at(root: &Path, now: i64) -> Result<Option<SupervisorConfig>> {
     let path = root.join(CONFIG_FILE_NAME);
-    let Some(text) = read_config(&path)? else {
+    let Some(text) = read_config_at(&path, now)? else {
         return Ok(None);
     };
     Ok(Some(
@@ -3308,8 +3339,15 @@ pub fn load_fresh_session(root: &Path) -> Result<Option<FreshSessionConfig>> {
 /// `[throughput_review]` of the `dagq.toml` in `root`, `None` when there
 /// is no file; no table or no key is the default (`kpi_stats` on).
 pub fn load_throughput_review(root: &Path) -> Result<Option<ThroughputReviewConfig>> {
+    load_throughput_review_at(root, config_now_millis())
+}
+
+pub(super) fn load_throughput_review_at(
+    root: &Path,
+    now: i64,
+) -> Result<Option<ThroughputReviewConfig>> {
     let path = root.join(CONFIG_FILE_NAME);
-    let Some(text) = read_config(&path)? else {
+    let Some(text) = read_config_at(&path, now)? else {
         return Ok(None);
     };
     Ok(Some(
@@ -3809,13 +3847,195 @@ pub fn load_worker_trial(root: &Path) -> Result<WorkerTrial> {
 /// than read on.
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
+/// The uncommitted operational layer beside the main checkout's config.
+pub const LOCAL_CONFIG_FILE_NAME: &str = "dagq.local.toml";
+/// A local layer may expire at most seven days (604800 seconds) after a read.
+pub const LOCAL_CONFIG_MAX_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Only operational tables whose readers reread while running are admitted.
+/// supervisor: ClaimState::reread_limits each pass; disk/stall/resume:
+/// Supervisor::reread_operational_rules before resources and claims each pass.
+/// conflicts: Supervisor::reread_conflicts; provider_fallback:
+/// Supervisor::reread_provider_fallback; fresh_session:
+/// Supervisor::reread_fresh_session; replan: Supervisor::reread_replan, all
+/// each pass. throughput_review: each review invocation; kpi and kpi.targets:
+/// each KPI calculation and finding-planner proposal check. ci_watch:
+/// observation::ci_watch_pass rereads each pass. retention: HostOps::remove_expired
+/// and planning::remove_expired_dirs read each sweep. Landing recheck settings
+/// are excluded because they control a gate before landing.
+/// Review, verification, authorization, audit, worker inputs,
+/// repository destinations and planning vocabulary are never admitted.
+const LOCAL_TABLES: &[&str] = &[
+    "supervisor",
+    "disk",
+    "stall",
+    "resume",
+    "conflicts",
+    "provider_fallback",
+    "fresh_session",
+    "replan",
+    "throughput_review",
+    "kpi",
+    "ci_watch",
+    "retention",
+];
+
+fn config_now_millis() -> i64 {
+    crate::application::unix_millis(std::time::SystemTime::now())
+}
+
+/// File-based load_* readers share read_config_at; this entry supplies the
+/// wall clock. Only a main checkout can
+/// supply a local layer; a linked run worktree is excluded by the adapter.
+/// Committed-tree readers (GitRepository::file_in, review configuration,
+/// setup_review and remote repository rules) call parse_config on blob text,
+/// never this function, and therefore cannot see the local file.
+fn read_config(path: &Path) -> Result<Option<String>> {
+    read_config_at(path, config_now_millis())
+}
+
+fn read_config_at(path: &Path, now: i64) -> Result<Option<String>> {
+    let base = read_config_file(path)?;
+    let Some(root) = path.parent() else {
+        return Ok(base);
+    };
+    let local_path = root.join(LOCAL_CONFIG_FILE_NAME);
+    if !local_path.exists() {
+        return Ok(base);
+    }
+    // Failure of any local check discards the entire layer. Preserve errors
+    // of the committed file: a local layer must not repair a bad base.
+    let merged = (|| -> Result<String> {
+        let base_text = base.as_deref().unwrap_or("");
+        parse_config(base_text)?;
+        ensure!(
+            super::adapters::local_config_is_untracked(root)?,
+            "local config is tracked or outside the main checkout"
+        );
+        let local = read_config_file(&local_path)?.context("local config disappeared")?;
+        merge_local_config(base_text, &local, now)
+    })();
+    Ok(merged.ok().map(Some).unwrap_or(base))
+}
+
+/// Merge individual (table, key) lines, then validate the complete result
+/// with the same parser as dagq.toml. This permits partial tables whose
+/// required companion keys come from the base, and rejects unknown keys,
+/// duplicate keys, invalid values and cross-table inconsistencies atomically.
+/// The required `[local] expires_at` metadata is an RFC 3339 instant, valid
+/// after this read and no later than LOCAL_CONFIG_MAX_SECS from it; it is
+/// not included in the merged configuration.
+fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut entries = BTreeMap::new();
+    let mut tables = BTreeSet::new();
+    let mut table = "";
+    let mut expiry = None;
+    for raw in local.strip_prefix('\u{feff}').unwrap_or(local).lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[') {
+            table = strip_comment(header)
+                .strip_suffix(']')
+                .context("unclosed local table")?
+                .trim();
+            ensure!(
+                table == "local"
+                    || LOCAL_TABLES.contains(&table)
+                    || table.starts_with("kpi.targets."),
+                "local table not allowed: {table}"
+            );
+            ensure!(tables.insert(table), "duplicate local table");
+        } else {
+            let (key, value) = line.split_once('=').context("missing local assignment")?;
+            let key = parse_key(key.trim())?;
+            // Keys are emitted as bare names below. Validate after decoding:
+            // a quoted key's escapes must never become assignments or headers.
+            ensure!(
+                !key.is_empty()
+                    && key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+                "local keys must be nonempty ASCII bare names"
+            );
+            if table == "local" {
+                ensure!(
+                    key == "expires_at" && expiry.is_none(),
+                    "unknown or duplicate local metadata"
+                );
+                expiry = Some(
+                    crate::domain::stats::rfc3339_millis(&parse_string(value.trim())?)
+                        .context("invalid local expiry")?,
+                );
+            } else {
+                ensure!(!table.is_empty(), "local key outside table");
+                ensure!(
+                    entries
+                        .insert((table.to_owned(), key), value.trim().to_owned())
+                        .is_none(),
+                    "duplicate local key"
+                );
+            }
+        }
+    }
+    let expiry = expiry.context("missing local.expires_at")?;
+    ensure!(
+        expiry > now && expiry.saturating_sub(now) <= LOCAL_CONFIG_MAX_SECS * 1000,
+        "local expiry outside permitted interval"
+    );
+    let mut merged = String::new();
+    let mut current = "";
+    for raw in base.strip_prefix('\u{feff}').unwrap_or(base).lines() {
+        let line = raw.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            current = strip_comment(header).strip_suffix(']').unwrap_or("").trim();
+        } else if !line.is_empty()
+            && !line.starts_with('#')
+            && let Some((key, _)) = line.split_once('=')
+            && let Ok(key) = parse_key(key.trim())
+            && let Some(value) = entries.remove(&(current.to_owned(), key.clone()))
+        {
+            merged.push_str(&format!("{key} = {value}\n"));
+            continue;
+        }
+        merged.push_str(raw);
+        merged.push('\n');
+    }
+    // Insert new keys into existing tables, rather than repeating headers
+    // (parse_config rejects repeated tables).
+    for ((table, key), value) in entries {
+        let header = format!("[{table}]");
+        let lines: Vec<_> = merged.lines().collect();
+        let at = lines.iter().position(|line| {
+            line.trim()
+                .strip_prefix('[')
+                .and_then(|h| strip_comment(h).strip_suffix(']'))
+                .is_some_and(|name| name.trim() == table)
+        });
+        if let Some(at) = at {
+            let mut lines = lines
+                .iter()
+                .map(|line| (*line).to_owned())
+                .collect::<Vec<_>>();
+            lines.insert(at + 1, format!("{key} = {value}"));
+            merged = lines.join("\n") + "\n";
+        } else {
+            merged.push_str(&format!("{header}\n{key} = {value}\n"));
+        }
+    }
+    parse_config(&merged)?;
+    Ok(merged)
+}
+
 /// The text of the `dagq.toml` at `path`; none when there is none. Only a
 /// regular file (a symlink is followed) of at most [`MAX_CONFIG_BYTES`] is
 /// read: a device, a FIFO or a directory, and a larger file, are refused
 /// with why, so that a `dagq.toml` that is a symlink to `/dev/zero` cannot
 /// make the reader take memory without end. The file is opened without
 /// blocking, so that one swapped for a FIFO after the check does not hang.
-fn read_config(path: &Path) -> Result<Option<String>> {
+fn read_config_file(path: &Path) -> Result<Option<String>> {
     use std::{io::Read, os::unix::fs::OpenOptionsExt};
     let not_regular = |path: &Path| format!("read {}: not a regular file", path.display());
     match fs::metadata(path) {
@@ -4277,6 +4497,199 @@ pub fn read_main_approval_conditions(
 
 #[cfg(test)]
 mod tests {
+    const LOCAL_NOW: i64 = 1_800_000_000_000;
+    const LOCAL_VALID: &str = "[local]\nexpires_at = '2027-01-16T08:00:00Z'\n";
+
+    /// A main checkout without external Git: an unborn repository has no index.
+    fn local_checkout() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[throughput_review]\nkpi_stats = true\n[disk]\nreserve = '5%'\nestimate = 'fixed'\nrun_size = '8 GiB'\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn local_layer_merges_keys_and_rereads_without_restarting() {
+        let dir = local_checkout();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        let local = dir.path().join(LOCAL_CONFIG_FILE_NAME);
+        // The fixed instant is 2027-01-15T08:00:00Z; expiry is one day later.
+        let read = || parse_config(&read_config_at(&path, LOCAL_NOW).unwrap().unwrap()).unwrap();
+        assert!(read().throughput_review.kpi_stats);
+        fs::write(
+            &local,
+            format!(
+                "{LOCAL_VALID}[throughput_review]\nkpi_stats = false\n[disk]\n\"reserve\" = '12%'\n"
+            ),
+        )
+        .unwrap();
+        let config = read();
+        assert!(!config.throughput_review.kpi_stats);
+        assert!(
+            !load_throughput_review_at(dir.path(), LOCAL_NOW)
+                .unwrap()
+                .unwrap()
+                .kpi_stats
+        );
+        assert_eq!(
+            load_disk_config_at(dir.path(), LOCAL_NOW)
+                .unwrap()
+                .unwrap()
+                .reserve,
+            0.12
+        );
+        assert_eq!(config.disk.reserve, 0.12);
+        assert_eq!(config.disk.estimate, DiskEstimate::Fixed);
+        assert_eq!(config.disk.run_size, Some(8 * 1024 * 1024 * 1024));
+        fs::remove_file(&local).unwrap();
+        assert!(read().throughput_review.kpi_stats);
+        assert_eq!(read().disk.reserve, 0.05);
+    }
+
+    #[test]
+    fn local_layer_fails_closed_and_keeps_base_errors() {
+        let dir = local_checkout();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        let base = fs::read_to_string(&path).unwrap();
+        for local in [
+            "[disk]\nreserve = '12%'\n".to_owned(),
+            "[local]\nexpires_at = '2027-02-16T08:00:00Z'\n[disk]\nreserve = '12%'".to_owned(),
+            "[local]\nexpires_at = '2027-01-15T08:00:00Z'\n[disk]\nreserve = '12%'".to_owned(),
+            "[local]\nexpires_at = 'garbage'\n[disk]\nreserve = '12%'".to_owned(),
+            format!("{LOCAL_VALID}[disk]\nreserve = '12%'\n[repository]\npush = false"),
+            format!("{LOCAL_VALID}[disk]\nreserve = '12%'\n[run.env]\nX = 'bad'"),
+            format!("{LOCAL_VALID}[disk]\nreserve = '12%'\nunknown = true"),
+            format!("{LOCAL_VALID}[disk]\nreserve = '12%'\nreserve = '13%'"),
+            format!("{LOCAL_VALID}[disk\nreserve = '12%'"),
+            format!("{LOCAL_VALID}[disk]\nreserve = 'broken'"),
+        ] {
+            fs::write(dir.path().join(LOCAL_CONFIG_FILE_NAME), &local).unwrap();
+            assert_eq!(
+                read_config_at(&path, LOCAL_NOW).unwrap().unwrap(),
+                base,
+                "{local}"
+            );
+        }
+        fs::write(
+            dir.path().join(LOCAL_CONFIG_FILE_NAME),
+            format!("{LOCAL_VALID}[disk]\nreserve = '12%'"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_config_at(&path, LOCAL_NOW + 86_400_000)
+                .unwrap()
+                .unwrap(),
+            base
+        );
+        fs::write(&path, "[disk]\nreserve = 'invalid'").unwrap();
+        assert!(load_disk_config(dir.path()).is_err());
+    }
+
+    #[test]
+    fn local_layer_rejects_key_injection_into_forbidden_tables() {
+        let dir = local_checkout();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        let original = fs::read_to_string(&path).unwrap();
+        // Exercise both appending a new allowed table and inserting a key
+        // into an existing one. The forbidden assignments themselves are
+        // valid config, so rejection cannot pass merely on a bad payload.
+        for base in [original.clone(), format!("{original}[retention]\n")] {
+            fs::write(&path, &base).unwrap();
+            for (key, value, forbidden) in [
+                (
+                    r#""\n[run.env]\nLD_PRELOAD""#,
+                    "'/tmp/x.so'",
+                    "[run.env]\nLD_PRELOAD = '/tmp/x.so'\n",
+                ),
+                (
+                    r#""\n[repository]\npush""#,
+                    "false",
+                    "[repository]\npush = false\n",
+                ),
+                (
+                    r#""\n[verification]\ncommand_timeout_secs""#,
+                    "1",
+                    "[verification]\ncommand_timeout_secs = 1\n",
+                ),
+                (
+                    r#""\n[worker.trial]\nenabled""#,
+                    "false",
+                    "[worker.trial]\nenabled = false\n",
+                ),
+            ] {
+                assert!(parse_config(forbidden).is_ok(), "{forbidden}");
+                let local = format!(
+                    "{LOCAL_VALID}[throughput_review]\nkpi_stats = false\n[retention]\n{key} = {value}\n"
+                );
+                fs::write(dir.path().join(LOCAL_CONFIG_FILE_NAME), local).unwrap();
+                assert_eq!(
+                    read_config_at(&path, LOCAL_NOW).unwrap().unwrap(),
+                    base,
+                    "{key}"
+                );
+            }
+        }
+        for key in [
+            r#""days\r""#,
+            r#""days\t""#,
+            r#""days[""#,
+            r#""days=7""#,
+            r#""""#,
+        ] {
+            let local = format!("{LOCAL_VALID}[retention]\n{key} = 7\n");
+            assert!(
+                merge_local_config(&original, &local, LOCAL_NOW).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_layer_refuses_landing_recheck_settings() {
+        let dir = local_checkout();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        let base = format!(
+            "{}[recheck]\ncommand = 'committed-gate'\npaths = ['src/**']\n",
+            fs::read_to_string(&path).unwrap()
+        );
+        fs::write(&path, &base).unwrap();
+        for setting in ["command = 'local-gate'", "paths = ['**']", ""] {
+            let local = format!(
+                "{LOCAL_VALID}[throughput_review]\nkpi_stats = false\n[recheck]\n{setting}\n"
+            );
+            fs::write(dir.path().join(LOCAL_CONFIG_FILE_NAME), local).unwrap();
+            assert_eq!(read_config_at(&path, LOCAL_NOW).unwrap().unwrap(), base);
+        }
+    }
+
+    #[test]
+    fn local_layer_is_not_read_from_a_linked_worktree_or_blob_text() {
+        let dir = local_checkout();
+        let admin = dir.path().join("admin");
+        fs::rename(dir.path().join(".git"), &admin).unwrap();
+        fs::write(
+            dir.path().join(".git"),
+            format!("gitdir: {}", admin.display()),
+        )
+        .unwrap();
+        fs::write(admin.join("commondir"), "../main/.git").unwrap();
+        fs::write(
+            dir.path().join(LOCAL_CONFIG_FILE_NAME),
+            format!("{LOCAL_VALID}[disk]\nreserve = '12%'"),
+        )
+        .unwrap();
+        let text = read_config_at(&dir.path().join(CONFIG_FILE_NAME), LOCAL_NOW)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parse_config(&text).unwrap().disk.reserve, 0.05);
+        // Committed-tree routes parse the blob directly, without a local read.
+        assert_eq!(
+            parse_config("[disk]\nreserve = '5%'").unwrap().disk.reserve,
+            0.05
+        );
+    }
+
     /// A `dagq.toml` is read only as a regular file of at most
     /// [`MAX_CONFIG_BYTES`]: a symlink to `/dev/zero` or to a FIFO, a
     /// directory and a larger file are refused with why, not read on;

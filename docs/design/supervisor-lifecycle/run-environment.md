@@ -26,12 +26,20 @@ related:
   - adr-t2268-1
   - design-toolchain-profiles
   - adr-t3321-1
+  - adr-t5108-1
 ---
 
 # Run environment
 
 repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3）が、runごとの環境変数になる。
 読み込みの入口は`src/infrastructure/run_env.rs`の`load_run_env`で、ファイルが無ければ空。
+
+main checkoutでは、commitしない期限つきの運用設定を隣の`dagq.local.toml`から重ねる（[ADR-t5108-1](../../adr/2026-11-16-t5108-1-expiring-uncommitted-operational-config-layer.md)）。
+期限を必須とし、稼働中に読み直せる運用のknobだけをallowlistで許し、層に誤りや許さないkeyがあれば全体を使わない。
+着地の前の関門を変える設定は、この層では許さない。
+読み直すたびに効き、supervisorでは次のpassから変わる。
+期限切れ・拒否・削除でも次のpassからbaseへ戻り、起動のflagは優先する。
+commitしたtree・run worktree・deploymentのremote rulesには重ねない。
 
 - 書式と誤りの入口は`run_env::parse_config`。
   `DAGQ_`で始まるkeyと知らないkeyは拒む。
@@ -52,7 +60,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   緊急に必要量を期限つきで緩めるのは設定でなくCLIとqueueの記録で、再起動は要らない（[閾値](claim-hold.md#閾値)）。
 
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。
-  supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。
+  localのsupervisorが各passに読み直し（`SuperviseOptions::resume`を優先する）、起動時に読めなければ既定値、以後は使っている値で動く。
 
 - `[retention]`は終わったplanner・plan review・observationのdirを残す日数`days`と`backups/`の数`backups`で、意味は`RetentionConfig`（ADR-t697-1）。
 
@@ -141,6 +149,8 @@ serverの所有とguardの境界は[sccacheの地図](sccache.md)。
 
 `dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのはGitで`main_checkout_of`、Gitを起動しないqueue serviceでは束縛から`main_checkout_from_files`の2か所だけ（bareと`git init --separate-git-dir`などの構成の扱いはそれぞれのdoc comment）。
 `dagq.toml`を読むコマンドとaskの通知のrepositoryの名前はどれもこの結果を使う。
+期限つきの層もこのcheckoutだけで読み、Gitが追跡するファイルは使わない。
+期限とallowlistの境界・次のpassから効く約束は冒頭とADR-t5108-1が持つ。
 
 main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。
 main checkoutが無いときの各コマンドの扱いは`main_checkout_of`、通知で使う名前は`naming_checkout`のdoc commentが持つ。

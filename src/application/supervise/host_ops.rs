@@ -305,7 +305,8 @@ impl HostOpsState {
         self.disk.landing_short
     }
 
-    /// Install the first successfully read deployment snapshot before claims.
+    /// Install a local pass's settings or the first deployment snapshot before
+    /// resource measurement and claims.
     pub(super) fn set_repository_disk(&mut self, config: crate::domain::disk::DiskConfig) {
         self.disk_config = config;
     }

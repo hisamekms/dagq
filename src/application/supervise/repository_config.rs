@@ -180,6 +180,31 @@ impl StartupOverrides {
 pub type RepositoryStartupFile =
     std::sync::Arc<dyn Fn() -> anyhow::Result<StartupRules> + Send + Sync>;
 
+/// Local operational settings replaced before resources and claims each pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OperationalRules {
+    pub stall: crate::domain::stall::StallConfig,
+    pub disk: crate::domain::disk::DiskConfig,
+    pub resume: crate::domain::resume::ResumeConfig,
+}
+/// Explicit startup flags win; a failed read keeps the settings in use.
+/// A missing file is a successful read of defaults, so deletion resets them.
+pub fn next_operational_rules(
+    current: OperationalRules,
+    flags: StartupOverrides,
+    read: Option<OperationalRules>,
+) -> OperationalRules {
+    let file = read.unwrap_or(current);
+    OperationalRules {
+        stall: flags.stall.unwrap_or(file.stall),
+        disk: flags.disk.unwrap_or(file.disk),
+        resume: flags.resume.unwrap_or(file.resume),
+    }
+}
+/// Local main-checkout reader; deployments retain their own rules boundary.
+pub type OperationalFile =
+    std::sync::Arc<dyn Fn() -> anyhow::Result<OperationalRules> + Send + Sync>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +233,39 @@ mod tests {
             Ok(self.text.lock().unwrap().clone())
         }
     }
+    #[test]
+    fn operational_reload_selects_flags_then_file_and_keeps_current_on_error() {
+        let current = OperationalRules::default();
+        let mut file = current;
+        file.stall.idle_without_receipt_secs = 321;
+        file.disk.reserve = 0.12;
+        file.resume.conflict_only_limit = 9;
+        assert_eq!(
+            next_operational_rules(current, StartupOverrides::default(), Some(file)),
+            file
+        );
+        assert_eq!(
+            next_operational_rules(file, StartupOverrides::default(), None),
+            file
+        );
+        assert_eq!(
+            next_operational_rules(file, StartupOverrides::default(), Some(current)),
+            current
+        );
+        assert_eq!(
+            next_operational_rules(
+                file,
+                StartupOverrides {
+                    stall: Some(current.stall),
+                    disk: Some(current.disk),
+                    resume: Some(current.resume)
+                },
+                Some(file)
+            ),
+            current
+        );
+    }
+
     #[test]
     fn startup_tables_preserve_explicit_overrides() {
         let original = StartupRules {

@@ -55,6 +55,41 @@ pub use crate::infrastructure::github_rulesets::ruleset_gate;
 #[cfg(test)]
 mod wiring_tests;
 
+/// Local per-pass slot reader, sharing the supervisor's clock for expiry.
+fn supervisor_file(
+    checkout: PathBuf,
+    clock: std::sync::Arc<dyn crate::application::Clock>,
+) -> crate::application::supervise::SupervisorFile {
+    std::sync::Arc::new(move || {
+        crate::infrastructure::run_env::load_supervisor_config_at(
+            &checkout,
+            crate::application::unix_millis(clock.system_time()),
+        )
+    })
+}
+
+/// The local main-checkout port used by production and the wiring harness.
+/// Shared wiring stays in the composition root so contexts name no sibling.
+/// Remote deployment rules never pass through it. Flags retain precedence
+/// on every successful read; errors are handled by the loop without resetting.
+fn operational_file(
+    checkout: PathBuf,
+    clock: std::sync::Arc<dyn crate::application::Clock>,
+    flags: crate::application::supervise::repository_config::StartupOverrides,
+) -> crate::application::supervise::repository_config::OperationalFile {
+    std::sync::Arc::new(move || {
+        use crate::application::supervise::repository_config::{
+            OperationalRules, next_operational_rules,
+        };
+        let read = crate::infrastructure::run_env::load_operational_rules(&checkout, &*clock)?;
+        Ok(next_operational_rules(
+            OperationalRules::default(),
+            flags,
+            Some(read),
+        ))
+    })
+}
+
 /// The use cases of the queue service as the binary's service answers
 /// them, for [`wiring_tests`]' service in this process (rule L9: a context
 /// module reaches another through the root).
