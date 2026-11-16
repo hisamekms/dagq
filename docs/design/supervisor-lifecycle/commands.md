@@ -106,6 +106,7 @@ related:
 - supervisorは、leaseが無くprocessの止まったrunを`recover`と同じ手順で自分で回収し、生きているwrapperのrunはadoptで引き継ぐので、人の`recover`はsupervisorが居ないqueueのためにある（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)）。
 - `recover`はtaskを`ready`に戻さず、次の一手は`failed`のrunと同じく復旧jobが決め（[Triage](triage.md)）、人が決める再試行は`ready`で新しいrunにする。
 - `integrating`から戻したrunは人の`integrate`を待たず、supervisorが着地させるかreviewにかける（`RunHistory::recovered_landing`）。
+  ただし、照合の不一致を記録済みのrunは、人の再承認を含む元の判断の経路の再承認を保つ（[判断との照合](integrate.md#判断との照合)）。
 - 生きているsupervisorが居る間は、そのleaseのrunを`recover`が拒み（`doctor`も`recoverable`にしない）、`rebind`も拒むので、人が止めてから打つ。
 - `rebind`は、repositoryから解決したqueueで束縛の検査を通らない唯一のコマンドで、ほかのコマンドは束縛と違うrepositoryを拒む（[ADR-0020](../../adr/0020-rebind-queue-to-a-moved-repository.md)）。
 - `rebind`で直らなかったworktreeは、supervisorの掃除が消す前にもう一度repairする（[Run worktrees](run-worktrees.md)）。

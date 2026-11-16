@@ -90,7 +90,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 - hostのmount: initのvolumeは各queueのrun dir・cloneの親のdir・verificationのcloneの親のdirだけで、hostの`$HOME`・workerのcache・buildの出力・着地用のworktreeのdirを含めない。
   各dirはmachineの中の同じpathにmountする。
   macOSのremoteのPodmanのbind mountのsourceはmachineの側のpathなので、containerに見せるhostのdirはmachineにmountしてある必要がある。
-  queueのrun dir・runのclone・verificationのcloneはこの3つのdirの下に置き、着地用のworktreeはどの下にも置かない。
+  queueのrun dir・runのclone・verificationのcloneは3つのdirの下に置く。
   initはhostの全てのqueue（data homeの`dagq/`の下でqueueのDBを持つdir）のdirをmountするので、作った時点のqueueがmachineを共有する。
   machineにmountしても、containerに見せるかはcontainerごとのmountで決まる。
 - machineの中のnamed volume: buildの出力はrunかverificationごと、workerのcacheはqueueごとのnamed volumeで、hostにmountしない（`MachineVolumes`、名前は`QueueKey`）。
@@ -147,8 +147,9 @@ runのworktreeのpathにcloneを記録したrunがcontainerのrunで、hostのru
 - 事実だけのturn: 最後のturnの終わりのものでない事実は、headを読む前にagentもbrokerへの経路も無いturnで書き直す（[ADR-t2978-1](../adr/2026-10-23-t2978-1-facts-only-turn-runs-in-a-narrow-container-with-guarded-git.md)）。
   supervisorのpassを塞ぎ続けない時間の上限とcold buildの打ち切りは`infrastructure::run_container::FACTS_TURN_TIMEOUT`が持つ。
 - 再計画の保留と復元: 書き出した作業と渡す材料による（[再計画](../plans/task-replanning.md)）。
-- 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（着地する`result_commit`をdetachedで置く）で動く。
-  どのmachineとcontainerのmountにも入らず、作れないときは着地せず人を待つ。
+- 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktreeに`result_commit`をdetachedで置く。
+  止まった着地がrebaseか番号の振り直しで書き換えていればそのheadを置く（`integrate::binding::landing_head`・`review::reviewed_head`、[照合](supervisor-lifecycle/integrate.md#判断との照合)）。
+  作れないときは着地せず人を待つ。
 - mainの受け渡しは`GitRepository::hand_main`を入口にする。
 - hookとdriver: containerのrunのcommitを扱う制御側のgitは、hookを無いpathに向け、制御側のconfigの全scopeが定義するfilter・diff・mergeのdriverをプログラムを走らせないものに上書きして走る。
   着地用のworktreeで起こすプロセスにも同じ上書きをenvで渡し、上書きが効くと確かめられなければ着地しない。
@@ -167,7 +168,7 @@ workerの実行全体は`application::run_container::PodmanActorExecutor`を入�
   podmanの引数とcontainerの設定にtokenの値は無く、ファイルはcontainerを消すときに消す。
 - hardeningと上限は`domain::run_container::worker_run_args`を入口にする。
   Podman / Dockerのsocketを渡さない。
-  mountはrunのclone・run dir・runのsocket・`dagq.toml`が名指すvolumeだけで、着地用のworktreeとverificationのcloneはmountしない（reviewの間も残るworkerのcontainerに、制御側が着地と検証に使う物を見せない）。
+  mountはrunのclone・run dir・runのsocket・`dagq.toml`が名指すvolumeだけで、着地用のworktreeとverificationのcloneはmountしない。
   podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
 - buildの出力とworkerのcache: `dagq.toml`の`[container.build_output]`が名指すdirにrunごとのvolumeを、`[container.worker_cache]`が挙げるdirごとにqueueのvolumeをmountする（綴りと意味は`run_env`の各表のdoc comment、案は[profile](toolchain-profiles.md#推奨の設定)）。
   runtimeは道具を知らず、projectが`[run.env]`で向ける。
