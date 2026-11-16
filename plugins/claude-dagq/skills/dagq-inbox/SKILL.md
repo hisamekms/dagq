@@ -34,10 +34,10 @@ Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_i
 It prints each open ask in full, oldest first. One at a time:
 
 1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices (Codex: a numbered list). Show the asker's `recommendation` and `confidence` when set. Add no recommendation of your own.
-2. Write the person's exact answer. Protected-path answers and OIDC landing approvals need the person's own CLI (`reference/asks.md`).
+2. Write the person's exact answer and pass their unchanged words with `--original-text` (only a hash is retained; `reference/asks.md`). Protected-path answers and OIDC landing approvals need the person's own CLI.
 
 ```sh
-"$DAGQ" answer <id> --text '<the answer>'
+"$DAGQ" answer <id> --text '<the answer>' --original-text '<their exact words>'
 ```
 
 3. `{"error": "ask <id> is not open"}`: the runtime closed it first (the session moved on or exited); tell the person.
