@@ -68,6 +68,7 @@ tags:
 - [スパイク：supervisor の起動の追いつきの後に持ち続ける確保量はどの保持か、確定済みの履歴の event の数に比例するか](supervisor-startup-memory-spike.md)（goal 241、task 3827）
 - [スパイク：台帳の係の queue 行・待ちの行・supervisor の一生を、store の行と範囲の決まった読みから位置 at の時点に切って作り直せるか（種類ごとの判定と足す読み）](ledger-cut-at-position-spike.md)（goal 241、task 3979）
 - [スパイク：build の動いていない run の incremental の crate の dir から最新の完了済み session 以外を消したときの、次の build の時間と空く量](incremental-session-removal-spike.md)（goal 224、task 3462）
+- [スパイク：待ちの run の target を消す今の仕組みの代償と、incremental だけ・target 全部を消したときの手直しの最初の build の延び、待ちの種類と経過ごとの消す条件](run-incremental-removal-on-wait-spike.md)（goal 286、task 4920）
 - [dagq の build・test の process ごとと合計の peak のメモリ、下げる手の効き、host.toml の machine と container の上限の推奨](build-memory.md)（goal 184、task 3161）
 - [スパイク：Codex CLI の対話の session で inbox に要るもの（常駐・background の見張り・answer・指示の読み込み・復帰・区間の記録・画面の判定・sandbox からの状態を変える dagq）ができるか](codex-inbox-spike.md)（goal 77、task 1180）
 - [スパイク：Codex の対話の TUI で、dagq が起動の引数で渡す hook だけに起動の引数で trust を与え、人の ~/.codex/config.toml を書かずに動かせるか](codex-inbox-hook-trust-spike.md)（goal 77、task 3336）
