@@ -172,6 +172,17 @@ command = "sh scripts/landing-it.sh"
 # [fresh_session] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2129・2167 を含んでから足した。
 peak_context_above = 400000
 
+[stall]
+# worker の revise・解消依頼・worker_question の答えを送ってから session が receipt を書き直して idle になるまでの上限（resume timeout）。
+# key と既定は src/domain/stall.rs の StallConfig の doc comment が持ち、ここでは resume_timeout_secs だけを書き、ほかの key は既定のまま。
+# 直近 1 週間（2026-11-07〜）の worker の revise 236 件は p90 28.7 分・最大 159.5 分、解消 163 件は p90 42.5 分・最大 142.0 分で、
+# 既定の 1 時間の上限が test を流している最中の session を 4 件切り（4133 の手直しと ask 1756 の答えの後、4134、run ec42d99d）、
+# worker の作業・人の判断・build のやり直しを失った。値は人の例示の 2 時間で、最初の turn の上限（turn_limit_secs の既定 4 時間）より短く保つ。
+# 黙った session は turn_silence_secs で別に見つかる。時間でなく動きで判断する直しは別の request で入るので、この値はそれまでのつなぎ。
+# [stall] は supervisor が起動時に 1 回だけ読むので、着地の後の次の起動（自動更新の引き継ぎか up）から効き、stall_config_loaded で確かめられる。
+# [stall] の resume_timeout_secs を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 4945 を含んでから足した。
+resume_timeout_secs = 7200
+
 # 長期化した task の再計画を有効にする: runtime が候補の task を検出し、開いた再計画の操作を診断し、上限の回数までは人を通さずに
 # task を保留にして再計画へ回す。key と既定は src/domain/replan_detect.rs の ReplanConfig の doc comment、流れは docs/plans/task-replanning.md が持つ。
 # enabled のほかは書かず既定で動かし、効果は status の replans で見る。
