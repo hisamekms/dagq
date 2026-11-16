@@ -470,7 +470,7 @@ fn named_cases(log: &mut Log) {
     }
 }
 
-/// [`history`] of 30 units (the cases of the earlier records, whose
+/// [`history`] of the scoped background units (30 in the full contract) (the cases of the earlier records, whose
 /// settled units are another read's) with `settled` units and the cases of
 /// the kinds the views read, and main's events before the cases padded to
 /// a whole number of summaries ([`SUMMARY_EVERY`]), so that the summary
@@ -482,7 +482,10 @@ pub(crate) fn named_history(settled: usize) -> Log {
 /// [`named_history`] with `member_changes` changes of the plan of task 66
 /// ([`history`]'s, of a proposal the range names).
 pub(crate) fn named_history_with(settled: usize, member_changes: usize) -> Log {
-    named_history_of(history(30, member_changes), settled)
+    named_history_of(
+        history(super::fixed_history_units(), member_changes),
+        settled,
+    )
 }
 
 /// [`named_history`] as `kpi`'s entry compares it at two sizes. The member
@@ -493,7 +496,7 @@ pub(crate) fn named_history_with(settled: usize, member_changes: usize) -> Log {
 /// read the range does not bound, and the forecast's contract
 /// ([`super::ledger_queue_lives`]) counts them.
 pub(crate) fn kpi_named_history(settled: usize) -> Log {
-    let mut log = history(30, settled);
+    let mut log = history(super::fixed_history_units(), settled);
     for event in &mut log.events {
         if event.kind == crate::domain::EventKind::ForecastRecorded {
             event.payload["tasks"] = json!([]);
@@ -1527,13 +1530,6 @@ pub(crate) fn kpi_compare_groups_with<S: ContractStore, F: Fn() -> Result<S>>(
     super::same_answers(&answers[0], &answers[1], small, large)
 }
 
-/// [`kpi_compare_groups_with`] of 30 and 300 units.
-pub fn kpi_compare_groups_read_by_their_range<S: ContractStore, F: Fn() -> Result<S>>(
-    open: &F,
-) -> Result<()> {
-    kpi_compare_groups_with(open, 30, 300)
-}
-
 /// The goal the most landed runs of `whole` are of (by its attributes'
 /// `task_goals`), so that `--goal` keeps some and leaves some out.
 fn landed_goal(whole: &LedgerWindow) -> Option<GoalId> {
@@ -1806,7 +1802,7 @@ pub fn ledger_queue_named_with_only_ci_after_a_future_main_event<
 }
 
 pub(crate) fn ci_only_history(settled: usize) -> Log {
-    let mut log = named_history(30);
+    let mut log = named_history(super::fixed_history_units());
     observed(&mut log, "future-ci-only", NOW - T0 + DAY);
     for n in 0..settled {
         // The same latest boundary precedes S at either volume, after the
@@ -2022,9 +2018,18 @@ pub fn ledger_queue_named_goes_back_whole_of<S: ContractStore, F: Fn() -> Result
     open: &F,
     state: WholeState,
 ) -> Result<()> {
+    ledger_queue_named_goes_back_whole_with(open, state, 30)
+}
+
+/// The same fallback states with an explicit settled history size.
+pub(crate) fn ledger_queue_named_goes_back_whole_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    state: WholeState,
+    settled: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_ledger_queue_named_whole")?;
-    let laid = lay_down_named(&tx, &named_history(30))?;
+    let laid = lay_down_named(&tx, &named_history(settled))?;
     let mark = |through: Option<&str>, generation: Option<i64>| -> Result<()> {
         tx.execute("DELETE FROM ledger_queue_views_filled", sql_params![])?;
         tx.execute(

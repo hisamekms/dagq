@@ -883,9 +883,18 @@ const ALL: view::Sought = view::Sought {
 pub fn ledger_earlier_answers_as_every_row<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_earlier_answers_as_every_row_with(open, 30, 30)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_earlier_answers_as_every_row_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    settled: usize,
+    member_changes: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_ledger_earlier")?;
-    let laid = lay_down(&tx, &history(30, 30))?;
+    let laid = lay_down(&tx, &history(settled, member_changes))?;
     // The builder behind: a later change of status of member task 66 (its
     // row ended before the range, completed) and a later start of run 67
     // before the range are in the EventStore past the marks and in no row,

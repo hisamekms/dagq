@@ -7,7 +7,7 @@
 //! store with it. Every case but the one of the generations rolls back;
 //! that one removes its rows.
 use super::ContractStore;
-use crate::domain::ledger::open::{Filled, Left, ROWS_PER_FILL};
+use crate::domain::ledger::open::{FILL_BYTES, Filled, Left, ROWS_PER_FILL};
 use crate::domain::ledger::queue_views::{
     self as views, MainSummary, asks_left_open, main_commits, snapshot_targets, summaries,
 };
@@ -194,8 +194,12 @@ fn write_rows(tx: &impl SqlWrite, rows: &[LedgerRow]) -> Result<()> {
 /// Fill on `tx` until done: the parts it took, each before the last not
 /// done for a reader.
 fn fill_all(tx: &impl SqlWrite) -> Result<usize> {
+    fill_all_with(tx, ROWS_PER_FILL, FILL_BYTES)
+}
+
+fn fill_all_with(tx: &impl SqlWrite, rows: usize, bytes: usize) -> Result<usize> {
     for parts in 1..10_000 {
-        if views_in::fill(tx)?.is_done() {
+        if views_in::fill_with(tx, rows, bytes)?.is_done() {
             return Ok(parts);
         }
         ensure!(!views_in::held(tx)?.is_done(), "done before the last part");
@@ -347,9 +351,21 @@ fn looked_up(tx: &impl SqlRead, through: i64) -> Result<(usize, usize, usize, us
 pub fn ledger_queue_views_count_what_a_read_names<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_queue_views_count_what_a_read_names_with(open, 30, 300)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_queue_views_count_what_a_read_names_with<
+    S: ContractStore,
+    F: Fn() -> Result<S>,
+>(
+    open: &F,
+    small: usize,
+    large: usize,
+) -> Result<()> {
     let store = open()?;
     let mut counts = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small, large] {
         let tx = store.write_entry("contract_ledger_queue_views_counts")?;
         as_before_the_views(&tx)?;
         fill_all(&tx)?;
@@ -376,12 +392,21 @@ pub fn ledger_queue_views_count_what_a_read_names<S: ContractStore, F: Fn() -> R
 pub fn ledger_queue_views_filled_in_parts<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_queue_views_filled_in_parts_with(open, ROWS_PER_FILL, FILL_BYTES)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_queue_views_filled_in_parts_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    rows_per_fill: usize,
+    fill_bytes: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_ledger_queue_views_filled")?;
     as_before_the_views(&tx)?;
-    fill_all(&tx)?;
-    let rows = queue(ROWS_PER_FILL / 2, true).rows();
-    ensure!(rows.len() > 2 * ROWS_PER_FILL);
+    fill_all_with(&tx, rows_per_fill, fill_bytes)?;
+    let rows = queue(rows_per_fill / 2, true).rows();
+    ensure!(rows.len() > 2 * rows_per_fill);
     write_rows(&tx, &rows)?;
     let written = views_in::views(&tx)?;
     ensure!(written == views_of(&rows), "{written:?}");
@@ -393,15 +418,15 @@ pub fn ledger_queue_views_filled_in_parts<S: ContractStore, F: Fn() -> Result<S>
     as_before_the_views(&tx)?;
     ensure!(views_in::held(&tx)? == Filled::Not);
     let taken: Vec<&LedgerRow> = before.iter().filter(|row| views::takes(row)).collect();
-    match views_in::fill(&tx)? {
+    match views_in::fill_with(&tx, rows_per_fill, fill_bytes)? {
         Filled::Through(through) => {
-            ensure!(through.parse::<i64>()? <= taken[ROWS_PER_FILL - 1].inputs_from.as_i64());
+            ensure!(through.parse::<i64>()? <= taken[rows_per_fill - 1].inputs_from.as_i64());
         }
         other => anyhow::bail!("a part, not {other:?}"),
     }
     ensure!(!views_in::held(&tx)?.is_done());
     write_rows(&tx, after)?;
-    fill_all(&tx)?;
+    fill_all_with(&tx, rows_per_fill, fill_bytes)?;
     ensure!(views_in::held(&tx)? == Filled::Done);
     let filled = views_in::views(&tx)?;
     ensure!(filled == written, "{filled:?}");

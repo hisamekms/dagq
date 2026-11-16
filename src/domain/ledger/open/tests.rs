@@ -330,17 +330,46 @@ fn the_filling_goes_on_past_a_full_part_and_is_done_past_a_short_one() {
     assert_eq!(Filled::Done.after(), None);
     // A full page of keys, or a part cut short of its keys, goes on.
     assert_eq!(
-        Filled::next(ROWS_PER_FILL, ROWS_PER_FILL, Some("k")),
+        Filled::next(ROWS_PER_FILL, ROWS_PER_FILL, Some("k"), ROWS_PER_FILL),
         Filled::Through("k".to_owned())
     );
     assert_eq!(
-        Filled::next(5, 2, Some("k")),
+        Filled::next(5, 2, Some("k"), ROWS_PER_FILL),
         Filled::Through("k".to_owned())
     );
-    assert_eq!(Filled::next(5, 5, Some("k")), Filled::Done);
-    assert_eq!(Filled::next(0, 0, None), Filled::Done);
-    assert!(!part_spent(FILL_BYTES - 1, FILL_TIME / 2));
-    assert!(part_spent(FILL_BYTES, std::time::Duration::ZERO));
-    assert!(part_spent(0, FILL_TIME));
+    assert_eq!(Filled::next(5, 5, Some("k"), ROWS_PER_FILL), Filled::Done);
+    assert_eq!(Filled::next(0, 0, None, ROWS_PER_FILL), Filled::Done);
+    assert!(!part_spent(FILL_BYTES - 1, FILL_TIME / 2, FILL_BYTES));
+    assert!(part_spent(
+        FILL_BYTES,
+        std::time::Duration::ZERO,
+        FILL_BYTES
+    ));
+    assert!(part_spent(0, FILL_TIME, FILL_BYTES));
     assert!(Filled::Done.is_done() && !Filled::Not.is_done());
+}
+
+/// A reduced page must not be mistaken for the end of the table:
+/// a later key remains unread until the next fill. A byte-stopped
+/// page also continues, while a short, fully consumed page finishes.
+#[test]
+fn a_fill_at_its_row_bound_continues() {
+    assert_eq!(
+        Filled::next(2, 2, Some("b"), 2),
+        Filled::Through("b".into())
+    );
+    assert_eq!(
+        Filled::next(2, 1, Some("a"), 2),
+        Filled::Through("a".into())
+    );
+    assert_eq!(Filled::next(1, 1, Some("c"), 2), Filled::Done);
+    assert_eq!(Filled::next(0, 0, None, 2), Filled::Done);
+    assert_eq!(
+        Filled::next(200, 200, Some("z"), 200),
+        Filled::Through("z".into())
+    );
+    assert_eq!(Filled::next(199, 199, Some("y"), 200), Filled::Done);
+    assert!(!part_spent(1023, std::time::Duration::ZERO, 1024));
+    assert!(part_spent(1024, std::time::Duration::ZERO, 1024));
+    assert!(part_spent(0, FILL_TIME, 1024));
 }

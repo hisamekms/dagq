@@ -506,9 +506,18 @@ pub(crate) fn ledger_queue_lives_with<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
     large: usize,
 ) -> Result<()> {
+    ledger_queue_lives_sizes(open, 30, large)
+}
+
+/// The same contract with both settled history sizes explicit.
+pub(crate) fn ledger_queue_lives_sizes<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    small: usize,
+    large: usize,
+) -> Result<()> {
     for (shared, config) in [(true, false), (false, true)] {
         let mut counts = Vec::new();
-        for settled in [30, large] {
+        for settled in [small, large] {
             let store = open()?;
             let tx = store.write_entry("contract_queue_lives")?;
             let laid = lay_down(&tx, &log(settled, shared, config))?;
@@ -518,7 +527,7 @@ pub(crate) fn ledger_queue_lives_with<S: ContractStore, F: Fn() -> Result<S>>(
             // 4670 (vii), planner decision A, 4756 does_not_hold. Their
             // volume is the target's open period, not a bounded history.
             counts.push(answers(&tx)?);
-            if settled == 30 && shared {
+            if settled == small && shared {
                 for change in [
                     "DELETE FROM ledger_queue_views_filled",
                     "UPDATE ledger_queue_views_filled SET generation=NULL",
@@ -873,9 +882,20 @@ fn ends_with(mut log: Log, units: Vec<i64>) -> Log {
 pub fn ledger_queue_lives_keeps_an_old_snapshot<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_queue_lives_keeps_an_old_snapshot_with(open, 30)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_queue_lives_keeps_an_old_snapshot_with<
+    S: ContractStore,
+    F: Fn() -> Result<S>,
+>(
+    open: &F,
+    settled: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_queue_old_snapshot")?;
-    let laid = lay_down(&tx, &old_snapshot_log(30))?;
+    let laid = lay_down(&tx, &old_snapshot_log(settled))?;
     fill(&tx)?;
     answers(&tx)?;
     clear(&tx, &laid)?;

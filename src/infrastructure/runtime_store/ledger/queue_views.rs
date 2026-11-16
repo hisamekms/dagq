@@ -373,7 +373,11 @@ fn refold(conn: &impl SqlWrite, id: i64, reached: i64) -> Result<()> {
 /// that the summaries fold the events in the order of their ids. A mark
 /// done over summaries that hold no record (an older binary's) counts as
 /// none.
-pub(super) fn fill_views(conn: &impl SqlWrite) -> Result<Filled> {
+pub(super) fn fill_views(
+    conn: &impl SqlWrite,
+    rows_per_fill: usize,
+    fill_bytes: usize,
+) -> Result<Filled> {
     let mut held = kept_view(conn, View::Queue)?;
     // Summaries a binary before them wrote hold no record of what a reader
     // takes of them ([`MainSummary::holds_record`]): the views are made
@@ -402,7 +406,7 @@ pub(super) fn fill_views(conn: &impl SqlWrite) -> Result<Filled> {
     }
     let after: i64 = after.and_then(|after| after.parse().ok()).unwrap_or(0);
     let started = std::time::Instant::now();
-    let limit = i64::try_from(open::ROWS_PER_FILL).unwrap_or(i64::MAX);
+    let limit = i64::try_from(rows_per_fill).unwrap_or(i64::MAX);
     let rows: Vec<(String, i64)> = SqlRead::query_map(
         conn,
         &format!(
@@ -426,12 +430,12 @@ pub(super) fn fill_views(conn: &impl SqlWrite) -> Result<Filled> {
         let records: Vec<RunEvent> = serde_json::from_str(&text)?;
         write_row_views(conn, key, &records, None)?;
         taken += 1;
-        if open::part_spent(bytes, started.elapsed()) {
+        if open::part_spent(bytes, started.elapsed(), fill_bytes) {
             break;
         }
     }
     let last = taken.checked_sub(1).map(|at| rows[at].1.to_string());
-    let filled = Filled::next(rows.len(), taken, last.as_deref());
+    let filled = Filled::next(rows.len(), taken, last.as_deref(), rows_per_fill);
     write_filled(conn, View::Queue, &filled)?;
     Ok(filled)
 }
@@ -497,7 +501,12 @@ pub(crate) mod views_in {
 
     /// A part of the filling ([`LedgerStore::fill_ledger_queue_views`]).
     pub(crate) fn fill(tx: &impl SqlWrite) -> Result<Filled> {
-        fill_views(tx)
+        fill_views(tx, open::ROWS_PER_FILL, open::FILL_BYTES)
+    }
+
+    /// The same fill loop with explicit row and byte bounds.
+    pub(crate) fn fill_with(tx: &impl SqlWrite, rows: usize, bytes: usize) -> Result<Filled> {
+        fill_view_with(tx, View::Queue, rows, bytes)
     }
 
     /// The mark as a reader takes it.

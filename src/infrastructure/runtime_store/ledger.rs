@@ -760,6 +760,16 @@ pub(crate) mod open_in {
         fill_left_open(tx)
     }
 
+    /// The same fill loop with explicit row and byte bounds.
+    pub(crate) fn fill_with(tx: &impl SqlWrite, rows: usize, bytes: usize) -> Result<Filled> {
+        fill_view_with(tx, View::Open, rows, bytes)
+    }
+
+    /// The first-Execution fill loop with explicit row and byte bounds.
+    pub(crate) fn first_fill_with(tx: &impl SqlWrite, rows: usize, bytes: usize) -> Result<Filled> {
+        fill_view_with(tx, View::First, rows, bytes)
+    }
+
     /// The mark as a reader takes it ([`LedgerStore::ledger_left_open`]).
     pub(crate) fn held(tx: &impl SqlRead) -> Result<Filled> {
         held_filled(tx)
@@ -933,8 +943,20 @@ fn fill_left_open(conn: &impl SqlWrite) -> Result<Filled> {
 
 /// Both views use the same key, time and byte bounds, one transaction per part.
 fn fill_view(conn: &impl SqlWrite, view: View) -> Result<Filled> {
+    fill_view_with(conn, view, open::ROWS_PER_FILL, open::FILL_BYTES)
+}
+
+/// The production fill with explicit row and byte bounds. The clock bound
+/// stays fixed; contracts can cross the same page/byte boundaries with fewer rows.
+fn fill_view_with(
+    conn: &impl SqlWrite,
+    view: View,
+    rows_per_fill: usize,
+    fill_bytes: usize,
+) -> Result<Filled> {
+    anyhow::ensure!(rows_per_fill > 0 && fill_bytes > 0, "positive fill bounds");
     if let View::Queue = view {
-        return queue_views::fill_views(conn);
+        return queue_views::fill_views(conn, rows_per_fill, fill_bytes);
     }
     let held = kept_view(conn, view)?;
     let Some(after) = held.after() else {
@@ -955,7 +977,7 @@ fn fill_view(conn: &impl SqlWrite, view: View) -> Result<Filled> {
         )?;
     }
     let started = std::time::Instant::now();
-    let limit = i64::try_from(open::ROWS_PER_FILL).unwrap_or(i64::MAX);
+    let limit = i64::try_from(rows_per_fill).unwrap_or(i64::MAX);
     let run = LedgerKind::Run.as_str();
     let statement = row_keys_after_sql(after.is_some());
     let keys = match after {
@@ -1005,12 +1027,12 @@ fn fill_view(conn: &impl SqlWrite, view: View) -> Result<Filled> {
             View::Queue => unreachable!("the queue views fill in queue_views::fill_views"),
         }
         taken += 1;
-        if open::part_spent(bytes, started.elapsed()) {
+        if open::part_spent(bytes, started.elapsed(), fill_bytes) {
             break;
         }
     }
     let last = taken.checked_sub(1).map(|at| keys[at].as_str());
-    let filled = Filled::next(keys.len(), taken, last);
+    let filled = Filled::next(keys.len(), taken, last, rows_per_fill);
     write_filled(conn, view, &filled)?;
     Ok(filled)
 }

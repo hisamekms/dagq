@@ -136,8 +136,12 @@ fn write_rows(tx: &impl SqlWrite, rows: &[LedgerRow]) -> Result<()> {
 /// Fill on `tx` until done: the parts it took, each before the last not
 /// done for a reader.
 fn fill_all(tx: &impl SqlWrite) -> Result<usize> {
+    fill_all_with(tx, ROWS_PER_FILL, FILL_BYTES)
+}
+
+fn fill_all_with(tx: &impl SqlWrite, rows: usize, bytes: usize) -> Result<usize> {
     for parts in 1..10_000 {
-        if open_in::fill(tx)?.is_done() {
+        if open_in::fill_with(tx, rows, bytes)?.is_done() {
             return Ok(parts);
         }
         ensure!(!open_in::held(tx)?.is_done(), "done before the last part");
@@ -183,9 +187,18 @@ pub fn ledger_open_written_with_its_rows<S: ContractStore, F: Fn() -> Result<S>>
 pub fn ledger_open_counts_the_runs_left_open<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_open_counts_the_runs_left_open_with(open, 30, 300)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_open_counts_the_runs_left_open_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    small: u64,
+    large: u64,
+) -> Result<()> {
     let store = open()?;
     let mut counts = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small, large] {
         let tx = store.write_entry("contract_ledger_open_counts")?;
         let rows = rows(settled, true);
         ensure!(rows.len() > usize::try_from(settled)?);
@@ -208,9 +221,18 @@ pub fn ledger_open_counts_the_runs_left_open<S: ContractStore, F: Fn() -> Result
 /// meanwhile is taken as it is written, and the table filled is the one
 /// the writes of the rows make. All rows roll back.
 pub fn ledger_open_filled_in_parts<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    ledger_open_filled_in_parts_with(open, ROWS_PER_FILL, FILL_BYTES)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_open_filled_in_parts_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    rows_per_fill: usize,
+    fill_bytes: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_ledger_open_filled")?;
-    let rows = rows(2 * u64::try_from(ROWS_PER_FILL)?, true);
+    let rows = rows(2 * u64::try_from(rows_per_fill)?, true);
     write_rows(&tx, &rows)?;
     let written = open_in::entries(&tx)?;
     as_before_the_table(&tx)?;
@@ -218,13 +240,13 @@ pub fn ledger_open_filled_in_parts<S: ContractStore, F: Fn() -> Result<S>>(open:
     let mut keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
     keys.sort_unstable();
     // At most a page of keys, fewer when its time is spent first.
-    match open_in::fill(&tx)? {
-        Filled::Through(key) => ensure!(key.as_str() <= keys[ROWS_PER_FILL - 1], "{key}"),
+    match open_in::fill_with(&tx, rows_per_fill, fill_bytes)? {
+        Filled::Through(key) => ensure!(key.as_str() <= keys[rows_per_fill - 1], "{key}"),
         other => anyhow::bail!("a part, not {other:?}"),
     }
     ensure!(!open_in::held(&tx)?.is_done());
     open_in::write_row(&tx, rows.last().context("rows")?)?;
-    fill_all(&tx)?;
+    fill_all_with(&tx, rows_per_fill, fill_bytes)?;
     ensure!(open_in::held(&tx)? == Filled::Done);
     let filled = open_in::entries(&tx)?;
     ensure!(filled == written && filled == table_of(&rows), "{filled:?}");
@@ -237,10 +259,19 @@ pub fn ledger_open_filled_in_parts<S: ContractStore, F: Fn() -> Result<S>>(open:
 pub fn ledger_open_parts_bounded_by_bytes<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_open_parts_bounded_by_bytes_with(open, ROWS_PER_FILL, FILL_BYTES)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_open_parts_bounded_by_bytes_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    rows_per_fill: usize,
+    fill_bytes: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_ledger_open_bytes")?;
     let mut events = Events::default();
-    let pad = "x".repeat(FILL_BYTES + 1);
+    let pad = "x".repeat(fill_bytes + 1);
     for n in [1, 2] {
         events
             .claimed(n, true)
@@ -253,9 +284,9 @@ pub fn ledger_open_parts_bounded_by_bytes<S: ContractStore, F: Fn() -> Result<S>
         .collect();
     write_rows(&tx, &rows)?;
     as_before_the_table(&tx)?;
-    ensure!(open_in::fill(&tx)? == Filled::Through(run_key(1)));
-    ensure!(open_in::fill(&tx)? == Filled::Through(run_key(2)));
-    ensure!(open_in::fill(&tx)? == Filled::Done);
+    ensure!(open_in::fill_with(&tx, rows_per_fill, fill_bytes)? == Filled::Through(run_key(1)));
+    ensure!(open_in::fill_with(&tx, rows_per_fill, fill_bytes)? == Filled::Through(run_key(2)));
+    ensure!(open_in::fill_with(&tx, rows_per_fill, fill_bytes)? == Filled::Done);
     ensure!(open_in::entries(&tx)? == table_of(&rows));
     Ok(())
 }

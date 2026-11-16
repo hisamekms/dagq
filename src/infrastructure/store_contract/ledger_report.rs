@@ -416,7 +416,7 @@ fn clocks_in_the_range(settled: usize) -> Log {
     log
 }
 
-/// [`super::ledger_queue_named::named_history_with`] of 30 settled units
+/// [`super::ledger_queue_named::named_history_with`] of the scoped background units
 /// and `changes` changes of the plan of task 66, a task of proposal 8 that
 /// a task of the range names, with task 66's history (its changes, its run
 /// landed and its turns) moved to its second day: before the range of every
@@ -426,7 +426,7 @@ fn clocks_in_the_range(settled: usize) -> Log {
 /// whose second step reads the plan changes from it to the range (the one
 /// exception, [`ledger_report_keeps_an_old_snapshot`]'s).
 fn member_changes(changes: usize) -> Log {
-    let log = super::ledger_queue_named::named_history_with(30, changes);
+    let log = super::ledger_queue_named::named_history_with(super::fixed_history_units(), changes);
     let task = crate::domain::TaskId::new(66);
     let run = super::ledger_earlier::run(66);
     let mut events = log.events;
@@ -455,7 +455,19 @@ fn member_changes(changes: usize) -> Log {
 pub fn ledger_report_past_a_named_task_s_history<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
-    let reads = compare(open, 30, LARGE, Fixture::Named(member_changes), equal)?;
+    ledger_report_past_a_named_task_s_history_with(open, 30, LARGE)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_report_past_a_named_task_s_history_with<
+    S: ContractStore,
+    F: Fn() -> Result<S>,
+>(
+    open: &F,
+    small: usize,
+    large: usize,
+) -> Result<()> {
+    let reads = compare(open, small, large, Fixture::Named(member_changes), equal)?;
     ensure!(
         reads[0].iter().all(|read| read.views),
         "every caller reads by the views: {:?}",
@@ -477,11 +489,20 @@ pub fn ledger_report_past_a_named_task_s_history<S: ContractStore, F: Fn() -> Re
 pub fn ledger_report_past_a_target_s_ends<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_report_past_a_target_s_ends_with(open, 30, LARGE)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_report_past_a_target_s_ends_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    small: usize,
+    large: usize,
+) -> Result<()> {
     past_a_target_s_ends(
         open,
         Fixture::Lives(super::ledger_queue_lives::ends_log),
-        30,
-        LARGE,
+        small,
+        large,
     )
 }
 
@@ -659,24 +680,43 @@ pub fn ledger_report_past_the_queue_and_the_clocks_of<S: ContractStore, F: Fn() 
     open: &F,
     history: QueueAndClocks,
 ) -> Result<()> {
+    ledger_report_past_the_queue_and_the_clocks_with(open, history, 30, LARGE)
+}
+
+/// The same queue and clock cases with both history sizes explicit.
+pub(crate) fn ledger_report_past_the_queue_and_the_clocks_with<
+    S: ContractStore,
+    F: Fn() -> Result<S>,
+>(
+    open: &F,
+    history: QueueAndClocks,
+    small: usize,
+    large: usize,
+) -> Result<()> {
     match history {
         QueueAndClocks::SharedLives => {
-            compare(open, 30, LARGE, Fixture::Lives(shared_lives), equal)?;
+            compare(open, small, large, Fixture::Lives(shared_lives), equal)?;
         }
         QueueAndClocks::UnsharedLives => {
-            compare(open, 30, LARGE, Fixture::Lives(unshared_lives), equal)?;
+            compare(open, small, large, Fixture::Lives(unshared_lives), equal)?;
         }
         QueueAndClocks::ClockSetBack => {
             compare(
                 open,
-                30,
-                LARGE,
+                small,
+                large,
                 Fixture::Named(super::ledger_queue_named::clock_history),
                 equal,
             )?;
         }
         QueueAndClocks::ClocksInTheRange => {
-            compare(open, 30, LARGE, Fixture::Named(clocks_in_the_range), equal)?;
+            compare(
+                open,
+                small,
+                large,
+                Fixture::Named(clocks_in_the_range),
+                equal,
+            )?;
         }
         // CI's checks alone, written after main's event ahead of now with
         // times before it: the report's event cursor stands behind that
@@ -688,14 +728,14 @@ pub fn ledger_report_past_the_queue_and_the_clocks_of<S: ContractStore, F: Fn() 
         QueueAndClocks::CiOnly => {
             compare(
                 open,
-                30,
-                LARGE,
+                small,
+                large,
                 Fixture::Named(super::ledger_queue_named::ci_only_history),
                 |n, a, b| matches!(n, 1 | 2 | 4) || a == b,
             )?;
         }
         QueueAndClocks::RangeClocks => {
-            compare(open, 30, LARGE, Fixture::Range, |_, a, b| {
+            compare(open, small, large, Fixture::Range, |_, a, b| {
                 (a.rows, a.earlier, a.by_range) == (b.rows, b.earlier, b.by_range)
             })?;
         }
@@ -712,7 +752,15 @@ pub fn ledger_report_past_the_queue_and_the_clocks_of<S: ContractStore, F: Fn() 
 pub fn ledger_report_keeps_an_old_snapshot<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
-    let (small, large) = (30, LARGE);
+    ledger_report_keeps_an_old_snapshot_with(open, 30, LARGE)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_report_keeps_an_old_snapshot_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    small: usize,
+    large: usize,
+) -> Result<()> {
     let reads = compare(
         open,
         small,

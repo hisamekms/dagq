@@ -68,8 +68,12 @@ fn all_minima(tx: &impl SqlRead) -> Result<Firsts> {
 }
 
 fn fill(tx: &impl SqlWrite) -> Result<()> {
+    fill_with(tx, ROWS_PER_FILL, FILL_BYTES)
+}
+
+fn fill_with(tx: &impl SqlWrite, rows: usize, bytes: usize) -> Result<()> {
     for _ in 0..1000 {
-        if view::first_fill(tx)?.is_done() {
+        if view::first_fill_with(tx, rows, bytes)?.is_done() {
             return Ok(());
         }
     }
@@ -147,24 +151,33 @@ pub fn ledger_first_executions_generations<S: ContractStore, F: Fn() -> Result<S
 pub fn ledger_first_executions_parts<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
+    ledger_first_executions_parts_with(open, ROWS_PER_FILL, FILL_BYTES)
+}
+
+/// The same contract with explicit fixture sizes.
+pub(crate) fn ledger_first_executions_parts_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    rows_per_fill: usize,
+    fill_bytes: usize,
+) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_first_parts")?;
-    for n in 0..ROWS_PER_FILL + 1 {
+    for n in 0..rows_per_fill + 1 {
         view::write_row(&tx, &row(n, n as i64))?;
     }
     tx.execute("DELETE FROM ledger_first_executions_ready", sql_params![])?;
-    let part = view::first_fill(&tx)?;
+    let part = view::first_fill_with(&tx, rows_per_fill, fill_bytes)?;
     ensure!(matches!(part, Filled::Through(_)));
     ensure!(!view::first_held(&tx)?);
-    fill(&tx)?;
+    fill_with(&tx, rows_per_fill, fill_bytes)?;
     ensure!(view::first_held(&tx)? && entries(&tx)? == all_minima(&tx)?);
     let mut large = row(0, -100);
-    large.detail["executions"][0]["padding"] = json!("x".repeat(FILL_BYTES + 1));
+    large.detail["executions"][0]["padding"] = json!("x".repeat(fill_bytes + 1));
     view::write_row(&tx, &large)?;
     tx.execute("DELETE FROM ledger_first_executions_ready", sql_params![])?;
-    ensure!(view::first_fill(&tx)? == Filled::Through(large.key));
+    ensure!(view::first_fill_with(&tx, rows_per_fill, fill_bytes)? == Filled::Through(large.key));
     ensure!(!view::first_held(&tx)?);
-    fill(&tx)?;
+    fill_with(&tx, rows_per_fill, fill_bytes)?;
     ensure!(view::first_held(&tx)? && entries(&tx)? == all_minima(&tx)?);
     Ok(())
 }

@@ -44,10 +44,11 @@ pub const FILL_TIME: std::time::Duration = std::time::Duration::from_millis(100)
 pub const FILL_BYTES: usize = super::builder::SESSION_BYTES_PER_WRITE;
 
 /// Whether a part of the filling that read `bytes` of records over
-/// `elapsed` ends after the row it took last: past [`FILL_BYTES`] or
-/// [`FILL_TIME`].
-pub fn part_spent(bytes: usize, elapsed: std::time::Duration) -> bool {
-    bytes >= FILL_BYTES || elapsed >= FILL_TIME
+/// `elapsed` ends after the row it took last: at `fill_bytes` or
+/// [`FILL_TIME`]. The store supplies [`FILL_BYTES`]; contracts can cross
+/// the same byte boundary with smaller rows.
+pub fn part_spent(bytes: usize, elapsed: std::time::Duration, fill_bytes: usize) -> bool {
+    bytes >= fill_bytes || elapsed >= FILL_TIME
 }
 
 /// One thing a run row leaves open at its end.
@@ -233,11 +234,12 @@ impl Filled {
     /// What a part of the filling leaves that read `keys` keys past
     /// [`Self::after`] and took in the first `taken` of them, the last
     /// `last`: done when it took every key it read and they were fewer
-    /// than [`ROWS_PER_FILL`], as no row is past them; else through the
-    /// last it took.
-    pub fn next(keys: usize, taken: usize, last: Option<&str>) -> Self {
+    /// than `rows_per_fill`, as no row is past them; else through the
+    /// last it took. The store supplies [`ROWS_PER_FILL`]; contracts can
+    /// cross the same page boundary with fewer rows.
+    pub fn next(keys: usize, taken: usize, last: Option<&str>, rows_per_fill: usize) -> Self {
         match last {
-            Some(key) if taken < keys || keys >= ROWS_PER_FILL => Self::Through(key.to_owned()),
+            Some(key) if taken < keys || keys >= rows_per_fill => Self::Through(key.to_owned()),
             _ => Self::Done,
         }
     }

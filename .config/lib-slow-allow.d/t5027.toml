@@ -1,0 +1,352 @@
+# Real SQLite store-contract boundaries above infrastructure's 1 s limit
+# (ADR-t5020-1). Seconds are from name-filtered nextest runs at six test
+# threads, with unit and volume measured separately. Each volume item
+# names the corresponding small interference contract.
+
+# 26.320 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::kpi_compare_groups_read_by_their_range"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 21.842 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_earlier_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 50.925 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 13.873 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_forecast_through_kpi"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 7.297 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_keeps_an_old_snapshot"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 31.792 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 32.659 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_filled_part_way"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 32.996 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_of_another_generation"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 33.322 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_of_no_generation"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 34.271 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_record_without_ci_by_time"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 35.042 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_record_without_main_by_time"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 35.440 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_summary_without_its_record"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 34.312 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_mark"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 33.947 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_marks_of_the_rows"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 34.370 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_tables"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 58.552 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_past_a_clock_set_back"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 34.513 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_with_only_ci_after_a_future_main_event"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 22.859 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_range_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 65.033 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 62.693 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_keeps_an_old_snapshot"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 66.034 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_a_named_task_s_history"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 69.126 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_a_target_s_ends"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 78.189 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_a_clock_set_back"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 69.561 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_a_life_of_each_unit"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 66.043 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_ci_alone_after_a_future_main_event"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 63.159 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_lives_shared_by_the_units"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 64.247 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_the_clocks_in_the_range"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 57.321 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_the_range_s_clocks"
+reason = "境界（実 SQLite の store 契約）: 小さい件数でも run の順で前の case が commit した行・世代・索引の上で、全ての問いが単独と同じ答えを返すこと。apart の前後で DB 全体の内容が同じであることも、実物の書き込みと読みで確かめる"
+task = 5027
+
+# 98.945 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::the_cases_not_apart"
+reason = "境界（実 SQLite の store 契約）: run の順に同じ DB で非 apart の case を通す。古い writer の後の 3 case の検査を省かず、後の case が会う commit 済みの行・世代・索引を、書き込みだけの再生と同じ形で残すこと"
+task = 5027
+
+# 101.430 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::kpi_compare_groups_read_by_their_range"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::kpi_compare_groups_read_by_their_range"
+task = 5027
+
+# 74.144 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_earlier_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_earlier_answers_as_every_row"
+task = 5027
+
+# 188.061 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_lives_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_answers_as_every_row"
+task = 5027
+
+# 39.012 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_lives_forecast_through_kpi"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_forecast_through_kpi"
+task = 5027
+
+# 24.797 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_lives_keeps_an_old_snapshot"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_lives_keeps_an_old_snapshot"
+task = 5027
+
+# 155.829 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_answers_as_every_row"
+task = 5027
+
+# 116.742 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_a_mark_filled_part_way"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_filled_part_way"
+task = 5027
+
+# 119.625 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_a_mark_of_another_generation"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_of_another_generation"
+task = 5027
+
+# 122.819 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_a_mark_of_no_generation"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_mark_of_no_generation"
+task = 5027
+
+# 132.229 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_a_record_without_ci_by_time"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_record_without_ci_by_time"
+task = 5027
+
+# 121.870 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_a_record_without_main_by_time"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_record_without_main_by_time"
+task = 5027
+
+# 120.603 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_a_summary_without_its_record"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_a_summary_without_its_record"
+task = 5027
+
+# 119.266 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_no_mark"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_mark"
+task = 5027
+
+# 114.555 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_no_marks_of_the_rows"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_marks_of_the_rows"
+task = 5027
+
+# 117.240 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_goes_back_whole_of_no_tables"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_goes_back_whole_of_no_tables"
+task = 5027
+
+# 210.349 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_past_a_clock_set_back"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_past_a_clock_set_back"
+task = 5027
+
+# 129.293 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_queue_named_with_only_ci_after_a_future_main_event"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_queue_named_with_only_ci_after_a_future_main_event"
+task = 5027
+
+# 188.900 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_range_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_range_answers_as_every_row"
+task = 5027
+
+# 263.308 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_answers_as_every_row"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_answers_as_every_row"
+task = 5027
+
+# 204.115 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_keeps_an_old_snapshot"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_keeps_an_old_snapshot"
+task = 5027
+
+# 182.756 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_a_named_task_s_history"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_a_named_task_s_history"
+task = 5027
+
+# 230.075 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_a_target_s_ends"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_a_target_s_ends"
+task = 5027
+
+# 254.876 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_the_queue_and_the_clocks_of_a_clock_set_back"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_a_clock_set_back"
+task = 5027
+
+# 139.054 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_the_queue_and_the_clocks_of_a_life_of_each_unit"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_a_life_of_each_unit"
+task = 5027
+
+# 245.669 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_the_queue_and_the_clocks_of_ci_alone_after_a_future_main_event"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_ci_alone_after_a_future_main_event"
+task = 5027
+
+# 246.089 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_the_queue_and_the_clocks_of_lives_shared_by_the_units"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_lives_shared_by_the_units"
+task = 5027
+
+# 239.677 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_the_queue_and_the_clocks_of_the_clocks_in_the_range"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_the_clocks_in_the_range"
+task = 5027
+
+# 244.705 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::ledger_report_past_the_queue_and_the_clocks_of_the_range_s_clocks"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::ledger_report_past_the_queue_and_the_clocks_of_the_range_s_clocks"
+task = 5027
+
+# 218.189 s
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::volume::the_cases_not_apart"
+reason = "境界（実 SQLite の store 契約）: 全 case を元の件数で run の順に同じ DB で通し、前の case の commit と同じ行・世代・索引の上で、単独と同じ答えと apart の rollback を確かめる。同じ契約の小さい版は infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database::the_cases_not_apart"
+task = 5027

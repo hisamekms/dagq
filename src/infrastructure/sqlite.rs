@@ -3514,6 +3514,13 @@ mod store_contract_tests {
     fn ledger_report_past_a_target_s_ends() {
         contract(|open| store_contract::ledger_report_past_a_target_s_ends(&open));
     }
+    /// The small interference contract: the same named cases and order as
+    /// `store_contract::run`, with the reduced rollback-only sizes documented
+    /// by `store_contract::cases_sized`. Committing predecessors keep exactly
+    /// their rows, even in writes-alone replay. Each case still answers as
+    /// alone and every apart case must leave the whole DB content unchanged.
+    /// `volume` runs this identical sequence at Postgres's original sizes.
+    ///
     /// `store_contract::run` in its order on the same database, as the
     /// Postgres example runs it: each case meets the rows the cases before
     /// it leave, and answers as alone. The cases named in `apart!` (the
@@ -3526,9 +3533,9 @@ mod store_contract_tests {
     /// that no test runs them apart: they run with their checks in
     /// `the_cases_not_apart`, and as their writes alone in the tests of the
     /// cases of `apart!` after them ([`store_contract::writes_alone`]),
-    /// which so meet the database `run` gives them. Each case runs in full
-    /// in one test of the mod: its units and checks are its own test's and
-    /// Postgres's.
+    /// which so meet the database `run` gives them. Each case runs with all
+    /// its checks once per size, with original units in `volume` and reduced
+    /// units in this mod.
     mod all_cases_run_in_order_on_the_same_database {
         use super::*;
 
@@ -3585,11 +3592,17 @@ mod store_contract_tests {
             Ok(content)
         }
 
-        fn in_order(full: Option<&str>) {
+        fn in_order(full: Option<&str>, small: bool) {
             let uri = format!("file:/store-contract-{}?vfs=memdb", uuid::Uuid::new_v4());
             let _keeper = SqliteQueue::init(&uri).unwrap();
-            store_contract::run_apart(&|| SqliteQueue::open(&uri), APART, full, &|| content(&uri))
-                .unwrap();
+            store_contract::run_apart(
+                &|| SqliteQueue::open(&uri),
+                APART,
+                full,
+                &|| content(&uri),
+                small,
+            )
+            .unwrap();
         }
 
         /// Each name a test of a case of `run` apart, and the case's name.
@@ -3599,15 +3612,36 @@ mod store_contract_tests {
                 $(
                     #[test]
                     fn $test() {
-                        in_order(Some($case));
+                        in_order(Some($case), true);
                     }
                 )*
+
+                /// All named cases at their original counts: 30/300 units
+                /// (30/150 for report variants), production fill row/byte
+                /// bounds, and all fixed cases unchanged. Shares `run`'s
+                /// case list and sizes with Postgres. The small tests in
+                /// the parent keep the same order, checks and committed rows.
+                mod volume {
+                    use super::*;
+
+                    #[test]
+                    fn the_cases_not_apart() {
+                        in_order(None, false);
+                    }
+
+                    $(
+                        #[test]
+                        fn $test() {
+                            in_order(Some($case), false);
+                        }
+                    )*
+                }
             };
         }
 
         #[test]
         fn the_cases_not_apart() {
-            in_order(None);
+            in_order(None, true);
         }
 
         /// `run` has a case of each state and of each history its split
