@@ -65,8 +65,7 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 
 ## 責務と境界
 
-- 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じtransactionにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
-- 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
+- domainとstoreの判断の境界は[ADR-t5151-1](../adr/2026-11-17-t5151-1-domain-commands-facts-and-layer-responsibilities.md)の決定1〜4・6に従う。
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
   Postgresの読み書きの入口は`src/infrastructure/postgres/`。
 - Postgresの実行のportが共有のSQLの引数・値・行を写し、storeは方言ごとのSQLを持たない。
@@ -112,8 +111,7 @@ runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`
 
 - 入口: task・goal・依存・claim・一覧は`src/infrastructure/task_store.rs`、runと計測はportごとの`runtime_store/`。
 - 読む: 行から`TaskRecord`などを組んで`restore`で復元し、復元が拒んだ行は変換エラーになる（既定値に読み替えない）。
-- 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。
-  `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
+- 事実の取得・コマンドの返り値の保存・SQLの条件の役割は[ADR-t5151-1](../adr/2026-11-17-t5151-1-domain-commands-facts-and-layer-responsibilities.md)の決定1〜3、復元は決定5に従う。
 - owner（ADR-t3989-1）: goalに属するtaskはownerを持たずgoalの行から読み、goalの無いtaskだけが自分のownerを持つ。
   所属を変える書き込みは同じtransactionで、goalに入れるtaskのownerを空にし、goalから外すtaskに外す前のgoalのownerを写す。
 - 着地の印（ADR-t3988-1）: goalの印は`goal_landing_marks`に置き、tagの書き込みは触れない。

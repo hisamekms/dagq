@@ -118,6 +118,8 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
 
 ### レイヤーの規則
 
+集約のコマンドと事実、ドメインサービス、applicationとstoreの責務の詳細は[ADR-t5151-1](../adr/2026-11-17-t5151-1-domain-commands-facts-and-layer-responsibilities.md)に従う。
+
 - **L1** `src/domain`のコードはapplication・infrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ。
   例外は共有の部品の`crate::build_id`（I/Oを持たない規則と`named_commit`）だけ。

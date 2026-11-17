@@ -81,9 +81,8 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 
 ## 責務と境界
 
-- domain（`src/domain/`）は状態と遷移の判断、拒否の分類（`DomainError`）、記録するeventを決め、I/Oをしない（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
-- applicationとinfrastructureは「読む → domainの関数に渡す → 返った値を保存する」だけで、SQLの中で業務の判断をしない（[persistence](persistence.md#集約の読み書き)）。
-- 集約の欄は非公開で、作る・変える入口はそのmoduleの関数だけで、保存済みの行の復元（`restore`）は作成時の規則を当て直さない。
+集約のコマンド・事実・event、ドメインサービスと公開境界、applicationとstoreの責務は[ADR-t5151-1](../adr/2026-11-17-t5151-1-domain-commands-facts-and-layer-responsibilities.md)の決定1〜6に従う。
+
 - runの状態のうちstatusの外のもの（承認・回数・待ち）は列にせず、`run_events`を`RunHistory`に畳み込んで読む。
 - CLIのJSONの欄名とeventのkind名・理由のコードは公開の契約で、名前を変えない（ADR-0016、ADR-0034）。
 
