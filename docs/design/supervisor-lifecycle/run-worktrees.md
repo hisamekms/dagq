@@ -32,6 +32,8 @@ scratchの命名は `domain::recheck_scratch_name`、restoreの互換は `replan
 
 人の答えを待つrunなどがビルド成果物を持ち続けると、空き容量が足りずclaimと着地が控えられる（[空き容量](claim-hold.md#空き容量)）。
 誰も作業していないrunの答え待ちなら通常の掃除で、他の待ちなら空き容量のための掃除でビルド成果物を消す。
+開いたaskがstalledだけの答え待ちはビルド成果物を残し、turnの時間上限で止まった後のresume待ちは空き容量のための削除からだけ外すが、いずれも古いcacheの通常の掃除には残す。
+理由は[待ちの間の削除の測定](../../plans/run-incremental-removal-on-wait-spike.md#後続の実装の-task-への推奨)を読む。
 対象と区別を知りたいときは `WorktreeCleanup` を読む。
 宣言したprofileのビルド成果物だけを消し、Gitが追跡するソースは残す（入口は `cleanup::remove_build_outputs`、宣言の責務は[Toolchain profiles](../toolchain-profiles.md#buildの出力の置き場)）。
 

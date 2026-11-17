@@ -72,6 +72,8 @@ adopt側が同じ待ちを続けるためで、待ちを失効させる記録の
 
 待ちのrunはleaseとslotを持つため、終わったrunや誰も作業していないrunの通常の掃除の候補にならない。
 空き容量のための掃除では、待ちのrunもturnが終わって何も動いていないときだけビルド成果物を消す。
+ただし、開いたaskがstalledだけの答え待ちとturnの時間上限で止まった後のresume待ちはビルド成果物を残し、どちらも古いcacheの通常の掃除には残す。
+理由は[待ちの間の削除の測定](../../plans/run-incremental-removal-on-wait-spike.md#後続の実装の-task-への推奨)を読む。
 通常の掃除で消せるのは次のbuildが読まない古いcacheだけで、同じ排他を守る（[終わっていないrunのビルド成果物](run-worktrees.md#終わっていないrunのビルド成果物)）。
 
 待ちのrunを掃除へ渡す境界は `Supervisor::waiting_worktrees`、候補の選び方は `cleanup::waiting_candidate`、消す直前の再確認は `cleanup::still_waiting` を読む。

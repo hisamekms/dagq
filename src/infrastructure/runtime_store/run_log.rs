@@ -1611,8 +1611,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
     /// there. With them, the `awaiting_integration` and `needs_session`
     /// runs of a task that goes on with no lease at all and no session
     /// heartbeating (task 1289): [`WorktreeCleanup::AwaitingAnswer`] when
-    /// an ask of the run is open and unanswered, else
-    /// [`WorktreeCleanup::Idle`].
+    /// a non-stalled ask of the run is open and unanswered, else
+    /// [`WorktreeCleanup::Idle`]. Stalled-only waits and resume waits
+    /// after an explicit last-turn time limit keep their build outputs
+    /// but remain candidates for stale-cache pruning; AwaitingAnswer is
+    /// unaffected by time limits.
     pub fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
         let live = self.live_leased_runs()?;
         let tx = self.read_entry("ended_run_worktrees")?;
@@ -1628,12 +1631,25 @@ impl<E: TransactionEntries> StoreQueue<E> {
             |row| self.ended_run_worktree_row(row),
         )?;
         let mut worktrees = Vec::new();
+        drop(tx);
         for row in rows {
             if !live.contains(&row.run_id) {
-                worktrees.push(row);
+                worktrees.push(self.cleanup_wait(row)?);
             }
         }
         Ok(worktrees)
+    }
+
+    /// Read evidence only for a possible C2 wait, then classify it purely.
+    fn cleanup_wait(&self, mut row: EndedRunWorktree) -> Result<EndedRunWorktree> {
+        let time_limited =
+            if row.cleanup == WorktreeCleanup::Idle && row.status == RunStatus::NeedsSession {
+                crate::domain::exit::last_turn_time_limited(&self.run_events(&row.run_id)?)
+            } else {
+                false
+            };
+        row.cleanup = cleanup_after_turn_limit(row.cleanup, row.status, time_limited);
+        Ok(row)
     }
 
     /// Run `id` as [`Self::ended_run_worktrees`] would list it, or `None`
@@ -1653,13 +1669,18 @@ impl<E: TransactionEntries> StoreQueue<E> {
         if lease.is_some_and(|lease| !lease_is_stale(&lease, now)) {
             return Ok(None);
         }
-        Ok(SqlRead::query_row(
+        let row = SqlRead::query_row(
             &tx,
             &ended_run_worktree_sql(),
             sql_params![now, HEARTBEAT_TIMEOUT_SECS, id],
             |row| self.ended_run_worktree_row(row),
         )
-        .optional()?)
+        .optional()?;
+        drop(tx);
+        match row {
+            Some(row) => Ok(Some(self.cleanup_wait(row)?)),
+            None => Ok(None),
+        }
     }
 
     /// A row of [`ENDED_RUN_WORKTREES`].
@@ -1667,6 +1688,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
         let run_id: RunId = row.get(0)?;
         let ended: bool = row.get(5)?;
         let ask: Option<i64> = row.get(6)?;
+        let cleanup = answer_cleanup(
+            ended,
+            ask.map(AskId::new),
+            row.get::<_, Option<i64>>(8)?.map(AskId::new),
+        );
         Ok(EndedRunWorktree {
             worktree: RunPaths::new(&self.runs_dir, &run_id)
                 .with_layout_of(row.get::<_, Option<String>>(7)?.as_deref())
@@ -1678,11 +1704,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
             status: enum_col(row, "run_status")?,
             task_status: enum_col(row, "task_status")?,
             branch: row.get(4)?,
-            cleanup: match (ended, ask) {
-                (true, _) => WorktreeCleanup::Ended,
-                (false, Some(ask)) => WorktreeCleanup::AwaitingAnswer(AskId::new(ask)),
-                (false, None) => WorktreeCleanup::Idle,
-            },
+            cleanup,
         })
     }
 
@@ -1707,6 +1729,36 @@ impl<E: TransactionEntries> StoreQueue<E> {
     }
 }
 
+/// C2 preserves only a needs_session Idle run's outputs. Ordinary answer
+/// cleanup stays unchanged, and the row remains available to stale pruning.
+fn cleanup_after_turn_limit(
+    cleanup: WorktreeCleanup,
+    status: RunStatus,
+    time_limited: bool,
+) -> WorktreeCleanup {
+    if cleanup == WorktreeCleanup::Idle && status == RunStatus::NeedsSession && time_limited {
+        WorktreeCleanup::StaleOnly {
+            ask: None,
+            leased: false,
+        }
+    } else {
+        cleanup
+    }
+}
+
+/// Stalled-only waits keep their outputs while still pruning stale caches.
+fn answer_cleanup(ended: bool, ask: Option<AskId>, open: Option<AskId>) -> WorktreeCleanup {
+    match (ended, ask, open) {
+        (true, _, _) => WorktreeCleanup::Ended,
+        (false, Some(ask), _) => WorktreeCleanup::AwaitingAnswer(ask),
+        (false, None, None) => WorktreeCleanup::Idle,
+        (false, None, Some(ask)) => WorktreeCleanup::StaleOnly {
+            ask: Some(ask),
+            leased: false,
+        },
+    }
+}
+
 /// The runs of [`SqliteQueue::ended_run_worktrees`] but for their live
 /// leases, which the caller leaves out; `?1` is now and `?2`
 /// [`HEARTBEAT_TIMEOUT_SECS`].
@@ -1715,8 +1767,11 @@ const ENDED_RUN_WORKTREES: &str =
             (r.status IN ('integrated','succeeded','failed','interrupted')
              OR t.status IN ('completed','canceled')) AS ended,
             (SELECT min(a.id) FROM asks a
-             WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL) AS ask_id,
-            r.worktree_path
+             WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL
+               AND a.kind <> 'stalled') AS ask_id,
+            r.worktree_path,
+            (SELECT min(a.id) FROM asks a WHERE a.run_id=r.id
+             AND a.answered_at IS NULL AND a.closed_at IS NULL) AS open_ask_id
      FROM task_runs r
      JOIN tasks t ON t.id=r.task_id
      WHERE r.worktree_path IS NOT NULL
@@ -2387,6 +2442,172 @@ mod tests {
         let (subject, closed) = state(&queue, hold_ask);
         assert_eq!(subject.as_deref(), Some(RULESETS_ASK_SUBJECT));
         assert!(closed.is_some(), "the hold's own ask is closed on resume");
+    }
+
+    #[test]
+    fn cleanup_after_turn_limit_preserves_only_idle_needs_session_outputs() {
+        let ask = AskId::new(7);
+        for (cleanup, status, limited, expected) in [
+            (
+                WorktreeCleanup::Idle,
+                RunStatus::NeedsSession,
+                true,
+                WorktreeCleanup::StaleOnly {
+                    ask: None,
+                    leased: false,
+                },
+            ),
+            (
+                WorktreeCleanup::Idle,
+                RunStatus::NeedsSession,
+                false,
+                WorktreeCleanup::Idle,
+            ),
+            (
+                WorktreeCleanup::Idle,
+                RunStatus::AwaitingIntegration,
+                true,
+                WorktreeCleanup::Idle,
+            ),
+            (
+                WorktreeCleanup::AwaitingAnswer(ask),
+                RunStatus::NeedsSession,
+                true,
+                WorktreeCleanup::AwaitingAnswer(ask),
+            ),
+            (
+                WorktreeCleanup::Ended,
+                RunStatus::Succeeded,
+                true,
+                WorktreeCleanup::Ended,
+            ),
+            (
+                WorktreeCleanup::StaleOnly {
+                    ask: Some(ask),
+                    leased: false,
+                },
+                RunStatus::NeedsSession,
+                true,
+                WorktreeCleanup::StaleOnly {
+                    ask: Some(ask),
+                    leased: false,
+                },
+            ),
+        ] {
+            assert_eq!(
+                cleanup_after_turn_limit(cleanup, status, limited),
+                expected,
+                "{cleanup:?}, {status:?}, limited={limited}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_kind_keeps_stalled_only_for_stale_caches() {
+        let ask = AskId::new(7);
+        assert_eq!(
+            answer_cleanup(false, None, Some(ask)),
+            WorktreeCleanup::StaleOnly {
+                ask: Some(ask),
+                leased: false
+            }
+        );
+        assert_eq!(answer_cleanup(false, None, None), WorktreeCleanup::Idle);
+        assert_eq!(
+            answer_cleanup(false, Some(ask), Some(ask)),
+            WorktreeCleanup::AwaitingAnswer(ask)
+        );
+        for open in [None, Some(ask)] {
+            assert_eq!(answer_cleanup(true, None, open), WorktreeCleanup::Ended);
+            assert_eq!(
+                answer_cleanup(true, Some(ask), open),
+                WorktreeCleanup::Ended
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_reads_preserve_answer_cleanup_and_keep_exclusions_for_stale_caches() {
+        let queue = rulesets_queue("cleanup-asks");
+        queue.conn.execute("INSERT INTO tasks(id,title,description,acceptance,verification_commands,status,created_at,updated_at) VALUES (1,'t','','','[]','in_progress','2026-11-07T00:00:00.000Z','2026-11-07T00:00:00.000Z')", []).unwrap();
+        let run = RunId::new("cleanup").unwrap();
+        queue.conn.execute("INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,created_at,worktree_path) VALUES (?1,1,'needs_session','codex','codex','0000000000000000000000000000000000000000','2026-11-07T00:00:00.000Z','worktree')", [run.as_str()]).unwrap();
+        let check = |expected: Option<WorktreeCleanup>| {
+            let one = queue.ended_run_worktree(&run).unwrap().map(|r| r.cleanup);
+            let all: Vec<_> = queue
+                .ended_run_worktrees()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.cleanup)
+                .collect();
+            assert_eq!(one, expected);
+            assert_eq!(all, expected.into_iter().collect::<Vec<_>>());
+        };
+        let ask = |kind: &str| {
+            queue.conn.execute("INSERT INTO asks(kind,task_id,run_id,question,asked_by,reason_category) VALUES (?1,1,?2,'q','supervisor','scope')", rusqlite::params![kind, run.as_str()]).unwrap();
+            AskId::new(queue.conn.last_insert_rowid())
+        };
+        check(Some(WorktreeCleanup::Idle));
+        let stalled = ask("stalled");
+        check(Some(WorktreeCleanup::StaleOnly {
+            ask: Some(stalled),
+            leased: false,
+        }));
+        let other = ask("worker_question");
+        let later = ask("approve_landing");
+        check(Some(WorktreeCleanup::AwaitingAnswer(other)));
+        queue
+            .conn
+            .execute(
+                "UPDATE asks SET answered_at=1 WHERE id=?1",
+                [other.as_i64()],
+            )
+            .unwrap();
+        check(Some(WorktreeCleanup::AwaitingAnswer(later)));
+        queue
+            .conn
+            .execute("UPDATE asks SET closed_at=1 WHERE id=?1", [later.as_i64()])
+            .unwrap();
+        check(Some(WorktreeCleanup::StaleOnly {
+            ask: Some(stalled),
+            leased: false,
+        }));
+        queue
+            .conn
+            .execute(
+                "UPDATE asks SET closed_at=1 WHERE id=?1",
+                [stalled.as_i64()],
+            )
+            .unwrap();
+        check(Some(WorktreeCleanup::Idle));
+        // One representative read proves that run_events reaches the C2
+        // classifier. Its decision cases live in the pure tests above and
+        // domain::exit, rather than being repeated on SQLite.
+        append_turn_event(&queue, run.as_str(), "turn_started", serde_json::json!({}));
+        append_turn_event(
+            &queue,
+            run.as_str(),
+            "exit_requested",
+            serde_json::json!({"reason":"resume_timeout"}),
+        );
+        append_turn_event(
+            &queue,
+            run.as_str(),
+            "turn_finished",
+            serde_json::json!({"outcome":"stopped"}),
+        );
+        check(Some(WorktreeCleanup::StaleOnly {
+            ask: None,
+            leased: false,
+        }));
+        queue
+            .conn
+            .execute(
+                "UPDATE task_runs SET status='succeeded' WHERE id=?1",
+                [run.as_str()],
+            )
+            .unwrap();
+        check(Some(WorktreeCleanup::Ended));
     }
 
     /// Equal timestamps and reverse-sorted text IDs must keep insertion

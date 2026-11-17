@@ -1631,9 +1631,31 @@ pub(super) fn resume_deadline(
     sent: Instant,
     stall: &StallConfig,
     stale_waits: bool,
-) -> Option<&'static str> {
-    (passed(now, sent, stall.resume_timeout()) && !stale_waits)
-        .then_some("did not finish within the resume timeout")
+) -> Option<(&'static str, ExitReason)> {
+    (passed(now, sent, stall.resume_timeout()) && !stale_waits).then_some((
+        "did not finish within the resume timeout",
+        ExitReason::ResumeTimeout,
+    ))
+}
+
+/// Idle takes precedence over the deadline; an unresolved receipt must
+/// be idle since the latest input, a resolved one idle after its receipt.
+fn resume_idle_exit(
+    unresolved: bool,
+    idle_since_input: bool,
+    idle_after_receipt: bool,
+) -> Option<(&'static str, ExitReason)> {
+    if unresolved {
+        idle_since_input.then_some((
+            "went idle without a resolving receipt",
+            ExitReason::IdleUnresolved,
+        ))
+    } else {
+        idle_after_receipt.then_some((
+            "rewrote its receipt and went idle",
+            ExitReason::IdleAfterReceipt,
+        ))
+    }
 }
 
 /// [`ResumeWatch::restart_clocks`] on the request's send time `sent` and
@@ -1659,11 +1681,16 @@ fn restart_clocks<T>(
 
 impl ResumeWatch {
     /// Record the exit request before writing its file, and stop live recovery.
-    fn request_exit(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+    fn request_exit(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        reason: ExitReason,
+    ) -> Result<()> {
         sv.queue.record_runtime_event_now(
             run.id(),
             EventKind::ExitRequested,
-            json!({"workspace_id": self.workspace, "resume_attempt": self.attempt}),
+            reason.payload(json!({"workspace_id": self.workspace, "resume_attempt": self.attempt})),
         )?;
         self.end_live(sv, run)?;
         self.exit_requested = Some(sv.generators.clock.monotonic());
@@ -1874,7 +1901,7 @@ impl ResumeWatch {
         }
         if matches!(pulse, WrapperPulse::Silent) && self.exit_requested.is_none() {
             // Ask once, the way a person would; never kill the session.
-            self.request_exit(sv, run)?;
+            self.request_exit(sv, run, ExitReason::HeartbeatExpired)?;
             warn!(run_id = %run.id(), "resumed session of {} lost its wrapper heartbeat; exit requested", run.id());
             self.exit_for_silence = true;
         }
@@ -1964,9 +1991,9 @@ impl ResumeWatch {
         let Some(run_git::SessionHead { head, clean, .. }) =
             run_git::polled_session_head(&*sv.repository, run)?
         else {
-            if let Some(why) = self.deadline(sv) {
+            if let Some((why, reason)) = self.deadline(sv) {
                 self.settle_stale(sv, run)?;
-                self.request_exit(sv, run)?;
+                self.request_exit(sv, run, reason)?;
                 info!(run_id = %run.id(), "resumed session of {} {why} (its facts not read yet); exit requested", run.id());
             }
             return Ok(None);
@@ -2009,39 +2036,35 @@ impl ResumeWatch {
         // idle after that request answers it; and only one after the last
         // input typed (an answer) is this turn's.
         let answered_from = self.stale.map_or(input_at, |n| n.at.max(input_at));
-        let why = match verdict {
-            ResumeOutcome::Unresolved
-                if idle
-                    .as_ref()
-                    .is_some_and(|idle| idle.idle_since(answered_from)) =>
-            {
-                if self.stale.is_none()
-                    && let Some(stale) = stale_receipt(sv, run)
-                {
-                    let workspace = self.workspace.clone();
-                    if let Some((nudge, start)) = nudge_stale_receipt(
-                        sv,
-                        run,
-                        &workspace,
-                        RESUME_PHASE,
-                        Some(self.attempt),
-                        &stale,
-                    )? {
-                        self.stale = Some(nudge);
-                        self.start = Some(start);
-                        return Ok(None);
-                    }
-                }
-                Some("went idle without a resolving receipt")
+        let unresolved = matches!(verdict, ResumeOutcome::Unresolved);
+        let idle_since_input = idle
+            .as_ref()
+            .is_some_and(|idle| idle.idle_since(answered_from));
+        if unresolved
+            && idle_since_input
+            && self.stale.is_none()
+            && let Some(stale) = stale_receipt(sv, run)
+        {
+            let workspace = self.workspace.clone();
+            if let Some((nudge, start)) = nudge_stale_receipt(
+                sv,
+                run,
+                &workspace,
+                RESUME_PHASE,
+                Some(self.attempt),
+                &stale,
+            )? {
+                self.stale = Some(nudge);
+                self.start = Some(start);
+                return Ok(None);
             }
-            ResumeOutcome::Unresolved => None,
-            _ => idle_after_receipt.then_some("rewrote its receipt and went idle"),
         }
-        .or_else(|| self.deadline(sv));
-        if let Some(why) = why {
+        let why = resume_idle_exit(unresolved, idle_since_input, idle_after_receipt)
+            .or_else(|| self.deadline(sv));
+        if let Some((why, reason)) = why {
             self.settle_stale(sv, run)?;
             // Ask once, the way a person would; never kill the session.
-            self.request_exit(sv, run)?;
+            self.request_exit(sv, run, reason)?;
             info!(run_id = %run.id(), "resumed session of {} {why} (head {head}); exit requested", run.id());
         }
         Ok(None)
@@ -2049,7 +2072,7 @@ impl ResumeWatch {
 
     /// Why the session is to be asked to exit by the request's clock,
     /// restarted by the inputs a poll saw ([`resume_deadline`]).
-    fn deadline(&self, sv: &Supervisor<'_>) -> Option<&'static str> {
+    fn deadline(&self, sv: &Supervisor<'_>) -> Option<(&'static str, ExitReason)> {
         let (sent, _) = self.message_sent?;
         // A request to rewrite a stale receipt gets its own timeout.
         let stale_waits = self
@@ -2122,6 +2145,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resume_idle_exit_distinguishes_receipt_resolution() {
+        assert_eq!(
+            resume_idle_exit(true, true, false),
+            Some((
+                "went idle without a resolving receipt",
+                ExitReason::IdleUnresolved
+            ))
+        );
+        assert_eq!(
+            resume_idle_exit(false, true, true),
+            Some((
+                "rewrote its receipt and went idle",
+                ExitReason::IdleAfterReceipt
+            ))
+        );
+        assert_eq!(resume_idle_exit(true, false, true), None);
+        assert_eq!(resume_idle_exit(false, true, false), None);
+        assert_eq!(resume_idle_exit(false, false, false), None);
+    }
+
     /// A resumed session is asked to exit at its resume timeout since the
     /// request (or the input that restarted it), not a millisecond before,
     /// and not while a request to rewrite a stale receipt waits for its
@@ -2144,7 +2188,10 @@ mod tests {
         );
         assert_eq!(
             resume_deadline(sent + timeout, sent, &stall, false),
-            Some("did not finish within the resume timeout")
+            Some((
+                "did not finish within the resume timeout",
+                ExitReason::ResumeTimeout
+            ))
         );
         assert_eq!(resume_deadline(sent + timeout, sent, &stall, true), None);
         let restarted = sent + timeout - MS;

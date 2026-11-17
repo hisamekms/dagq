@@ -1,6 +1,7 @@
 //! Worker wrapper shutdown through its exit request file.
 use super::*;
 use crate::domain::EventKind;
+pub(super) use crate::domain::exit::ExitReason;
 pub(super) use crate::domain::waiting::WaitPhase;
 
 pub(super) struct ExitWatch {
@@ -9,6 +10,7 @@ pub(super) struct ExitWatch {
     /// the watch has no timeout, it waits for the wrapper to end).
     pub(super) requested: bool,
     pub(super) then: AfterExit,
+    pub(super) reason: ExitReason,
 }
 impl ExitWatch {
     pub(super) fn new(session: Option<SessionRef>, then: AfterExit) -> Self {
@@ -16,6 +18,7 @@ impl ExitWatch {
             session,
             requested: false,
             then,
+            reason: ExitReason::TurnEnded,
         }
     }
     /// Whether the session ended. A wrapper that already recorded its exit
@@ -40,7 +43,8 @@ impl ExitWatch {
             sv.queue.record_runtime_event_now(
                 run.id(),
                 EventKind::ExitRequested,
-                json!({"workspace_id": session.workspace}),
+                self.reason
+                    .payload(json!({"workspace_id": session.workspace})),
             )?;
             submit(sv, run, &session.workspace, Input::Exit, "exit request")?;
             self.requested = true;

@@ -620,14 +620,15 @@ impl Supervisor<'_> {
                             }
                         }
                     }
-                    ReviseOutcome::Ended(why) => {
+                    ReviseOutcome::Ended(why, reason) => {
                         info!(run_id = %slot.run.id(), "run {}: the session {why} after {label}; asking a person", slot.run.id());
                         let then = watch.fix.ask(
                             format!("the session {why}"),
                             format!("the session {why} after {label}"),
                             None,
                         );
-                        let exit = ExitWatch::new(Some(session), then);
+                        let mut exit = ExitWatch::new(Some(session), then);
+                        exit.reason = reason;
                         slot.transition(Phase::Exiting(exit), "fix_ended", &*self.queue);
                     }
                 }

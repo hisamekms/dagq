@@ -5,6 +5,65 @@
 
 use std::time::Duration;
 
+/// The `reason` of `exit_requested`, serialized by [`Self::payload`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitReason {
+    /// `resume_timeout`: a resume turn reached its configured time limit.
+    ResumeTimeout,
+    /// `revise_deadline`: a revise/conflict turn reached its time limit.
+    ReviseDeadline,
+    /// `idle_unresolved`: idle without a receipt resolving the request.
+    IdleUnresolved,
+    /// `idle_after_receipt`: idle after the rewritten receipt.
+    IdleAfterReceipt,
+    /// `heartbeat_expired`: the wrapper stopped heartbeating.
+    HeartbeatExpired,
+    /// `turn_ended`: exit after the turn/stage ended for another reason.
+    TurnEnded,
+}
+
+impl ExitReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResumeTimeout => "resume_timeout",
+            Self::ReviseDeadline => "revise_deadline",
+            Self::IdleUnresolved => "idle_unresolved",
+            Self::IdleAfterReceipt => "idle_after_receipt",
+            Self::HeartbeatExpired => "heartbeat_expired",
+            Self::TurnEnded => "turn_ended",
+        }
+    }
+
+    /// Add the reason without changing the caller's existing payload keys.
+    pub fn payload(self, mut payload: serde_json::Value) -> serde_json::Value {
+        payload["reason"] = self.as_str().into();
+        payload
+    }
+}
+
+/// Whether the last started turn stopped at a recorded time limit.
+/// Event ids delimit turns, never elapsed time. Legacy exit requests with
+/// no reason are not evidence; a later turn start clears earlier limits.
+pub fn last_turn_time_limited(events: &[crate::domain::views::RunEvent]) -> bool {
+    use crate::domain::EventKind;
+    let start = events
+        .iter()
+        .filter(|e| e.kind == EventKind::TurnStarted)
+        .map(|e| e.id)
+        .max();
+    events
+        .iter()
+        .filter(|e| start.is_none_or(|start| e.id > start))
+        .any(|e| {
+            (e.kind == EventKind::ExitRequested
+                && matches!(
+                    e.payload["reason"].as_str(),
+                    Some("resume_timeout" | "revise_deadline")
+                ))
+                || (e.kind == EventKind::TurnFinished && e.payload["outcome"] == "timed_out")
+        })
+}
+
 /// The retries of a `/exit` after its timeout, by default.
 pub const EXIT_RETRIES: usize = 3;
 
@@ -124,6 +183,77 @@ impl ExitScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_reasons_preserve_existing_keys_and_distinguish_causes() {
+        for (reason, name) in [
+            (ExitReason::ResumeTimeout, "resume_timeout"),
+            (ExitReason::ReviseDeadline, "revise_deadline"),
+            (ExitReason::IdleUnresolved, "idle_unresolved"),
+            (ExitReason::IdleAfterReceipt, "idle_after_receipt"),
+            (ExitReason::HeartbeatExpired, "heartbeat_expired"),
+            (ExitReason::TurnEnded, "turn_ended"),
+        ] {
+            for old in [
+                serde_json::json!({"workspace_id":"w"}),
+                serde_json::json!({"workspace_id":"w", "resume_attempt":2}),
+                serde_json::json!({"workspace_id":"w", "timeout_secs":30}),
+            ] {
+                let mut actual = reason.payload(old.clone());
+                assert_eq!(
+                    actual.as_object_mut().unwrap().remove("reason"),
+                    Some(name.into())
+                );
+                assert_eq!(actual, old);
+            }
+        }
+    }
+
+    fn event(
+        id: i64,
+        kind: crate::domain::EventKind,
+        payload: serde_json::Value,
+    ) -> crate::domain::views::RunEvent {
+        crate::domain::views::RunEvent {
+            id: crate::domain::EventId::new(id),
+            kind: kind.into(),
+            payload,
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            actor: None,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn last_turn_limits_require_explicit_records_and_clear_at_the_next_start() {
+        use crate::domain::EventKind::*;
+        use serde_json::json;
+        for (kind, payload, limited) in [
+            (ExitRequested, json!({"reason":"resume_timeout"}), true),
+            (ExitRequested, json!({"reason":"revise_deadline"}), true),
+            (TurnFinished, json!({"outcome":"timed_out"}), true),
+            (ExitRequested, json!({"reason":"idle_unresolved"}), false),
+            (ExitRequested, json!({"reason":"idle_after_receipt"}), false),
+            (ExitRequested, json!({"reason":"heartbeat_expired"}), false),
+            (ExitRequested, json!({"reason":"turn_ended"}), false),
+            (ExitRequested, json!({"timeout_secs":3600}), false),
+            (ExitRequested, json!({"reason":"unknown"}), false),
+            (TurnFinished, json!({"outcome":"stopped"}), false),
+        ] {
+            let mut events = vec![event(2, kind, payload), event(1, TurnStarted, json!({}))];
+            assert_eq!(last_turn_time_limited(&events), limited, "{events:?}");
+            // Finishing after the supervisor's exit does not hide its reason.
+            events.push(event(3, TurnFinished, json!({"outcome":"stopped"})));
+            assert_eq!(last_turn_time_limited(&events), limited);
+            events.push(event(4, TurnStarted, json!({})));
+            assert!(!last_turn_time_limited(&events));
+            events.push(event(5, TurnFinished, json!({"outcome":"completed"})));
+            assert!(!last_turn_time_limited(&events));
+        }
+        assert!(!last_turn_time_limited(&[]));
+    }
 
     #[test]
     fn default_is_three_retries_thirty_sixty_and_one_hundred_twenty_seconds_apart() {

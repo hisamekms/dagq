@@ -92,10 +92,11 @@ use crate::application::{
     EndedRunWorktree, HostOpsQueue, RUN_TMP_DIR, WorktreeAdmin, WorktreeCleanup,
     host_verification_tmp_path,
 };
-use crate::domain::EventKind;
 use crate::domain::disk::{ProcessExecutable, worktree_executables};
+use crate::domain::exit::last_turn_time_limited;
 use crate::domain::recovery::{ProcessInfo, run_processes};
 use crate::domain::toolchain::{BUILTIN, Toolchains};
+use crate::domain::{AskKind, EventKind};
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -436,14 +437,16 @@ fn add_disk_request(
     pending.add(None, Some(request));
 }
 
-/// Whether only a cleanup for disk space removes what a candidate left:
-/// the build outputs of a run nobody works on that waits for no answer, or
-/// of one this supervisor leases that waits outside its slots or for the
-/// landing slot.
+/// Whether a candidate belongs to the sweep of quiescent runs: outputs
+/// removed only for disk space, or only stale caches even for disk space.
+/// This includes unleased idle runs, offered waits and landing-slot waits.
 const fn for_room_only(cleanup: WorktreeCleanup) -> bool {
     matches!(
         cleanup,
-        WorktreeCleanup::Idle | WorktreeCleanup::Waiting(_) | WorktreeCleanup::Landing
+        WorktreeCleanup::Idle
+            | WorktreeCleanup::Waiting(_)
+            | WorktreeCleanup::Landing
+            | WorktreeCleanup::StaleOnly { .. }
     )
 }
 
@@ -463,6 +466,9 @@ fn build_outputs_record(
     size: &Size,
 ) -> (String, Value) {
     let (reason, why) = match cleanup {
+        WorktreeCleanup::StaleOnly { .. } => {
+            unreachable!("stale-only cleanup never removes build outputs")
+        }
         WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
         WorktreeCleanup::AwaitingAnswer(ask) => (
             BUILD_OUTPUTS_AWAITING_ANSWER,
@@ -502,8 +508,12 @@ fn stale_entries_record(
 ) -> (String, Value) {
     let (reason, why) = match cleanup {
         WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
-        WorktreeCleanup::Idle => (STALE_ENTRIES_IDLE, String::new()),
-        WorktreeCleanup::AwaitingAnswer(ask) | WorktreeCleanup::Waiting(ask) => (
+        WorktreeCleanup::Idle | WorktreeCleanup::StaleOnly { ask: None, .. } => {
+            (STALE_ENTRIES_IDLE, String::new())
+        }
+        WorktreeCleanup::AwaitingAnswer(ask)
+        | WorktreeCleanup::Waiting(ask)
+        | WorktreeCleanup::StaleOnly { ask: Some(ask), .. } => (
             BUILD_OUTPUTS_AWAITING_ANSWER,
             format!(", waiting for the answer to ask {ask}"),
         ),
@@ -513,7 +523,10 @@ fn stale_entries_record(
         ),
     };
     let mut payload = json!({"paths": paths, "entries": entries, "bytes": size.bytes, "by": "supervisor", "reason": reason});
-    if let WorktreeCleanup::AwaitingAnswer(ask) | WorktreeCleanup::Waiting(ask) = cleanup {
+    if let WorktreeCleanup::AwaitingAnswer(ask)
+    | WorktreeCleanup::Waiting(ask)
+    | WorktreeCleanup::StaleOnly { ask: Some(ask), .. } = cleanup
+    {
         payload["ask_id"] = json!(ask);
     }
     size.mark(&mut payload);
@@ -766,7 +779,10 @@ fn leave_pruned(
 /// The candidate a waiting run is to a cleanup for disk space
 /// ([`WorktreeCleanup::Waiting`]): only once its last turn finished after
 /// the last one requested ([`turn_idle`]), for the oldest ask its wait
-/// holds that is still `open`. Its task goes on, as the run is leased.
+/// holds that is still `open` and not stalled. A needs_session run whose
+/// last turn reached its time limit keeps its outputs for resume, but
+/// remains a StaleOnly candidate along with stalled-only waits.
+/// Its task goes on, as the run is leased.
 /// The wait may begin before the turn finishes, so its start is not
 /// evidence of quiescence. WorktreeCleanup::Waiting retains the open ask.
 /// The supervisor offers only its headless ongoing waits, not returning
@@ -774,12 +790,27 @@ fn leave_pruned(
 fn waiting_candidate(
     run: &WaitingRun,
     events: &[RunEvent],
-    open: impl Fn(AskId) -> bool,
+    open: impl Fn(AskId) -> Option<AskKind>,
 ) -> Option<EndedRunWorktree> {
     if !turn_idle(events) {
         return None;
     }
-    let ask = run.asks.iter().copied().find(|ask| open(*ask))?;
+    let mut stalled = None;
+    let (ask, kind) = run
+        .asks
+        .iter()
+        .copied()
+        .find_map(|ask| {
+            let kind = open(ask)?;
+            if kind == AskKind::Stalled {
+                stalled.get_or_insert(ask);
+                None
+            } else {
+                Some((ask, kind))
+            }
+        })
+        .or_else(|| stalled.map(|ask| (ask, AskKind::Stalled)))?;
+    let cleanup = waiting_cleanup(run.status, events, ask, kind)?;
     Some(EndedRunWorktree {
         run_id: run.run_id.clone(),
         task_id: run.task_id,
@@ -787,8 +818,36 @@ fn waiting_candidate(
         task_status: TaskStatus::InProgress,
         worktree: run.worktree.clone(),
         branch: run.branch.clone(),
-        cleanup: WorktreeCleanup::Waiting(ask),
+        cleanup,
     })
+}
+
+/// The same classification is used when offering a wait and immediately
+/// before cleaning it. Output exclusions never exclude stale-cache pruning.
+fn waiting_cleanup(
+    status: RunStatus,
+    events: &[RunEvent],
+    ask: AskId,
+    kind: AskKind,
+) -> Option<WorktreeCleanup> {
+    if !turn_idle(events) {
+        return None;
+    }
+    Some(
+        if kind == AskKind::Stalled || !waiting_outputs_eligible(status, events) {
+            WorktreeCleanup::StaleOnly {
+                ask: Some(ask),
+                leased: true,
+            }
+        } else {
+            WorktreeCleanup::Waiting(ask)
+        },
+    )
+}
+
+/// Both selection and the job's final check use the same turn boundary.
+fn waiting_outputs_eligible(status: RunStatus, events: &[RunEvent]) -> bool {
+    turn_idle(events) && !(status == RunStatus::NeedsSession && last_turn_time_limited(events))
 }
 
 /// Whether no turn of the run runs nor is about to: of its turn events
@@ -1634,9 +1693,9 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
         &ports.stop,
         candidates,
         |candidate| match candidate.cleanup {
-            WorktreeCleanup::Waiting(_) | WorktreeCleanup::Landing => {
-                still_waiting(&*queue, ports, candidate)
-            }
+            WorktreeCleanup::Waiting(_)
+            | WorktreeCleanup::StaleOnly { leased: true, .. }
+            | WorktreeCleanup::Landing => still_waiting(&*queue, ports, candidate),
             _ => queue.ended_run_worktree(&candidate.run_id),
         },
         |candidate, outcomes| {
@@ -1756,7 +1815,8 @@ fn waiting_candidates(
             let candidate = waiting_candidate(&run, &events, |ask| {
                 queue
                     .read_ask(ask)
-                    .is_ok_and(|ask| ask.answered_at.is_none() && ask.closed_at.is_none())
+                    .ok().filter(|ask| ask.answered_at.is_none() && ask.closed_at.is_none())
+                    .map(|ask| ask.kind)
             })?;
             Some((candidate, session_pids(&events)))
         })
@@ -1838,6 +1898,21 @@ fn still_waiting(
     let run = &candidate.run_id;
     if queue.run(run)?.status() != candidate.status {
         return Ok(None);
+    }
+    if let WorktreeCleanup::Waiting(ask)
+    | WorktreeCleanup::StaleOnly {
+        ask: Some(ask),
+        leased: true,
+    } = candidate.cleanup
+    {
+        let events = queue.run_events(run)?;
+        let now = queue.read_ask(ask)?;
+        if now.answered_at.is_some()
+            || now.closed_at.is_some()
+            || waiting_cleanup(candidate.status, &events, ask, now.kind) != Some(candidate.cleanup)
+        {
+            return Ok(None);
+        }
     }
     let SessionPids { wrapper, agent, .. } = ports.waiting.get(run).copied().unwrap_or_default();
     let worktree = Path::new(&candidate.worktree);
@@ -1933,9 +2008,10 @@ fn clean_candidate(
 
 /// Whether a job removes only the stale caches of a candidate's worktree
 /// ([`remove_stale_entries`]): a run whose build outputs only a cleanup
-/// for room removes, in a job not for room.
+/// for room removes, in a job not for room; output-excluded waits retain
+/// this pruning in both kinds of job.
 const fn stale_only(room: bool, cleanup: WorktreeCleanup) -> bool {
-    !room && for_room_only(cleanup)
+    matches!(cleanup, WorktreeCleanup::StaleOnly { .. }) || (!room && for_room_only(cleanup))
 }
 
 /// Whether the job removes a candidate's runner: only an ended run's
@@ -4371,7 +4447,7 @@ mod tests {
             asks: vec![AskId::new(5), AskId::new(6)],
         };
         use event_kind::{TURN_FINISHED as F, TURN_REQUESTED as Q, TURN_STARTED as S};
-        let open = |ask: AskId| ask != AskId::new(5);
+        let open = |ask: AskId| (ask != AskId::new(5)).then_some(AskKind::WorkerQuestion);
         for (events, idle) in [
             (vec![], false),
             (vec![(1, Q)], false),
@@ -4413,7 +4489,90 @@ mod tests {
             }
         }
         let finished = [turn_event(1, S), turn_event(2, F)];
-        assert_eq!(waiting_candidate(&run, &finished, |_| false), None);
+        assert_eq!(waiting_candidate(&run, &finished, |_| None), None);
+    }
+
+    #[test]
+    fn waiting_cleanup_skips_stalled_and_time_limited_resume_waits() {
+        let run = WaitingRun {
+            run_id: RunId::new("wait").unwrap(),
+            task_id: TaskId::new(1),
+            status: RunStatus::NeedsSession,
+            worktree: "/runs/w/worktree".into(),
+            branch: None,
+            asks: vec![AskId::new(1), AskId::new(2)],
+        };
+        let finished = vec![
+            turn_event(1, "turn_started"),
+            turn_event(3, "turn_finished"),
+        ];
+        assert_eq!(
+            waiting_candidate(&run, &finished, |_| Some(AskKind::Stalled))
+                .unwrap()
+                .cleanup,
+            WorktreeCleanup::StaleOnly {
+                ask: Some(AskId::new(1)),
+                leased: true
+            }
+        );
+        for kind in [AskKind::WorkerQuestion, AskKind::ApproveLanding] {
+            let picked = waiting_candidate(&run, &finished, |id| {
+                Some(if id == AskId::new(1) {
+                    AskKind::Stalled
+                } else {
+                    kind.clone()
+                })
+            })
+            .unwrap();
+            assert_eq!(picked.cleanup, WorktreeCleanup::Waiting(AskId::new(2)));
+            assert_eq!(
+                waiting_candidate(&run, &finished, |_| Some(kind.clone()))
+                    .unwrap()
+                    .cleanup,
+                WorktreeCleanup::Waiting(AskId::new(1))
+            );
+        }
+        for (kind, payload, eligible) in [
+            ("exit_requested", json!({"reason":"resume_timeout"}), false),
+            ("exit_requested", json!({"reason":"revise_deadline"}), false),
+            ("turn_finished", json!({"outcome":"timed_out"}), false),
+            ("exit_requested", json!({"reason":"idle_unresolved"}), true),
+            (
+                "exit_requested",
+                json!({"reason":"idle_after_receipt"}),
+                true,
+            ),
+            (
+                "exit_requested",
+                json!({"reason":"heartbeat_expired"}),
+                true,
+            ),
+            ("exit_requested", json!({"reason":"turn_ended"}), true),
+            ("exit_requested", json!({"timeout_secs":3600}), true),
+        ] {
+            let mut events = finished.clone();
+            let mut stop = turn_event(2, kind);
+            stop.payload = payload;
+            events.push(stop);
+            assert_eq!(waiting_outputs_eligible(run.status, &events), eligible);
+            assert_eq!(
+                waiting_candidate(&run, &events, |_| Some(AskKind::WorkerQuestion))
+                    .unwrap()
+                    .cleanup,
+                if eligible {
+                    WorktreeCleanup::Waiting(AskId::new(1))
+                } else {
+                    WorktreeCleanup::StaleOnly {
+                        ask: Some(AskId::new(1)),
+                        leased: true,
+                    }
+                }
+            );
+            events.push(turn_event(4, "turn_started"));
+            assert!(!waiting_outputs_eligible(run.status, &events));
+            events.push(turn_event(5, "turn_finished"));
+            assert!(waiting_outputs_eligible(run.status, &events));
+        }
     }
 
     /// Something runs for a waiting run while a process works in its
@@ -4761,6 +4920,12 @@ mod tests {
         for cleanup in [WorktreeCleanup::Ended, WorktreeCleanup::AwaitingAnswer(ask)] {
             assert!(!stale_only(false, cleanup) && !stale_only(true, cleanup));
         }
+        for leased in [false, true] {
+            for ask in [None, Some(ask)] {
+                let cleanup = WorktreeCleanup::StaleOnly { ask, leased };
+                assert!(stale_only(false, cleanup) && stale_only(true, cleanup));
+            }
+        }
     }
 
     /// `incremental_sessions_removed` names the directories, how many
@@ -4782,6 +4947,21 @@ mod tests {
                 payload("awaiting_landing_slot")
             )
         );
+        for leased in [false, true] {
+            assert_eq!(
+                record(WorktreeCleanup::StaleOnly { ask: None, leased }),
+                (String::new(), payload("idle"))
+            );
+            let mut expected = payload("awaiting_answer");
+            expected["ask_id"] = json!(8);
+            assert_eq!(
+                record(WorktreeCleanup::StaleOnly {
+                    ask: Some(AskId::new(8)),
+                    leased
+                }),
+                (", waiting for the answer to ask 8".to_owned(), expected)
+            );
+        }
         let mut waiting = payload("awaiting_answer");
         waiting["ask_id"] = json!(8);
         assert_eq!(
@@ -5039,6 +5219,49 @@ mod tests {
                 &["q"],
             ),
         ])
+    }
+
+    #[test]
+    fn excluded_outputs_still_prune_old_incremental_sessions_in_both_jobs() {
+        for room in [false, true] {
+            for (ask, leased) in [
+                (None, false),
+                (Some(AskId::new(7)), false),
+                (Some(AskId::new(7)), true),
+            ] {
+                let files = Arc::new(two_crates());
+                let repository = Arc::new(Removing::default());
+                let ports = JobPorts {
+                    files: files.clone(),
+                    room,
+                    ..job_ports(CacheFiles::default(), &repository)
+                };
+                let run = EndedRunWorktree {
+                    cleanup: WorktreeCleanup::StaleOnly { ask, leased },
+                    status: RunStatus::NeedsSession,
+                    ..candidate("idle", TaskStatus::InProgress)
+                };
+                let mut outcomes = Vec::new();
+                clean_candidate(&ports, &run, &mut None, &mut false, &mut outcomes);
+                assert!(matches!(
+                    outcomes.as_slice(),
+                    [Outcome::StaleEntries { .. }]
+                ));
+                assert_eq!(
+                    files.listed(&format!("{INCREMENTAL}/a-1")),
+                    ["s-00b-r-y", "s-00b-r.lock"]
+                );
+                assert_eq!(
+                    files.listed(&format!("{INCREMENTAL}/b-2")),
+                    ["s-00b-r-y", "s-00b-r.lock"]
+                );
+                assert!(
+                    lock_cleaning(&ports.cleaning)
+                        .pruned
+                        .contains_key(&run.run_id)
+                );
+            }
+        }
     }
 
     /// A removal that fails after another went returns what went (its

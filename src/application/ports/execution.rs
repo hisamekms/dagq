@@ -1053,7 +1053,7 @@ pub enum WorktreeCleanup {
     Ended,
     /// An `awaiting_integration` or `needs_session` run of a task that goes
     /// on, with no lease and no live session, waiting for a person's
-    /// answer to this ask, its oldest one open and unanswered (task 1289):
+    /// answer to this ask, its oldest non-stalled one open and unanswered:
     /// its build outputs go on every cleanup.
     AwaitingAnswer(AskId),
     /// Such a run with no ask waiting for an answer (queued to land, or
@@ -1062,10 +1062,17 @@ pub enum WorktreeCleanup {
     Idle,
     /// A run the supervisor itself leases, waiting outside its slots
     /// (ADR-0071) for a person's answer to this ask, its oldest one the
-    /// wait holds open, with no turn running: no listing of the queue
+    /// wait holds open other than stalled, with no turn running and no
+    /// last-turn time limit awaiting a resume: no listing of the queue
     /// returns it, the supervisor offers it to a cleanup for disk space
     /// alone, which removes its build outputs while the wait holds still.
     Waiting(AskId),
+    /// Keep the build outputs even for disk space, but still remove old
+    /// cache entries no build reads. `ask` retains the oldest open ask of
+    /// a stalled-only wait, or the ask a leased wait holds. `leased` means
+    /// the supervisor offers and rechecks the run through its waiting slot;
+    /// otherwise the store's unleased-run read rechecks it.
+    StaleOnly { ask: Option<AskId>, leased: bool },
     /// A run the supervisor itself leases that waits in its slot for the
     /// landing slot, with nothing running for it: no listing of the queue
     /// returns it, the supervisor offers it to a cleanup for disk space

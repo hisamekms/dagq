@@ -1,0 +1,19 @@
+[[test]]
+name = "compose::wiring_tests::exit_reasons::a_workers_lost_heartbeat_records_its_exit_reason"
+reason = "境界: 本物の supervisor・queue service・SQLite の memdb と wrapper を通し、worker の heartbeat 喪失が session の writer から exit_requested に届くことを確かめる。1 run の1 turnだけを使い、間隔は1 msに縮め、記録を観測したら drain する。reason の文字列と既存キーの保持の判断は domain::exit の pure unit test が持つ。"
+task = 5144
+
+[[test]]
+name = "compose::wiring_tests::exit_reasons::a_resumes_lost_heartbeat_records_its_exit_reason"
+reason = "境界: 本物の supervisor・queue service・SQLite の memdb と wrapper を通し、send_back 後の resume の heartbeat 喪失が request_exit の reason と resume_attempt の記録に届くことを確かめる。同じ1 run の最初の turn と resume がこの writer を通す最小構成になる。間隔は1 msに縮め、記録を観測したら drain する。reason の変換は domain::exit の pure unit test が持つ。"
+task = 5144
+
+[[test]]
+name = "compose::wiring_tests::exit_reasons::a_revises_lost_heartbeat_reaches_the_exit_watch_record"
+reason = "境界: 本物の supervisor・queue service・SQLite の memdb と wrapper を通し、review の revise 中の heartbeat 喪失が ReviseOutcome、slot の遷移、ExitWatch を経て exit_requested に届くことを確かめる。1 run の最初の turn と revise がこの配線を通す最小構成になる。間隔は1 msに縮め、記録を観測したら drain し、判断の case は domain/application の pure unit test に分離している。"
+task = 5144
+
+[[test]]
+name = "compose::wiring_tests::exit_reasons::a_finished_turn_records_turn_ended_when_the_supervisor_exits_its_session"
+reason = "境界: 本物の supervisor・queue service・SQLite の memdb と wrapper を通し、turn_finished の後に ExitWatch が turn_ended の exit_requested を書く順序と記録を確かめる。1 run の1 turnだけを使い、間隔は1 msに縮め、記録を観測したら drain する。reason の変換は domain::exit の pure unit test が持つ。"
+task = 5144

@@ -809,7 +809,7 @@ impl SessionWatch {
                     sv.queue.record_runtime_event_now(
                         run.id(),
                         EventKind::ExitRequested,
-                        json!({"workspace_id": self.workspace, "timeout_secs": timeout.as_secs()}),
+                        ExitReason::HeartbeatExpired.payload(json!({"workspace_id": self.workspace, "timeout_secs": timeout.as_secs()})),
                     )?;
                     let workspace = self.workspace.clone();
                     submit(sv, run, &workspace, Input::Exit, "/exit")?;

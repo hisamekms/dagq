@@ -1129,6 +1129,10 @@ pub const DRAFT_REVISIT_CLEARED: &str = EventKind::DraftRevisitCleared.as_str();
 pub const DRAFT_REVISIT_DUE: &str = EventKind::DraftRevisitDue.as_str();
 pub const DRAFT_REVISIT_SET: &str = EventKind::DraftRevisitSet.as_str();
 pub const EVIDENCE_MISSING: &str = EventKind::EvidenceMissing.as_str();
+/// A supervisor's request for its session to exit. `workspace_id` names
+/// the session; resume requests retain `resume_attempt`, and a session
+/// heartbeat exit retains `timeout_secs`. `reason` is an
+/// [`crate::domain::exit::ExitReason`]; old records may lack it.
 pub const EXIT_REQUESTED: &str = EventKind::ExitRequested.as_str();
 pub const EXIT_REQUEST_TIMED_OUT: &str = EventKind::ExitRequestTimedOut.as_str();
 /// A retry of a `/exit` the session held back (ADR-0047 decision 25):

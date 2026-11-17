@@ -962,7 +962,10 @@ mod tests {
         }
         assert_eq!(
             resume_deadline(back + TIMEOUT, sent, &stall(), false),
-            Some("did not finish within the resume timeout")
+            Some((
+                "did not finish within the resume timeout",
+                crate::domain::exit::ExitReason::ResumeTimeout
+            ))
         );
         let stale = watch.stale.unwrap();
         assert_eq!(stale.at, files.now());

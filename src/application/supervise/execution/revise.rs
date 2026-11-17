@@ -197,7 +197,7 @@ pub(super) enum ReviseOutcome {
     /// fail the run and its work, so the session is asked to fix it.
     Mismatch(ReasonCode, String),
     /// The session will not rewrite it: why.
-    Ended(String),
+    Ended(String, ExitReason),
 }
 
 /// Whether `idle` ends the turn of the revise: written after the last input
@@ -226,10 +226,13 @@ pub(super) fn revise_deadline(
 ) -> Option<ReviseOutcome> {
     let timeout = stall.resume_timeout();
     passed(now, sent, timeout).then(|| {
-        ReviseOutcome::Ended(format!(
-            "did not rewrite the receipt within {} seconds",
-            timeout.as_secs()
-        ))
+        ReviseOutcome::Ended(
+            format!(
+                "did not rewrite the receipt within {} seconds",
+                timeout.as_secs()
+            ),
+            ExitReason::ReviseDeadline,
+        )
     })
 }
 
@@ -313,6 +316,7 @@ pub(super) fn turn_outcome(
     if !rewritten && idle_since_input {
         return TurnOutcome::Ends(ReviseOutcome::Ended(
             "went idle without rewriting the receipt".to_owned(),
+            ExitReason::IdleUnresolved,
         ));
     }
     TurnOutcome::CheckDeadline
@@ -414,7 +418,7 @@ impl ReviseWatch {
         let outcome = self.observe(sv, run)?;
         if matches!(
             outcome,
-            Some(ReviseOutcome::Rewritten(_) | ReviseOutcome::Ended(_))
+            Some(ReviseOutcome::Rewritten(_) | ReviseOutcome::Ended(_, _))
         ) {
             // The revise ends here: a dialog recorded during it is no
             // attention any more.
@@ -510,6 +514,7 @@ impl ReviseWatch {
             }
             return Ok(Some(ReviseOutcome::Ended(
                 "ended before it rewrote the receipt".to_owned(),
+                ExitReason::TurnEnded,
             )));
         };
         if sv.generators.clock.now() - wrapper.heartbeat_at > HEARTBEAT_TIMEOUT_SECS {
@@ -520,12 +525,14 @@ impl ReviseWatch {
             if !alive {
                 return Ok(Some(ReviseOutcome::Ended(
                     "died without recording its exit".to_owned(),
+                    ExitReason::HeartbeatExpired,
                 )));
             }
             // The exit that follows sends the /exit.
             return Ok(Some(ReviseOutcome::Ended(
                 "went silent (its wrapper stopped heartbeating while its process lives on)"
                     .to_owned(),
+                ExitReason::HeartbeatExpired,
             )));
         }
         // A silence its wait recorded ended before the revise did: the
@@ -678,10 +685,12 @@ mod tests {
         let timeout = Duration::from_secs(1800);
         assert!(revise_deadline(sent, sent, &stall).is_none());
         assert!(revise_deadline(sent + timeout - ms, sent, &stall).is_none());
-        let Some(ReviseOutcome::Ended(why)) = revise_deadline(sent + timeout, sent, &stall) else {
+        let Some(ReviseOutcome::Ended(why, reason)) = revise_deadline(sent + timeout, sent, &stall)
+        else {
             panic!("a revise at its timeout ends");
         };
         assert_eq!(why, "did not rewrite the receipt within 1800 seconds");
+        assert_eq!(reason, ExitReason::ReviseDeadline);
         let restarted = sent + timeout - ms;
         assert!(revise_deadline(sent + timeout, restarted, &stall).is_none());
         assert!(revise_deadline(restarted + timeout, restarted, &stall).is_some());
@@ -758,10 +767,12 @@ mod tests {
         // Idle since the last input without a rewritten receipt, it ends
         // with no deadline to check (no clock read); otherwise the resume
         // timeout decides (`a_revise_ends_at_its_resume_timeout_since_the_last_send`).
-        let TurnOutcome::Ends(ReviseOutcome::Ended(why)) = turn_outcome(false, false, true) else {
+        let TurnOutcome::Ends(ReviseOutcome::Ended(why, reason)) = turn_outcome(false, false, true)
+        else {
             panic!("an idle session without a rewritten receipt ends");
         };
         assert_eq!(why, "went idle without rewriting the receipt");
+        assert_eq!(reason, ExitReason::IdleUnresolved);
         assert!(matches!(
             turn_outcome(false, false, false),
             TurnOutcome::CheckDeadline
@@ -898,8 +909,8 @@ mod tests {
         );
         assert!(matches!(
             turn_outcome(false, false, true),
-            TurnOutcome::Ends(ReviseOutcome::Ended(why))
-                if why == "went idle without rewriting the receipt"
+            TurnOutcome::Ends(ReviseOutcome::Ended(why, reason))
+                if why == "went idle without rewriting the receipt" && reason == ExitReason::IdleUnresolved
         ));
     }
 
