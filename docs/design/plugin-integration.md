@@ -104,7 +104,9 @@ inbox / plannerの初期promptはruntimeが生成し（[Prompt](supervisor-lifec
 
 inbox（唯一の常駐session）とplanner（proposalごとのオンデマンドのsession）は状態を持たず、起き直しをhookが自動化する。
 source・roleごとの出力と失敗時の扱いは`hooks/session-start.sh`の冒頭のコメント、配線は`hooks/hooks.json`が入口。
-roleとqueueは起動側が渡す（[Roles](supervisor-lifecycle/roles.md)、[`dagq inbox`](supervisor-lifecycle/up-down.md#dagq-inbox)）。
+hostの経路ではroleとqueueを起動側が渡す（[Roles](supervisor-lifecycle/roles.md)、[`dagq inbox`](supervisor-lifecycle/up-down.md#dagq-inbox)）。
+人のマシンのHTTPSのinboxでは、起動側がroleと、queueでなく中継（`DAGQ_INBOX_RELAY`）を渡し、hookのCLIもその中継へ届く。
+起動の入口は`compose::control_inbox`、環境と中継の境界は`application::inbox_relay`のdoc commentと[Queue serviceのクライアントモード](queue-service.md#クライアントモード)を読む。
 workerはruntimeのsettingsで起動されpluginを読まず、読んでもroleが異なるので影響しない。
 
 出力には役割を示すテキストの1行が必須で、JSONだけだとClaude Codeはhookの制御JSONと解釈し、未知のキーを捨ててcontextに何も足さない。
@@ -116,7 +118,7 @@ Codexの同じ役目は[Provider lifecycle](provider-lifecycle.md#inboxの起動
 
 ### watchを張らせるStop hook（ADR-t906-1）
 
-inboxのClaude sessionを起こすのは`watch --role inbox`の終了だけで、supervisorはinboxに打ち込まず（watcherが居ないときは`inbox_nudged`と`[push]`。[inboxへの知らせ](supervisor-lifecycle/ask-push.md#supervisorによるinboxへの知らせ)、[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）、watchの`[push]`の通知はsessionを起こさない。
+inboxのClaude sessionを起こすのは`watch --role inbox`の終了だけで、supervisorはinboxに打ち込まず（hostの経路でwatcherが居ないときは`inbox_nudged`と`[push]`。[inboxへの知らせ](supervisor-lifecycle/ask-push.md#supervisorによるinboxへの知らせ)、[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）、watchの`[push]`の通知はsessionを起こさない。
 `/clear`・compaction・再起動の後にwatchを張り直さずにturnを終えると、その後に開いたaskは人に届かない。
 Stop hookがそのturnの終わりを止める。
 

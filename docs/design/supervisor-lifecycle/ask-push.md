@@ -16,8 +16,12 @@ related:
 
 # 人へのaskの通知（`[push]`）
 
-新しいaskを人に知らせるのは、inboxのsessionの中で動く`watch --role inbox`だけである（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定4）。
+新しいaskを`[push]`で人に知らせるのは、hostの経路のinboxのsessionの中で動く`watch --role inbox`だけである（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定4）。
 supervisor・queue service・observerは知らせず、askを開く経路（`ask`のCLI、runtimeのask、storeが判断と同じトランザクションで開くask）はどれも何も知らせない。
+
+人のマシンのHTTPSのinboxでは、中継のwatchは`[push]`のnotifierもwatcherの記録も届かないことの知らせも作らない。
+入口と境界は`compose::watch_through_relay`のdoc comment、起動は[`dagq inbox`](up-down.md#dagq-inbox)、中継は[Queue serviceのクライアントモード](../queue-service.md#クライアントモード)が持つ。
+以下の通知と後ろ盾はhostの経路について述べる。
 
 - 送り先はhostの`host.toml`の`[push]`のcommandで、読み方（queueの`host.toml`がhost全体のものに優先する）とcommandの起動はKPIの[push](push.md)と同じ。
   inboxのwatchは始めるたびに`[push]`を読み直し、無ければ何も送らない（`application::watch::push_notifier`）。
@@ -38,12 +42,13 @@ supervisor・queue service・observerは知らせず、askを開く経路（`ask
   `watch`はqueue serviceを通してqueueを読むだけで、`integrate`などの操作を呼ばない。
 
 通知は人への知らせで、inboxのClaudeのsessionを起こさない（sessionはwatchの返りで起きる）。
-watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](commands.md)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（下の「supervisorによるinboxへの知らせ」）。
+hostの経路でwatchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](commands.md)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（下の「supervisorによるinboxへの知らせ」）。
 supervisorはinboxの画面を読まず、どのterminalにも打ち込まない。
 
 ## supervisorによるinboxへの知らせ<a id="supervisorによるinboxへの知らせ"></a>
 
 [ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)決定1の(3)。
+hostのwatcherの記録に基づく知らせで、中継のwatchの生存を示すものではない。
 入口は`application::supervise::host_ops::inbox_nudge`（閾値とeventのpayloadはそのdoc comment）で、supervisorは毎pass、drainの間も行う（drainはaskの答えを待つため）。
 
 - inboxのwatcherが`absent`（`application::inbox_watcher::judge_with`）で、inbox宛てのopenなaskが閾値より長く待つときだけ知らせる。
