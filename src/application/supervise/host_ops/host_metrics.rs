@@ -57,6 +57,8 @@ pub struct HeldTargetsPort {
     /// The bytes on disk of the build outputs of the worktree at a path;
     /// `None` when they could not be measured.
     pub measure: Arc<MeasureBuildOutputs>,
+    /// Clock read at the start of each run's walk.
+    pub clock: Arc<dyn crate::application::Clock>,
 }
 
 /// The bytes on disk of the build outputs of a worktree, `None` when they
@@ -67,10 +69,10 @@ pub type MeasureBuildOutputs = dyn Fn(&Path) -> Option<u64> + Send + Sync;
 /// loop reads (its slots and the run rows, no walk) for the job to measure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeldWorktrees {
-    /// Of the runs out of the slots ([`HeldTargets::waiting`]).
-    pub waiting: Vec<PathBuf>,
-    /// Of the `awaiting_integration` runs ([`HeldTargets::landing`]).
-    pub landing: Vec<PathBuf>,
+    /// Run IDs and paths out of the slots ([`HeldTargets::waiting`]).
+    pub waiting: Vec<(RunId, PathBuf)>,
+    /// Run IDs and paths of `awaiting_integration` ([`HeldTargets::landing`]).
+    pub landing: Vec<(RunId, PathBuf)>,
 }
 
 impl HeldWorktrees {
@@ -82,9 +84,12 @@ impl HeldWorktrees {
         landing: impl IntoIterator<Item = &'a TaskRun>,
     ) -> Self {
         let mut seen = std::collections::HashSet::new();
-        let mut on_host = |runs: &mut dyn Iterator<Item = &'a TaskRun>| -> Vec<PathBuf> {
+        let mut on_host = |runs: &mut dyn Iterator<Item = &'a TaskRun>| -> Vec<(RunId, PathBuf)> {
             runs.filter(|run| !run.in_container() && seen.insert(run.id().clone()))
-                .filter_map(|run| run.worktree_path().map(PathBuf::from))
+                .filter_map(|run| {
+                    run.worktree_path()
+                        .map(|p| (run.id().clone(), PathBuf::from(p)))
+                })
                 .collect()
         };
         let waiting = on_host(&mut waiting.into_iter());
@@ -92,17 +97,47 @@ impl HeldWorktrees {
         Self { waiting, landing }
     }
 
-    /// Measure each worktree with `measure`.
-    fn measure(&self, measure: &MeasureBuildOutputs) -> HeldTargets {
-        let kind = |worktrees: &[PathBuf]| {
-            RunsTarget::of(worktrees.iter().map(|worktree| measure(worktree)))
+    /// The existing walk also retains per-run readings for the loop, while
+    /// preserving the host sample's totals and failure propagation.
+    fn measure(&self, port: &HeldTargetsPort, shared: &HeldShared) -> HeldTargets {
+        let mut readings = std::collections::HashMap::new();
+        let mut kind = |worktrees: &[(RunId, PathBuf)]| {
+            RunsTarget::of(worktrees.iter().map(|(run, path)| {
+                let at = port.clock.monotonic();
+                let unix_ms = crate::application::claim_view::disk_measured_at(&*port.clock);
+                let bytes = (port.measure)(path);
+                readings.insert(
+                    run.clone(),
+                    HeldMeasured {
+                        path: path.clone(),
+                        bytes,
+                        at,
+                        unix_ms,
+                    },
+                );
+                bytes
+            }))
         };
-        HeldTargets {
+        let totals = HeldTargets {
             waiting: kind(&self.waiting),
             landing: kind(&self.landing),
-        }
+        };
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = readings;
+        totals
     }
 }
+
+/// Per-run build readings live independently of the sample consuming totals.
+#[derive(Clone)]
+struct HeldMeasured {
+    path: PathBuf,
+    bytes: Option<u64>,
+    at: Instant,
+    unix_ms: i64,
+}
+type HeldShared = Arc<std::sync::Mutex<std::collections::HashMap<RunId, HeldMeasured>>>;
 
 /// What one job did ([`HostMetricsPort::record`]).
 #[derive(Debug, Default)]
@@ -244,6 +279,7 @@ pub(in crate::application::supervise) struct HostMetricsWatch {
     measuring: Option<thread::JoinHandle<HeldTargets>>,
     /// What the last measure gave, until a sample job writes it.
     measured: Option<HeldTargets>,
+    per_run: HeldShared,
     failing: bool,
     /// Whether this process imported the CSV files.
     imported: bool,
@@ -316,6 +352,29 @@ impl HostMetricsWatch {
         }));
     }
 
+    /// Read the completed job's build value for the same worktree, never walk.
+    pub(super) fn snapshot(
+        &self,
+        run: &RunId,
+        path: Option<&Path>,
+        now: Instant,
+        interval: Duration,
+    ) -> (Option<u64>, Option<i64>, bool) {
+        let readings = self
+            .per_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match readings.get(run).filter(|m| Some(m.path.as_path()) == path) {
+            Some(m) => (
+                m.bytes,
+                Some(m.unix_ms),
+                now.saturating_duration_since(m.at)
+                    > interval * crate::domain::disk::MOVING_SIZE_STALE_INTERVALS,
+            ),
+            None => (None, None, false),
+        }
+    }
+
     /// Start a measure of the runs that wait when one is due and none runs.
     fn start_measure(
         &mut self,
@@ -337,7 +396,8 @@ impl HostMetricsWatch {
         }
         self.held_started = Some(at);
         if let Some(worktrees) = held() {
-            self.measuring = Some(spawn_traced(move || worktrees.measure(&*targets.measure)));
+            let shared = self.per_run.clone();
+            self.measuring = Some(spawn_traced(move || worktrees.measure(&targets, &shared)));
         }
     }
 
@@ -412,6 +472,16 @@ mod tests {
     use crate::domain::environment::{Resources, host_node_resources};
     use crate::domain::host_metrics::{NodeSample, header, parse_file};
     use std::sync::Mutex;
+
+    struct Fixed(Instant);
+    impl crate::application::Clock for Fixed {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(1234567)
+        }
+        fn monotonic(&self) -> Instant {
+            self.0
+        }
+    }
 
     /// The rows a store holds, the local day of each by its second, and
     /// the days its retention was given.
@@ -724,6 +794,77 @@ mod tests {
     }
 
     #[test]
+    fn held_job_retains_each_runs_bytes_failure_and_start_time() {
+        const G: u64 = 1 << 30;
+        let before = Instant::now();
+        let mut port = port(None, Arc::new(Files::default()));
+        port.held_targets = Some(HeldTargetsPort {
+            interval: Duration::from_secs(600),
+            clock: Arc::new(Fixed(before)),
+            measure: Arc::new(|p| (p == Path::new("/a")).then_some(18 * G)),
+        });
+        let a = RunId::new("a").unwrap();
+        let b = RunId::new("b").unwrap();
+        let held = HeldWorktrees {
+            waiting: vec![(a.clone(), "/a".into()), (b.clone(), "/b".into())],
+            landing: vec![],
+        };
+        let mut watch = HostMetricsWatch::default();
+        watch.start_measure(&port, before, || Some(held));
+        let job = watch.measuring.take().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let joined = thread::spawn(move || {
+            send.send(job.join().unwrap()).unwrap();
+        });
+        let totals = receive
+            .recv_timeout(Duration::from_secs(10))
+            .expect("held measurement ends");
+        joined.join().unwrap();
+        assert_eq!(
+            totals.waiting,
+            RunsTarget {
+                runs: 2,
+                bytes: None
+            }
+        );
+        assert_eq!(
+            totals.landing,
+            RunsTarget {
+                runs: 0,
+                bytes: Some(0)
+            }
+        );
+        let after = before;
+        let interval = Duration::from_secs(600);
+        let (bytes, time, stale) = watch.snapshot(&a, Some(Path::new("/a")), after, interval);
+        assert_eq!(bytes, Some(18 * G));
+        assert_eq!(time, Some(1234567));
+        assert!(!stale);
+        let b = watch.snapshot(&b, Some(Path::new("/b")), after, interval);
+        assert_eq!(b.0, None);
+        assert_eq!(b.1, Some(1234567));
+        assert!(
+            !watch
+                .snapshot(&a, Some(Path::new("/a")), after + interval * 3, interval)
+                .2
+        );
+        assert!(
+            watch
+                .snapshot(
+                    &a,
+                    Some(Path::new("/a")),
+                    after + interval * 3 + Duration::from_secs(1),
+                    interval
+                )
+                .2
+        );
+        assert_eq!(
+            watch.snapshot(&a, Some(Path::new("/changed")), after, interval),
+            (None, None, false)
+        );
+    }
+
+    #[test]
     fn the_worktrees_held_are_those_on_the_host_each_run_once() {
         let waiting = run("w", "/q/runs/w/worktree");
         let landing = run("l", "/q/runs/l/worktree");
@@ -732,8 +873,14 @@ mod tests {
         assert_eq!(
             held,
             HeldWorktrees {
-                waiting: vec![PathBuf::from("/q/runs/w/worktree")],
-                landing: vec![PathBuf::from("/q/runs/l/worktree")],
+                waiting: vec![(
+                    RunId::new("w").unwrap(),
+                    PathBuf::from("/q/runs/w/worktree")
+                )],
+                landing: vec![(
+                    RunId::new("l").unwrap(),
+                    PathBuf::from("/q/runs/l/worktree")
+                )],
             }
         );
     }
@@ -746,10 +893,12 @@ mod tests {
     /// kind's bytes and the total empty.
     #[test]
     fn the_runs_that_wait_are_measured_beside_the_samples_into_the_next_row() {
+        let start = Instant::now();
         let rows = Arc::new(Mutex::new(Rows::default()));
         let mut port = port(Some(rows.clone()), Arc::new(Files::default()));
         port.held_targets = Some(HeldTargetsPort {
             interval: Duration::from_secs(600),
+            clock: Arc::new(Fixed(start)),
             measure: Arc::new(|worktree: &Path| match worktree.to_str() {
                 Some("/w") => Some(3_000),
                 Some("/l") => Some(500),
@@ -758,15 +907,17 @@ mod tests {
         });
         let reads = std::cell::Cell::new(0);
         let both = HeldWorktrees {
-            waiting: vec![PathBuf::from("/w")],
-            landing: vec![PathBuf::from("/l")],
+            waiting: vec![(RunId::new("w").unwrap(), PathBuf::from("/w"))],
+            landing: vec![(RunId::new("l").unwrap(), PathBuf::from("/l"))],
         };
         let unmeasured = HeldWorktrees {
-            waiting: vec![PathBuf::from("/w"), PathBuf::from("/gone")],
+            waiting: vec![
+                (RunId::new("w").unwrap(), PathBuf::from("/w")),
+                (RunId::new("gone").unwrap(), PathBuf::from("/gone")),
+            ],
             landing: Vec::new(),
         };
         let mut watch = HostMetricsWatch::default();
-        let start = Instant::now();
         for (secs, worktrees) in [
             (0, &both),
             (30, &both),

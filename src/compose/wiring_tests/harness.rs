@@ -194,6 +194,7 @@ pub(super) struct Wiring {
     /// Measures the trees of the runs moving; by default every one is not
     /// there, so a moving run counts the expectation whole.
     pub(super) moving_sizes: supervise::MeasureTree,
+    pub(super) host_metrics: Option<supervise::HostMetricsPort>,
     /// `[disk]`; the production's default, whose reserve is its least
     /// (5 GiB) as the supervisors read no volume's size.
     disk: crate::domain::disk::DiskConfig,
@@ -291,6 +292,7 @@ impl Wiring {
             caller_wrap: None,
             handoff: None,
             free: Arc::new(AtomicU64::new(u64::MAX)),
+            host_metrics: None,
             moving_sizes: Arc::new(|_: &Path| Ok(None)),
             disk: Default::default(),
             total: None,
@@ -967,6 +969,7 @@ impl Wiring {
                 stop: stop.clone(),
                 free: self.free.clone(),
                 moving_sizes: self.moving_sizes.clone(),
+                host_metrics: self.host_metrics.clone(),
                 disk: self.disk,
                 total: self.total,
             };
@@ -1065,6 +1068,7 @@ struct Parts {
     stop: Arc<AtomicBool>,
     free: Arc<AtomicU64>,
     moving_sizes: supervise::MeasureTree,
+    host_metrics: Option<supervise::HostMetricsPort>,
     disk: crate::domain::disk::DiskConfig,
     total: Option<u64>,
 }
@@ -1209,7 +1213,7 @@ impl Parts {
             forecasts: None,
             agent_watch: None,
             release: None,
-            host_metrics: None,
+            host_metrics: self.host_metrics,
             queue_service: None,
             queue_broker: None,
             broker_relay: None,

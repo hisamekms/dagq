@@ -302,6 +302,34 @@ fn only_the_supervisor_principal_reaches_its_operations() {
     ));
 }
 
+#[test]
+fn disk_status_is_written_only_to_the_principals_registration() {
+    let owner = LeaseToken::new("owner");
+    let other = LeaseToken::new("other");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let bearer = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let _other_bearer = token_of(&backend, &Principal::supervisor(&other, 8));
+    let value = json!({"runs":[{"current":18}]});
+    let written = call(
+        &backend,
+        &bearer,
+        "set_supervisor_disk_status",
+        json!([owner, value]),
+    );
+    assert!(written.error.is_none(), "{written:?}");
+    let denied = call(
+        &backend,
+        &bearer,
+        "set_supervisor_disk_status",
+        json!([other, {"current":99}]),
+    );
+    assert!(denied.error.is_some());
+    let read = call(&backend, &bearer, "supervisor_disk_status", json!([owner]));
+    assert_eq!(read.result, Some(value));
+    let other_read = call(&backend, &bearer, "supervisor_disk_status", json!([other]));
+    assert_eq!(other_read.result, Some(Value::Null));
+}
+
 /// A supervisor of the binary before a handoff starts a diagnosis job in
 /// its form (its pid, and the pids it took as gone, its own always among
 /// them): a job of a registered supervisor of another token with that pid

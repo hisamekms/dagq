@@ -182,6 +182,9 @@ pub struct ClaimHold {
     /// Disk needs in bytes and the inputs that explain them; absent for other holds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk: Option<super::disk::DiskNeeds>,
+    /// Claim-start snapshot of reservations; status overlays the live supervisor's state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_status: Option<super::disk::DiskStatus>,
 }
 
 impl ClaimHold {
@@ -199,6 +202,7 @@ impl ClaimHold {
                 threshold: 0.0,
                 ask_id: Some(hold.ask_id),
                 disk: None,
+                disk_status: None,
             });
         }
         if let (Some(free), Some(needed)) = (inputs.free_bytes, inputs.needed_bytes)
@@ -210,6 +214,7 @@ impl ClaimHold {
                 threshold: needed as f64,
                 ask_id: None,
                 disk: inputs.disk,
+                disk_status: None,
             });
         }
         match (inputs.load_average, inputs.max_load) {
@@ -219,6 +224,7 @@ impl ClaimHold {
                 threshold,
                 ask_id: None,
                 disk: None,
+                disk_status: None,
             }),
             _ => None,
         }
@@ -317,6 +323,11 @@ pub fn transition_of(
             });
             if let Some(needs) = hold.disk {
                 payload["disk"] = json!(needs);
+            }
+            if let Some(status) = &hold.disk_status {
+                payload["disk_status"] = json!(status);
+                payload["message"] =
+                    json!(format!("{}\n{}", hold.message_for(kinds), status.message));
             }
             if let Some(ask_id) = hold.ask_id {
                 payload["ask_id"] = json!(ask_id);

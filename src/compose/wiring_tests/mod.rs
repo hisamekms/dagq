@@ -22,6 +22,7 @@ mod audit_administration;
 mod audit_judgments;
 mod ci_freshness;
 mod disk_holds;
+mod disk_status;
 mod eval_isolation;
 mod exit_reasons;
 mod fresh_session_decisions;

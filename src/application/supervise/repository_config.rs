@@ -42,6 +42,7 @@ pub fn config_hold(missing: bool) -> Option<crate::domain::claim_hold::ClaimHold
         threshold: 1.0,
         ask_id: None,
         disk: None,
+        disk_status: None,
     })
 }
 

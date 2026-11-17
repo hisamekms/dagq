@@ -285,6 +285,224 @@ impl ClaimExclusions {
     }
 }
 
+/// Facts read from the unfinished-run registry and its selected measurement
+/// cache. `phase` is the recorded phase used to name a waiting stage;
+/// `measurement` is (raw bytes, walk-start Unix milliseconds, stale).
+/// The cache has already checked target identity and measurement age.
+#[derive(Debug, Clone)]
+pub struct RunDiskInput {
+    pub run: crate::domain::RunId,
+    pub task: TaskId,
+    pub stage: crate::domain::disk::DiskStage,
+    pub phase: String,
+    pub container: bool,
+    pub measurement: (Option<u64>, Option<i64>, bool),
+}
+
+/// Derive one run's recorded reservation from cached facts, without I/O.
+/// Waiting uses its displayed size and contributes zero to U. WORKER and
+/// INTEGRATOR use effective W/I, subtracting only a fresh known size.
+/// Containers discard host readings, including their timestamps and stale
+/// flags; a moving container therefore leaves its whole reservation unused.
+pub fn run_disk_status(
+    needs: &crate::domain::disk::DiskNeeds,
+    input: RunDiskInput,
+) -> crate::domain::disk::RunDiskStatus {
+    use crate::domain::disk::{DiskStage, RunDiskStatus};
+    let waiting = input.stage == DiskStage::Waiting;
+    let (current, measured_at_ms, stale) = if input.container {
+        (None, None, false)
+    } else {
+        input.measurement
+    };
+    let reservation = match input.stage {
+        DiskStage::Worker => needs.expected,
+        DiskStage::Integrator => needs.integrator_expected,
+        DiskStage::Waiting => current,
+    };
+    RunDiskStatus {
+        run: input.run,
+        task: input.task,
+        stage: match input.stage {
+            DiskStage::Worker => "WORKER".into(),
+            DiskStage::Integrator => "INTEGRATOR".into(),
+            DiskStage::Waiting => input.phase,
+        },
+        reservation,
+        current,
+        measured_at_ms,
+        stale,
+        container: input.container,
+        target: if waiting { "build" } else { "worktree+tmp" }.into(),
+        unused: if waiting {
+            0
+        } else {
+            reservation
+                .unwrap_or(0)
+                .saturating_sub(if stale { 0 } else { current.unwrap_or(0) })
+        },
+    }
+}
+
+/// W/I provenance from the same cached samples and time as `stage_budgets`.
+/// Each stage uses p90 (or the maximum with fewer than five samples); an
+/// empty stage falls back to the single run estimate. If only WORKER peaks
+/// exist, I falls back to W. These labels describe inputs before relaxation.
+pub fn disk_sources(
+    method: crate::domain::disk::DiskEstimate,
+    runs: &[crate::domain::disk::RunSample],
+    stages: &crate::domain::disk::StageSamples,
+    now_ms: i64,
+) -> [&'static str; 2] {
+    use crate::domain::disk::{DiskEstimate, QUANTILE_SAMPLES, expected_run_estimate};
+    if method == DiskEstimate::Fixed {
+        return ["configuration"; 2];
+    }
+    let source =
+        |samples: &[crate::domain::disk::RunSample]| match expected_run_estimate(samples, now_ms).1
+        {
+            0 => "single run estimate fallback",
+            n if n < QUANTILE_SAMPLES => "stage peaks maximum (few samples)",
+            _ => "stage peaks p90",
+        };
+    let worker = source(&stages.worker);
+    let integrator = if expected_run_estimate(&stages.integrator, now_ms).1 == 0
+        && expected_run_estimate(runs, now_ms).1 == 0
+        && expected_run_estimate(&stages.worker, now_ms).1 > 0
+    {
+        "WORKER estimate fallback"
+    } else {
+        source(&stages.integrator)
+    };
+    [worker, integrator]
+}
+
+/// Describe an already frozen disk decision. This function only arranges
+/// recorded facts; neither status nor its formatter walks a worktree or
+/// recomputes the supervisor's claim allowance.
+pub fn disk_status(
+    decision: &crate::domain::disk::DiskDecision,
+    runs: Vec<crate::domain::disk::RunDiskStatus>,
+    parallel: usize,
+    sources: [&str; 2],
+) -> crate::domain::disk::DiskStatus {
+    use crate::domain::disk::{ClaimsWaitReason, DiskEstimate, DiskStatus, gib};
+    let needs = decision.needs;
+    let method = match needs.estimate {
+        DiskEstimate::Fixed => "fixed",
+        DiskEstimate::Recent => "recent",
+    };
+    let reason = if decision.reserve.below {
+        "reserve_floor"
+    } else if decision.free.is_none() {
+        "unread"
+    } else if needs.claims_wait_reason == Some(ClaimsWaitReason::LandingFirst) {
+        "landing_first"
+    } else if needs.claims_wait_reason == Some(ClaimsWaitReason::NoSamples) {
+        "no_samples"
+    } else if decision.claim_short {
+        "disk_space"
+    } else {
+        "allowed"
+    };
+    let integration_slot: Vec<_> = runs
+        .iter()
+        .filter(|r| r.stage == "INTEGRATOR")
+        .map(|r| r.run.clone())
+        .collect();
+    let show = |bytes: u64| gib(bytes as f64);
+    let maybe = |bytes: Option<u64>| bytes.map_or_else(|| "unmeasured".into(), show);
+    let mut status = DiskStatus {
+        needs,
+        free: decision.free,
+        worker_source: sources[0].into(),
+        integrator_source: sources[1].into(),
+        runs,
+        integration_slot,
+        deficit: decision.free.map(|f| needs.claim.saturating_sub(f)),
+        reason: reason.into(),
+        claims: decision.claims.unwrap_or(parallel).min(parallel),
+        parallel,
+        message: String::new(),
+    };
+    let slot = if status.integration_slot.is_empty() {
+        "free".into()
+    } else {
+        status
+            .integration_slot
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut lines = vec![format!(
+        "disk {}: W {} ({}), I {} ({}); reserve {}, free {}; U {}; INTEGRATOR slot {} ({}); claim needs {}, deficit {}; reason {}; claims {}/parallel {}; relax {}",
+        method,
+        maybe(needs.expected),
+        sources[0],
+        maybe(needs.integrator_expected),
+        sources[1],
+        show(needs.reserve),
+        maybe(decision.free),
+        show(needs.remaining),
+        maybe(needs.integrator_expected),
+        slot,
+        show(needs.claim),
+        maybe(status.deficit),
+        reason,
+        status.claims,
+        parallel,
+        needs.relaxed.map_or_else(|| "none".into(), |r| r.message()),
+    )];
+    for run in &status.runs {
+        let current = if run.container {
+            "unmeasured (container)".into()
+        } else {
+            maybe(run.current)
+        };
+        lines.push(format!(
+            "run {} task {} {}: reservation {}, current {}{} [{}] at {}{}; unused {}",
+            run.run,
+            run.task,
+            run.stage,
+            maybe(run.reservation),
+            current,
+            if run.stale { " (stale)" } else { "" },
+            run.target,
+            run.measured_at_ms
+                .map_or_else(|| "unmeasured".into(), |t| t.to_string()),
+            if run.stale { " (stale)" } else { "" },
+            show(run.unused)
+        ));
+    }
+    status.message = lines.join("\n");
+    status
+}
+
+/// Overlay a live supervisor reading on a copy of a claim's start event.
+/// The start time/id and reason remain the hold's; size, allowance, deficit,
+/// stale flags and the human message are the latest pass's facts.
+/// Landing holds never use this overlay. No event is written by this view.
+pub fn refresh_disk_hold(event: &mut crate::domain::RunEvent, current: serde_json::Value) {
+    if current["needs"].is_object() && current["message"].is_string() {
+        event.payload["disk"] = current["needs"].clone();
+        event.payload["value"] = current["free"].clone();
+        event.payload["threshold"] = current["needs"]["claim"].clone();
+        event.payload["message"] = current["message"].clone();
+        event.payload["disk_status"] = current;
+    }
+}
+
+/// Unix milliseconds used by both off-loop measurement jobs.
+pub(crate) fn disk_measured_at(clock: &dyn crate::application::Clock) -> i64 {
+    clock
+        .system_time()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,5 +834,401 @@ mod tests {
         assert_eq!(exclusions.draft_goal.count, 7);
         assert_eq!(exclusions.draft_goal.task_ids, ids(&[1, 2, 3, 4, 5]));
         assert_eq!(exclusions.dependencies, ExcludedTasks::default());
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+    use crate::domain::disk::*;
+    use serde_json::json;
+    const G: u64 = 1 << 30;
+
+    fn shown(decision: &DiskDecision, runs: Vec<RunDiskStatus>, parallel: usize) -> DiskStatus {
+        disk_status(
+            decision,
+            runs,
+            parallel,
+            disk_sources(decision.needs.estimate, &[], &StageSamples::default(), 0),
+        )
+    }
+
+    #[test]
+    fn live_disk_state_replaces_the_view_without_changing_the_start_event() {
+        let event: crate::domain::RunEvent = serde_json::from_value(json!({
+            "id": 1, "kind":"claim_held", "created_at":"2026-01-01 00:00:00",
+            "payload":{"reason":"disk_space","supervisor":"s","message":"initial",
+                "disk_status":{"runs":[]}}
+        }))
+        .unwrap();
+        let mut view = event.clone();
+        for (stage, current, stale, claims, deficit) in [
+            ("WORKER", 12, true, 0, 10),
+            ("review_held", 18, false, 1, 0),
+        ] {
+            refresh_disk_hold(
+                &mut view,
+                json!({"needs":{"claim":50},"free":40,
+                "message":"latest","claims":claims,"deficit":deficit,
+                "runs":[{"stage":stage,"current":current,"stale":stale}]}),
+            );
+            assert_eq!(view.payload["disk_status"]["runs"][0]["stage"], stage);
+            assert_eq!(view.payload["disk_status"]["runs"][0]["current"], current);
+            assert_eq!(view.payload["disk_status"]["runs"][0]["stale"], stale);
+            assert_eq!(view.payload["disk_status"]["claims"], claims);
+            assert_eq!(view.payload["disk_status"]["deficit"], deficit);
+            assert_eq!(view.payload["message"], "latest");
+            assert_eq!(view.payload["value"], 40);
+            assert_eq!(view.payload["threshold"], 50);
+            assert_eq!(view.id, event.id);
+            assert_eq!(view.created_at, event.created_at);
+        }
+        assert_eq!(event.payload["message"], "initial");
+        assert_eq!(event.payload["disk_status"]["runs"], json!([]));
+    }
+
+    #[test]
+    fn landing_holds_do_not_carry_the_claim_explanation() {
+        let state = DiskState {
+            free: Some(G),
+            total: 0,
+            expected: Some(20 * G),
+            integrator_expected: Some(20 * G),
+            runs: vec![],
+            moving: 1,
+            landing_current: None,
+            landing_waiting: true,
+            relaxed: None,
+        };
+        let mut decision = state.decide(
+            0.05,
+            &[LandingCandidate {
+                run: crate::domain::RunId::new("landing").unwrap(),
+                current: None,
+                integrating: false,
+                waiting: true,
+            }],
+            DiskEstimate::Fixed,
+            0,
+        );
+        decision.status = Some(shown(&decision, vec![], 3));
+        assert!(decision.claim_hold().unwrap().disk_status.is_some());
+        let hold = decision.landing_hold().unwrap();
+        assert!(hold.disk_status.is_none());
+        let (_, payload) = crate::domain::claim_hold::landing_transition(
+            Some(&hold),
+            None,
+            &decision.landings,
+            &crate::domain::LeaseToken::new("s"),
+            |_| true,
+        )
+        .unwrap();
+        assert!(payload.get("disk_status").is_none());
+        assert!(!payload["message"].as_str().unwrap().contains("claim needs"));
+    }
+
+    #[test]
+    fn sources_distinguish_each_stage_and_its_fallback() {
+        let sample = RunSample {
+            bytes: G,
+            at_millis: 10,
+        };
+        let mut stages = StageSamples::default();
+        assert_eq!(
+            disk_sources(DiskEstimate::Fixed, &[], &stages, 10),
+            ["configuration"; 2]
+        );
+        assert_eq!(
+            disk_sources(DiskEstimate::Recent, &[], &stages, 10),
+            ["single run estimate fallback"; 2]
+        );
+        stages.worker = vec![sample; 5];
+        assert_eq!(
+            disk_sources(DiskEstimate::Recent, &[], &stages, 10),
+            ["stage peaks p90", "WORKER estimate fallback"]
+        );
+        assert_eq!(
+            disk_sources(
+                DiskEstimate::Recent,
+                std::slice::from_ref(&sample),
+                &stages,
+                10
+            ),
+            ["stage peaks p90", "single run estimate fallback"]
+        );
+        stages.integrator = vec![sample; 1];
+        let sources = disk_sources(DiskEstimate::Recent, &[], &stages, 10);
+        assert_eq!(
+            sources,
+            ["stage peaks p90", "stage peaks maximum (few samples)"]
+        );
+        let state = DiskState {
+            free: Some(100 * G),
+            total: 0,
+            expected: Some(G),
+            integrator_expected: Some(G),
+            runs: vec![],
+            moving: 1,
+            landing_current: None,
+            landing_waiting: false,
+            relaxed: None,
+        };
+        let status = disk_status(
+            &state.decide(0.05, &[], DiskEstimate::Recent, 5),
+            vec![],
+            3,
+            sources,
+        );
+        assert!(status.message.contains(
+            "W 1.0 GiB (stage peaks p90), I 1.0 GiB (stage peaks maximum (few samples))"
+        ));
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["worker_source"], "stage peaks p90");
+        assert_eq!(
+            json["integrator_source"],
+            "stage peaks maximum (few samples)"
+        );
+        assert_eq!(
+            disk_sources(
+                DiskEstimate::Recent,
+                &[],
+                &stages,
+                11 + SAMPLE_WINDOW_MILLIS
+            ),
+            ["single run estimate fallback"; 2]
+        );
+    }
+
+    #[test]
+    fn fixed_reservations_explain_the_shortage_and_reserve_floor() {
+        let mut state = DiskState {
+            free: Some(60 * G),
+            total: 228 * G,
+            expected: Some(20 * G),
+            integrator_expected: Some(20 * G),
+            runs: vec![
+                DiskRun {
+                    stage: DiskStage::Worker,
+                    current: Some(12 * G),
+                },
+                DiskRun {
+                    stage: DiskStage::Worker,
+                    current: Some(5 * G),
+                },
+                DiskRun {
+                    stage: DiskStage::Waiting,
+                    current: Some(18 * G),
+                },
+            ],
+            moving: 2,
+            landing_current: None,
+            landing_waiting: false,
+            relaxed: None,
+        };
+        let runs = |needs: &DiskNeeds| {
+            [
+                ("a", DiskStage::Worker, 12),
+                ("b", DiskStage::Worker, 5),
+                ("c", DiskStage::Waiting, 18),
+            ]
+            .into_iter()
+            .map(|(id, stage, current)| {
+                run_disk_status(
+                    needs,
+                    RunDiskInput {
+                        run: crate::domain::RunId::new(id).unwrap(),
+                        task: TaskId::new(7),
+                        stage,
+                        phase: "waiting_answer".into(),
+                        container: false,
+                        measurement: (Some(current * G), Some(1234), false),
+                    },
+                )
+            })
+            .collect()
+        };
+        let decision = state.decide(0.05, &[], DiskEstimate::Fixed, 0);
+        let status = shown(&decision, runs(&decision.needs), 3);
+        assert_eq!(
+            status.runs.iter().map(|run| run.unused).sum::<u64>(),
+            23 * G
+        );
+        assert_eq!(
+            status.runs.iter().map(|run| run.unused).sum::<u64>(),
+            status.needs.remaining
+        );
+        assert_eq!(
+            status
+                .runs
+                .iter()
+                .map(|run| run.reservation)
+                .collect::<Vec<_>>(),
+            [Some(20 * G), Some(20 * G), Some(18 * G)]
+        );
+        assert_eq!(
+            status
+                .runs
+                .iter()
+                .map(|run| run.stage.as_str())
+                .collect::<Vec<_>>(),
+            ["WORKER", "WORKER", "waiting_answer"]
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["needs"]["estimate"], "fixed");
+        assert_eq!(json["worker_source"], "configuration");
+        assert_eq!(json["needs"]["expected"], 20 * G);
+        assert_eq!(json["needs"]["integrator_expected"], 20 * G);
+        assert_eq!(json["needs"]["remaining"], 23 * G);
+        assert_eq!(json["integration_slot"], serde_json::json!([]));
+        assert_eq!(json["claims"], 0);
+        assert_eq!(json["reason"], "disk_space");
+        assert_eq!(json["runs"][0]["unused"], 8 * G);
+        assert_eq!(json["runs"][1]["unused"], 15 * G);
+        assert_eq!(json["runs"][2]["unused"], 0);
+        for text in [
+            "disk fixed: W 20.0 GiB",
+            "I 20.0 GiB",
+            "reserve 11.4 GiB",
+            "free 60.0 GiB",
+            "U 23.0 GiB",
+            "INTEGRATOR slot 20.0 GiB (free)",
+            "claim needs 74.4 GiB",
+            "deficit 14.4 GiB",
+            "reason disk_space",
+            "claims 0/parallel 3",
+            "WORKER: reservation 20.0 GiB, current 12.0 GiB",
+            "unused 8.0 GiB",
+            "unused 15.0 GiB",
+            "waiting_answer: reservation 18.0 GiB, current 18.0 GiB",
+            "unused 0.0 GiB",
+        ] {
+            assert!(
+                status.message.contains(text),
+                "missing {text}: {}",
+                status.message
+            );
+        }
+        state.free = Some(10 * G);
+        let decision = state.decide(0.05, &[], DiskEstimate::Fixed, 0);
+        assert_eq!(
+            shown(&decision, runs(&decision.needs), 3).reason,
+            "reserve_floor"
+        );
+    }
+
+    #[test]
+    fn occupied_integrator_and_stale_size_explain_relaxation() {
+        let state = DiskState {
+            free: Some(100 * G),
+            total: 0,
+            expected: Some(20 * G),
+            integrator_expected: Some(30 * G),
+            runs: vec![DiskRun {
+                stage: DiskStage::Integrator,
+                current: None,
+            }],
+            moving: 1,
+            landing_current: None,
+            landing_waiting: false,
+            relaxed: Some(DiskRelaxed {
+                relax: DiskRelax {
+                    expected: None,
+                    no_remaining: true,
+                    no_landing_expectation: false,
+                },
+                until_millis: 1000,
+                event_id: 7,
+            }),
+        };
+        let decision = state.decide(0.05, &[], DiskEstimate::Fixed, 0);
+        let run = run_disk_status(
+            &decision.needs,
+            RunDiskInput {
+                run: crate::domain::RunId::new("i").unwrap(),
+                task: TaskId::new(9),
+                stage: DiskStage::Integrator,
+                phase: "landing".into(),
+                container: false,
+                measurement: (Some(18 * G), Some(123), true),
+            },
+        );
+        assert_eq!(run.reservation, Some(30 * G));
+        assert_eq!(run.unused, 30 * G);
+        let status = shown(&decision, vec![run], 3);
+        assert_eq!(
+            status.integration_slot,
+            [crate::domain::RunId::new("i").unwrap()]
+        );
+        assert_eq!(status.needs.remaining, 30 * G);
+        assert_eq!(status.needs.claim_remaining, 0);
+        assert_eq!(status.needs.landing_expected, 0);
+        assert_eq!(status.needs.claim, 25 * G);
+        assert_eq!(status.claims, 3);
+        assert!(status.message.contains("INTEGRATOR slot 30.0 GiB (i)"));
+        assert!(
+            status
+                .message
+                .contains("current 18.0 GiB (stale) [worktree+tmp]")
+        );
+        assert!(status.message.contains("at 123 (stale); unused 30.0 GiB"));
+        assert!(status.message.contains("disk relax (event 7)"));
+    }
+
+    #[test]
+    fn wait_reasons_relaxation_and_unknown_container_are_explicit() {
+        let mut state = DiskState {
+            free: Some(100 * G),
+            total: 0,
+            expected: None,
+            integrator_expected: None,
+            runs: vec![],
+            moving: 1,
+            landing_current: None,
+            landing_waiting: false,
+            relaxed: None,
+        };
+        let mut decision = state.decide(0.05, &[], DiskEstimate::Recent, 0);
+        let run = run_disk_status(
+            &decision.needs,
+            RunDiskInput {
+                run: crate::domain::RunId::new("container").unwrap(),
+                task: TaskId::new(1),
+                stage: DiskStage::Waiting,
+                phase: "waiting_answer".into(),
+                container: true,
+                measurement: (Some(18 * G), Some(123), true),
+            },
+        );
+        assert_eq!(
+            (run.current, run.measured_at_ms, run.stale),
+            (None, None, false)
+        );
+        let status = shown(&decision, vec![run], 2);
+        assert_eq!(status.reason, "no_samples");
+        assert!(status.message.contains("unmeasured (container)"));
+        assert!(status.message.contains("single run estimate fallback"));
+        assert!(status.message.contains("relax none"));
+        state.moving = 0;
+        state.landing_waiting = true;
+        decision = state.decide(0.05, &[], DiskEstimate::Recent, 0);
+        assert_eq!(shown(&decision, vec![], 2).reason, "landing_first");
+        state.landing_waiting = false;
+        assert_eq!(
+            shown(&state.decide(0.05, &[], DiskEstimate::Recent, 0), vec![], 2).claims,
+            1
+        );
+        state.expected = Some(G);
+        state.integrator_expected = Some(G);
+        assert_eq!(
+            shown(&state.decide(0.05, &[], DiskEstimate::Fixed, 0), vec![], 2).claims,
+            2
+        );
+        state.free = None;
+        state.expected = None;
+        state.moving = 1;
+        assert_eq!(
+            shown(&state.decide(0.05, &[], DiskEstimate::Recent, 0), vec![], 2).reason,
+            "unread"
+        );
     }
 }

@@ -520,6 +520,9 @@ pub fn reserve_decision(free: Option<u64>, need: Option<u64>) -> ReserveDecision
 /// status consume this result; they never compare free bytes again.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DiskDecision {
+    /// Pass explanation from cached measurements, stored as current supervisor state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<DiskStatus>,
     pub reserve: ReserveDecision,
     pub free: Option<u64>,
     pub needs: DiskNeeds,
@@ -546,6 +549,7 @@ impl DiskDecision {
             threshold: self.needs.claim as f64,
             ask_id: None,
             disk: Some(self.needs),
+            disk_status: self.status.clone(),
         })
     }
     pub fn landing_hold(&self) -> Option<super::claim_hold::ClaimHold> {
@@ -558,6 +562,7 @@ impl DiskDecision {
             threshold: blocked.needed as f64,
             ask_id: None,
             disk: Some(needs),
+            disk_status: None,
         })
     }
 }
@@ -1112,6 +1117,7 @@ impl DiskState {
         let claim_allowed = claims != Some(0);
         let short = claim_short || landings.iter().any(|d| d.waiting && !d.allowed);
         DiskDecision {
+            status: None,
             reserve: reserve_decision(self.free, Some(needs.reserve)),
             free: self.free,
             needs,
@@ -1600,6 +1606,63 @@ pub fn worktree_executables<'a>(
                 .is_some_and(|executable| Path::new(executable).starts_with(worktree))
         })
         .collect()
+}
+
+/// Latest supervisor disk decision in `claim_hold.disk_status`: each pass
+/// overwrites its registration's state, which status reads without measuring.
+/// The `claim_held` event keeps only the snapshot when that hold began. All quantities are bytes;
+/// timestamps are Unix milliseconds at the start of each run's walk. `needs`
+/// is the exact shared decision (including relaxations and idle progress).
+/// `claims` is the disk allowance capped by `parallel`, not free worker slots.
+/// Sources describe the inputs to W/I before any `needs.relaxed` override.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DiskStatus {
+    pub needs: DiskNeeds,
+    pub free: Option<u64>,
+    /// `configuration`, `stage peaks p90`, `stage peaks maximum (few samples)`,
+    /// or `single run estimate fallback`: the input used for W.
+    pub worker_source: String,
+    /// The same labels for I, plus `WORKER estimate fallback` when neither
+    /// INTEGRATOR peaks nor run samples exist but W is known.
+    pub integrator_source: String,
+    pub runs: Vec<RunDiskStatus>,
+    /// Runs occupying I, empty when the integration slot is free. Their
+    /// unused reservation is already in U; only an empty slot adds I again.
+    pub integration_slot: Vec<super::RunId>,
+    /// max(0, claim need - free); null when free space could not be read.
+    pub deficit: Option<u64>,
+    /// `reserve_floor`, `unread`, `landing_first`, `no_samples`,
+    /// `disk_space`, or `allowed`: in that precedence order.
+    pub reason: String,
+    pub claims: usize,
+    pub parallel: usize,
+    /// Human explanation of precisely these recorded fields, also used by
+    /// the ordinary status output's claim-hold message.
+    pub message: String,
+}
+
+/// A run in a disk decision. `stage` is WORKER, INTEGRATOR or the recorded
+/// wait kind. `target` is `worktree+tmp` for WORKER/INTEGRATOR, `build` for
+/// waits (the toolchain worktree build directories, never the whole tree).
+/// `current: null` means unmeasured/failed, and `container` distinguishes
+/// the runs whose storage the host job cannot measure. `stale` retains a
+/// measured value for display only: older than the measuring interval times
+/// MOVING_SIZE_STALE_INTERVALS. A changed moving target is unmeasured.
+/// Waiting reservations equal the displayed current size, possibly unknown,
+/// and always have zero unused bytes. Moving reservations use effective W/I;
+/// unmeasured or stale moving sizes leave the whole reservation unused.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RunDiskStatus {
+    pub run: super::RunId,
+    pub task: super::TaskId,
+    pub stage: String,
+    pub reservation: Option<u64>,
+    pub current: Option<u64>,
+    pub target: String,
+    pub measured_at_ms: Option<i64>,
+    pub stale: bool,
+    pub container: bool,
+    pub unused: u64,
 }
 
 #[cfg(test)]

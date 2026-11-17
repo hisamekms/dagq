@@ -949,6 +949,17 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 exit_code,
             ))
         }
+        "supervisor_disk_status" => {
+            let (token,): (LeaseToken,) = read(op, args)?;
+            answer(SupervisorReads::supervisor_disk_status(&*store, &token))
+        }
+        "set_supervisor_disk_status" => {
+            let (token, status): (LeaseToken, Value) = read(op, args)?;
+            own(&token)?;
+            answer(SupervisorRegistry::set_supervisor_disk_status(
+                &*store, &token, status,
+            ))
+        }
         "supervisors" => answer(SupervisorReads::supervisors(&*store)),
         "handoff_request" => {
             let (token,): (LeaseToken,) = read(op, args)?;

@@ -146,7 +146,7 @@ fn a_failed_heartbeat_revokes_the_runs_telemetry_token() {
     rusqlite::Connection::open(&db)
         .unwrap()
         .execute_batch(
-            "CREATE TRIGGER fail_heartbeat BEFORE UPDATE ON supervisors
+            "CREATE TRIGGER fail_heartbeat BEFORE UPDATE OF heartbeat_at ON supervisors
              BEGIN SELECT RAISE(ABORT, 'heartbeat refused by the test'); END;",
         )
         .unwrap();

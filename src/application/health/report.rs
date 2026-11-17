@@ -165,7 +165,7 @@ pub fn status(
 /// wait in [`slots_and_waits`]; every leased run is listed
 /// ([`listed_runs`]).
 pub(super) fn runs_slots_and_waits(
-    queue: &(impl RunLog + ?Sized),
+    queue: &(impl RunLog + SupervisorReads + ?Sized),
     control: &dyn ProcessControl,
     registrations: &[SupervisorRegistration],
     leases: &[RunLease],
@@ -236,13 +236,13 @@ pub(super) fn runs_slots_and_waits(
 /// that wait to go back (`state: returning` in `waiting`), with `limit`
 /// and `source` the registration's `max_waiting` and where it comes from.
 /// A wait adds no attention: its asks are the attention. A supervisor that holds its claims
-/// has `claim_hold`: its latest `claim_held` payload and `since` (task
+/// has `claim_hold`: its start record with current disk state and `since` (task
 /// 327); one that holds the landings' verification for the disk has
 /// `landing_hold` in the same shape (task 377), and one that holds its
 /// claims for the CI watch or a landing branch that does not resolve
 /// `ci_watch_hold`, `landing_branch_hold` and `repository_config_hold`.
 pub(super) fn slots_and_waits(
-    queue: &(impl RunLog + ?Sized),
+    queue: &(impl RunLog + SupervisorReads + ?Sized),
     health: Vec<SupervisorHealth>,
     registrations: &[SupervisorRegistration],
     leases: &[RunLease],
@@ -347,6 +347,7 @@ pub(super) fn slots_and_waits(
         .into_iter()
         .enumerate()
         .map(|(index, health)| {
+            let live = !health.stale;
             let mut value = serde_json::to_value(health)?;
             if let Some(registration) = registrations.get(index) {
                 let (held, queued, count) = counts
@@ -380,7 +381,11 @@ pub(super) fn slots_and_waits(
                         event.payload.get("supervisor").and_then(Value::as_str)
                             == Some(registration.token.as_str())
                     }) {
-                        value[*key] = hold_view(event);
+                        let mut event = event.clone();
+                        if *key == "claim_hold" && live {
+                            refresh_disk_hold(queue, &mut event)?;
+                        }
+                        value[*key] = hold_view(&event);
                     }
                 }
                 for (key, kinds, records) in &own_holds {
@@ -401,9 +406,9 @@ pub(super) fn slots_and_waits(
 /// `claim_held` / `claim_resumed` when it is a `claim_held` of a registered
 /// supervisor alive with a fresh heartbeat, the rule the supervisors record
 /// it by ([`crate::domain::claim_hold::in_place`]). Reads those two kinds'
-/// latest event only.
+/// latest event and the live holder's latest disk state.
 pub(crate) fn claim_hold_in_place(
-    queue: &(impl RunLog + ?Sized),
+    queue: &(impl RunLog + SupervisorReads + ?Sized),
     registrations: &[SupervisorRegistration],
     control: &dyn ProcessControl,
     now: i64,
@@ -415,7 +420,25 @@ pub(crate) fn claim_hold_in_place(
             registration.token.as_str() == holder && is_live(registration, control, now)
         })
     };
-    Ok(crate::domain::claim_hold::in_place(claims, last.as_ref(), live).cloned())
+    let mut held = crate::domain::claim_hold::in_place(claims, last.as_ref(), live).cloned();
+    if let Some(event) = held.as_mut() {
+        refresh_disk_hold(queue, event)?;
+    }
+    Ok(held)
+}
+
+/// Attach current state only to a claim hold owned by a live registration.
+/// Event identity/time still describe when the hold began. Older binaries
+/// with no state keep their event snapshot as a compatibility fallback.
+fn refresh_disk_hold(queue: &(impl SupervisorReads + ?Sized), event: &mut RunEvent) -> Result<()> {
+    if event.payload["reason"] == "disk_space"
+        && let Some(token) = event.payload["supervisor"].as_str()
+        && let Some(current) =
+            queue.supervisor_disk_status(&crate::domain::LeaseToken::new(token))?
+    {
+        crate::application::claim_view::refresh_disk_hold(event, current);
+    }
+    Ok(())
 }
 
 /// A hold's record as `status` shows it: its payload (`reason`, `value`,

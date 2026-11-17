@@ -476,6 +476,10 @@ pub trait InboxWatchLog {
 /// repository the queue is bound to that host運用 publishes to every
 /// context (rule C2 of docs/design/architecture.md).
 pub trait SupervisorReads {
+    /// Latest disk explanation overwritten by `token` on each disk pass.
+    /// No row/value means no reading yet (or an older binary); this is state,
+    /// not an event. Its lifetime is that supervisor registration.
+    fn supervisor_disk_status(&self, token: &LeaseToken) -> Result<Option<serde_json::Value>>;
     /// Every registered supervisor, oldest first, alive or not.
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
     /// The binary the supervisor `token` was asked to exec, if any.
@@ -490,6 +494,13 @@ pub trait SupervisorReads {
 /// is published to 実行と着地's loop (the `METHODS` rows of
 /// src/context_boundaries/ownership.rs).
 pub trait SupervisorRegistry: SupervisorReads {
+    /// Replace this registration's disk explanation without recording an event.
+    /// Only the registered supervisor may write its own value.
+    fn set_supervisor_disk_status(
+        &self,
+        token: &LeaseToken,
+        status: serde_json::Value,
+    ) -> Result<()>;
     /// Register a supervisor with its slot limits and their sources, and
     /// the executables of its providers as it resolved them at its start
     /// (ADR-t813-2), in one write, so `status` and a reader of the

@@ -50,6 +50,7 @@ const DISK_QUESTION: &str = "With no run moving, the free disk space of the queu
 /// could advance but for the disk. Activity controls idle progress and asks.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::application::supervise) struct DiskMoves {
+    pub(in crate::application::supervise) parallel: usize,
     pub(in crate::application::supervise) in_flight: usize,
     pub(in crate::application::supervise) landing: usize,
     pub(in crate::application::supervise) landing_waiting: bool,
@@ -68,6 +69,9 @@ impl DiskMoves {
 pub(in crate::application::supervise) struct DiskTarget {
     pub target: super::moving_sizes::MovingTarget,
     pub usage: DiskUsage,
+    pub task: TaskId,
+    pub phase: String,
+    pub container: bool,
     pub candidate: bool,
     pub waiting: bool,
 }
@@ -200,18 +204,20 @@ impl HostOpsState {
             .filter(is_disk_ask)
             .collect();
         self.apply_disk_answers(env, &unclosed)?;
+        let estimate_time = crate::application::unix_millis(env.generators.clock.system_time());
         let StageBudgets {
             worker: expected,
             integrator: integrator_expected,
             sample_count,
-        } = self.expected_run_size(env)?;
+        } = self.expected_run_size(env, estimate_time)?;
         let relaxed = self.relaxation(env)?;
         let free = self.free_bytes(env);
         // Stage reservations and exceedances share trusted sizes measured
         // off the loop. An unknown size reserves the stage's whole budget.
         // This pass's registered targets are walked for the next.
         let now = env.generators.clock.monotonic();
-        let sizes = self.moving_sizes.trusted_sizes(
+        let measured = self.moving_sizes.frozen();
+        let sizes = measured.trusted_sizes(
             &moving.iter().map(|r| r.target.clone()).collect::<Vec<_>>(),
             now,
         );
@@ -257,12 +263,71 @@ impl HostOpsState {
             landing_waiting,
             relaxed,
         };
-        let decision = state.decide(
+        let mut decision = state.decide(
             self.disk_config.reserve,
             &candidates,
             self.disk_config.estimate,
             sample_count,
         );
+        let held_interval = self
+            .host_metrics_port
+            .as_ref()
+            .and_then(|p| p.held_targets.as_ref())
+            .map_or_else(
+                || {
+                    Duration::from_secs(
+                        crate::domain::host_metrics::DEFAULT_HELD_TARGETS_INTERVAL_SECS,
+                    )
+                },
+                |p| p.interval,
+            );
+        let run_views = moving
+            .iter()
+            .map(|r| {
+                let measurement = if r.usage.stage == DiskStage::Waiting {
+                    self.host_metrics.snapshot(
+                        &r.target.run,
+                        r.target.worktree.as_deref(),
+                        now,
+                        held_interval,
+                    )
+                } else {
+                    measured.snapshot(&r.target, now)
+                };
+                crate::application::claim_view::run_disk_status(
+                    &decision.needs,
+                    crate::application::claim_view::RunDiskInput {
+                        run: r.target.run.clone(),
+                        task: r.task,
+                        stage: r.usage.stage,
+                        phase: r.phase.clone(),
+                        container: r.container,
+                        measurement,
+                    },
+                )
+            })
+            .collect();
+        let sources = self.disk.samples.as_ref().map_or(
+            ["single run estimate fallback"; 2],
+            |(_, runs, stages)| {
+                crate::application::claim_view::disk_sources(
+                    self.disk_config.estimate,
+                    runs,
+                    stages,
+                    estimate_time,
+                )
+            },
+        );
+        decision.status = Some(crate::application::claim_view::disk_status(
+            &decision,
+            run_views,
+            moves.parallel,
+            sources,
+        ));
+        env.queue.set_supervisor_disk_status(
+            env.token,
+            serde_json::to_value(decision.status.as_ref().expect("disk explanation"))?,
+        )?;
         let needs = decision.needs;
         self.disk.needs = needs;
         self.disk.claims = decision.claims;
@@ -375,7 +440,7 @@ impl HostOpsState {
     /// samples and stage peaks are read again every [`SAMPLES_INTERVAL`]
     /// ([`crate::application::recent_run_samples`],
     /// [`crate::application::recent_stage_samples`]).
-    fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<StageBudgets> {
+    fn expected_run_size(&mut self, env: &mut HostEnv<'_>, now: i64) -> Result<StageBudgets> {
         let fresh = self
             .disk
             .samples
@@ -391,7 +456,6 @@ impl HostOpsState {
             };
             self.disk.samples = Some((env.generators.clock.monotonic(), samples, stages));
         }
-        let now = crate::application::unix_millis(env.generators.clock.system_time());
         Ok(self
             .disk
             .samples
@@ -834,11 +898,232 @@ fn samples_fresh(since: Duration) -> bool {
 mod tests {
     use super::*;
 
+    /// Raw measurements, not precomputed reservations or remainders, are
+    /// the input to the same pure derivation check_disk calls.
+    #[test]
+    fn run_details_derive_reservations_and_unused_bytes() {
+        use crate::application::claim_view::{RunDiskInput, run_disk_status};
+        const G: u64 = 1 << 30;
+        let needs = DiskState {
+            free: Some(60 * G),
+            total: 0,
+            expected: Some(20 * G),
+            integrator_expected: Some(30 * G),
+            runs: vec![
+                DiskRun {
+                    stage: DiskStage::Worker,
+                    current: Some(12 * G),
+                },
+                DiskRun {
+                    stage: DiskStage::Worker,
+                    current: Some(5 * G),
+                },
+                DiskRun {
+                    stage: DiskStage::Waiting,
+                    current: Some(18 * G),
+                },
+            ],
+            moving: 2,
+            landing_current: None,
+            landing_waiting: false,
+            relaxed: None,
+        }
+        .needs(0.05);
+        let cases = [
+            (
+                DiskStage::Worker,
+                Some(12),
+                false,
+                Some(20),
+                8,
+                "WORKER",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Worker,
+                Some(5),
+                false,
+                Some(20),
+                15,
+                "WORKER",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Waiting,
+                Some(18),
+                false,
+                Some(18),
+                0,
+                "landing_answer",
+                "build",
+            ),
+            (
+                DiskStage::Worker,
+                None,
+                false,
+                Some(20),
+                20,
+                "WORKER",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Worker,
+                Some(12),
+                true,
+                Some(20),
+                20,
+                "WORKER",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Worker,
+                Some(25),
+                false,
+                Some(20),
+                0,
+                "WORKER",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Worker,
+                Some(0),
+                false,
+                Some(20),
+                20,
+                "WORKER",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Integrator,
+                Some(18),
+                false,
+                Some(30),
+                12,
+                "INTEGRATOR",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Integrator,
+                None,
+                false,
+                Some(30),
+                30,
+                "INTEGRATOR",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Integrator,
+                Some(18),
+                true,
+                Some(30),
+                30,
+                "INTEGRATOR",
+                "worktree+tmp",
+            ),
+            (
+                DiskStage::Waiting,
+                None,
+                false,
+                None,
+                0,
+                "landing_answer",
+                "build",
+            ),
+            (
+                DiskStage::Waiting,
+                Some(18),
+                true,
+                Some(18),
+                0,
+                "landing_answer",
+                "build",
+            ),
+        ];
+        let mut unused = Vec::new();
+        for (stage, bytes, stale, reserved, remaining, label, target) in cases {
+            let current = bytes.map(|bytes| bytes * G);
+            let run = run_disk_status(
+                &needs,
+                RunDiskInput {
+                    run: RunId::new("measured").unwrap(),
+                    task: TaskId::new(7),
+                    stage,
+                    phase: "landing_answer".into(),
+                    container: false,
+                    measurement: (current, Some(1234), stale),
+                },
+            );
+            assert_eq!(run.reservation, reserved.map(|bytes| bytes * G), "{run:?}");
+            assert_eq!(run.unused, remaining * G, "{run:?}");
+            assert_eq!(run.current, current);
+            assert_eq!(run.stale, stale);
+            assert_eq!(run.measured_at_ms, Some(1234));
+            assert_eq!(run.stage, label);
+            assert_eq!(run.target, target);
+            unused.push(run.unused);
+        }
+        assert_eq!(unused[..3], [8 * G, 15 * G, 0]);
+        assert_eq!(unused[..3].iter().sum::<u64>(), 23 * G);
+        assert_eq!(unused[..3].iter().sum::<u64>(), needs.remaining);
+    }
+
+    #[test]
+    fn container_run_details_discard_host_measurements() {
+        use crate::application::claim_view::{RunDiskInput, disk_status, run_disk_status};
+        const G: u64 = 1 << 30;
+        for (stage, budget, target) in [
+            (DiskStage::Worker, Some(20 * G), "worktree+tmp"),
+            (DiskStage::Integrator, Some(30 * G), "worktree+tmp"),
+            (DiskStage::Waiting, None, "build"),
+        ] {
+            let decision = DiskState {
+                free: Some(100 * G),
+                total: 0,
+                expected: Some(20 * G),
+                integrator_expected: Some(30 * G),
+                runs: vec![DiskRun {
+                    stage,
+                    current: None,
+                }],
+                moving: 1,
+                landing_current: None,
+                landing_waiting: false,
+                relaxed: None,
+            }
+            .decide(0.05, &[], crate::domain::disk::DiskEstimate::Fixed, 0);
+            // Even an apparent host reading must be discarded for a container.
+            let run = run_disk_status(
+                &decision.needs,
+                RunDiskInput {
+                    run: RunId::new("container").unwrap(),
+                    task: TaskId::new(8),
+                    stage,
+                    phase: "landing_answer".into(),
+                    container: true,
+                    measurement: (Some(99 * G), Some(1234), true),
+                },
+            );
+            assert_eq!(run.current, None);
+            assert_eq!(run.measured_at_ms, None);
+            assert!(!run.stale);
+            assert!(run.container);
+            assert_eq!(run.target, target);
+            assert_eq!(run.reservation, budget);
+            assert_eq!(run.unused, budget.unwrap_or(0));
+            assert_eq!(run.unused, decision.needs.remaining);
+            let shown = disk_status(&decision, vec![run], 3, ["configuration"; 2]);
+            assert!(shown.message.contains("unmeasured (container)"));
+            assert!(!shown.message.contains("99.0 GiB"));
+            assert!(!shown.message.contains("at 1234"));
+        }
+    }
+
     /// A landing's retry counts the runs moving besides the landing under
     /// way: with the landing alone in flight, none, as at its start.
     #[test]
     fn a_landings_retry_counts_the_runs_moving_besides_it() {
         let moves = |in_flight, landing| DiskMoves {
+            parallel: 3,
             in_flight,
             landing,
             landing_waiting: false,

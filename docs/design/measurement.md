@@ -49,13 +49,14 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 |論理ストア|中身|区分|今のアダプタ|
 |---|---|---|---|
 |監査の記録|eventsとは別の正本。計測の層は読まない|SSOT|queue.dbの`audit_records`|
-|StateStore|今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど）|SSOT|queue.dbの状態の表|
+|StateStore|今の状態|SSOT|queue.dbの状態の表|
 |EventStore|append-onlyの記録（runの遷移・claimの前の区間・今の判定の記録・判定済み期間（`kpi_breach_checked`）・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken）|SSOT|queue.dbの`run_events`。EventStoreとStateStoreは同じtransactionで確定する|
 |SessionStepStore|sessionのstep・中から測った資源と、対象と持ち主。`(session_id, seq)`で重複を除き、抜けを残す|SSOT|queue.dbの`session_steps`ほか|
 |NodeSampleStore|nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ディスクの空き・待ちと着地待ちのrunのビルド成果物の合計と件数・共通の単位）|SSOT|queue.dbの`node_samples`（hostのCSVは写し。[hostの負荷](supervisor-lifecycle/host-metrics.md)）|
 |RunResourceStore|runの資源を外から測った窓|SSOT|queue.dbの`run_resources`|
 |LedgerStore|台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない|ビュー|queue.dbの`ledger_rows`ほか|
 |ReportStore|統計の出力（日次・週次のレポート）|ビュー|queueのdirの`reports/`のファイルと`report_written`のevent|
+|容量の内訳|supervisorが上書きしstatusが読む|材料|`supervisors.disk_status`（登録中）|
 |（材料）|run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout|材料|queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerのrunのものは[Container runtime](container-runtime.md)。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る）|
 |統合テストのcoverageの対応表|「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻|ビュー|CIのLinuxの並列のjob（`.github/workflows/it-coverage-map.yml`）が1時間ごとに統合テストをテストごとのcoverageつきで流して作り直せる。macOSだけのコードとテストの結びつきは欠ける。GitHub Actionsのartifact `it-coverage-map`で、保持の期間を過ぎて消えてもよい。着地の検証は下の「着地の検証の対応表のcache」から読む|
 |agentのevalの記録|evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)）|SSOT|`run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料|

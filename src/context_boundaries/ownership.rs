@@ -480,6 +480,7 @@ pub(super) const ALLOWED: &[Allowed] = &[
     allowed("src/infrastructure/finding_planners.rs", "findings in apply_answer", Fix::Tasks(&[1621]), "T6: planning's store writes observation's findings in SQL, not through infrastructure::findings"),
     allowed(COORDINATION, "supervisors in register", Fix::Unregistered, MIXED_COORDINATION),
     allowed(COORDINATION, "supervisors in set_supervisor_mode", Fix::Unregistered, MIXED_COORDINATION),
+    allowed(COORDINATION, "supervisors in set_supervisor_disk_status", Fix::Unregistered, MIXED_COORDINATION),
     allowed(COORDINATION, "supervisors in deregister_supervisor", Fix::Unregistered, MIXED_COORDINATION),
     allowed(COORDINATION, "supervisors in prune_supervisor", Fix::Unregistered, MIXED_COORDINATION),
     allowed(COORDINATION, "supervisors in accept_handoff", Fix::Unregistered, MIXED_COORDINATION),
@@ -815,6 +816,7 @@ pub(super) const METHODS: &[Method] = &[
     method("SupervisorRegistry", "bind_repository", Only(&[Execution])),
     method("SupervisorRegistry", "assert_repository", Only(&[Execution])),
     method("SupervisorRegistry", "set_supervisor_mode", Only(&[Execution])),
+    method("SupervisorRegistry", "set_supervisor_disk_status", Only(&[Execution])),
 ];
 
 #[rustfmt::skip]

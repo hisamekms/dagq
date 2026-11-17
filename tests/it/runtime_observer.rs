@@ -1351,7 +1351,7 @@ fn a_failing_supervisor_leaves_no_observer_process() {
     Connection::open(&db)
         .unwrap()
         .execute_batch(
-            "CREATE TRIGGER fail_heartbeat BEFORE UPDATE ON supervisors
+            "CREATE TRIGGER fail_heartbeat BEFORE UPDATE OF heartbeat_at ON supervisors
              BEGIN SELECT RAISE(ABORT, 'heartbeat refused by the test'); END;",
         )
         .unwrap();

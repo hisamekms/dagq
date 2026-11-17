@@ -91,6 +91,8 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 
 ## 待つrunのビルド成果物
 
+測るjobはrunごとの値もloopと共有し、claimの控えの内訳に出す。
+
 待つあいだworktreeを持ち続けるrunが、そのビルド成果物でどれだけdiskを抱えるかを読めるように（`max_waiting`を資源ごとに分けるかの材料。`build_outputs_removed`は消したrunの消した時点の大きさしか残さない）、行に待つrunのビルド成果物の大きさを記録する。
 
 - **対象**: 待ち（[人の答えを待つrun](waiting.md)のslotの外のrun。待ちと戻り待ちで、`--max-waiting`が数えるもの）と、着地待ち（`awaiting_integration`のrun。着地のslot・`approve_landing`の答え・`landing_held`の控えを待つ）のrunのうち、worktreeがhostにあるもの。

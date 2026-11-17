@@ -157,7 +157,7 @@ runの所有・supervisorの登録・runのfileの約束（[ADR-0007](../adr/000
 - 動いているrunのleaseを奪うのは引き継ぎ（`adopt_run`）だけで、他のtokenのstaleなleaseでwrapperが生きているか終了を記録したrunだけを対象にする。
   自分の更新と引き継ぎはどちらもlease行への書き込みなので、SQLiteが直列化して片方だけが通る。
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
-- `supervisors`の行はそのprocessの性質を持ち、行と寿命を共にする。
+- `supervisors`の行はそのprocessの性質と各passの容量の見え方を持ち、行と寿命を共にする。
   登録の削除は停止のeventと不可分で、決まった経路だけが行う（`coordination.rs`）。
   掃除の条件は`src/application/supervise/host_ops/sweep.rs`の`prune_left_supervisors`、登録の値の寿命は`coordination.rs`のdoc commentが持つ。
 - `recover`だけがtokenなしで未完了のrunを止め、同じtransactionでleaseとprocessを再検査する。

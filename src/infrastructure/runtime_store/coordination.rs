@@ -41,6 +41,31 @@ use crate::infrastructure::sql_exec::{SqlRead, SqlWrite};
 pub(crate) const BACKEND_PARALLEL_SQL: &str = "SELECT CAST(SUM(parallel) AS BIGINT) FROM supervisors WHERE CAST(?1 AS TEXT) IS NULL OR token=?1";
 
 impl<E: TransactionEntries> StoreQueue<E> {
+    pub fn set_supervisor_disk_status(&self, token: &LeaseToken, status: Value) -> Result<()> {
+        ensure!(
+            self.write_sql(
+                "set_supervisor_disk_status",
+                "UPDATE supervisors SET disk_status=?2 WHERE token=?1",
+                sql_params![token, serde_json::to_string(&status)?]
+            )? == 1,
+            "supervisor {token} is no longer registered"
+        );
+        Ok(())
+    }
+
+    pub fn supervisor_disk_status(&self, token: &LeaseToken) -> Result<Option<Value>> {
+        let tx = self.read_entry("supervisor_disk_status")?;
+        let text: Option<String> = tx
+            .query_row(
+                "SELECT disk_status FROM supervisors WHERE token=?1",
+                sql_params![token],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
     /// an idle supervisor owns nothing.
     pub fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
@@ -322,7 +347,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
             SqlWrite::execute(
                 &tx,
                 "UPDATE supervisors SET binary_version=?3, heartbeat_at=?4, handoff_accepted=TRUE,
-                        handoff_binary=NULL, handoff_requested_at=NULL
+                        handoff_binary=NULL, handoff_requested_at=NULL, disk_status=NULL
                  WHERE token=?1 AND pid=?2",
                 sql_params![token, pid, binary_version, self.generators.clock.now()],
             )? == 1,
@@ -946,6 +971,9 @@ impl<E: TransactionEntries> crate::application::CoordinationReads for StoreQueue
 
 /// The [`SupervisorRegistry`] port over the inherent methods above.
 impl<E: TransactionEntries> SupervisorRegistry for StoreQueue<E> {
+    fn set_supervisor_disk_status(&self, token: &LeaseToken, status: Value) -> Result<()> {
+        StoreQueue::set_supervisor_disk_status(self, token, status)
+    }
     fn register_supervisor(
         &mut self,
         token: &LeaseToken,
@@ -1034,6 +1062,9 @@ impl<E: TransactionEntries> SupervisorRegistry for StoreQueue<E> {
 }
 
 impl<E: TransactionEntries> crate::application::SupervisorReads for StoreQueue<E> {
+    fn supervisor_disk_status(&self, token: &LeaseToken) -> Result<Option<Value>> {
+        StoreQueue::supervisor_disk_status(self, token)
+    }
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
         StoreQueue::supervisors(self)
     }
@@ -1058,6 +1089,32 @@ pub(crate) fn holds_lease(conn: &impl SqlRead, id: &RunId, token: &LeaseToken) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_status_is_overwritten_without_events_and_lives_with_the_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("disk");
+        queue.register_supervisor(&token, 1, 1, "test").unwrap();
+        let before = queue.all_events().unwrap().len();
+        assert_eq!(queue.supervisor_disk_status(&token).unwrap(), None);
+        for bytes in [12, 18] {
+            let value = json!({"runs":[{"current":bytes}]});
+            queue
+                .set_supervisor_disk_status(&token, value.clone())
+                .unwrap();
+            assert_eq!(queue.supervisor_disk_status(&token).unwrap(), Some(value));
+        }
+        assert_eq!(queue.all_events().unwrap().len(), before);
+        queue.resume_registration(&token, 1, "next").unwrap();
+        assert_eq!(queue.supervisor_disk_status(&token).unwrap(), None);
+        queue
+            .set_supervisor_disk_status(&token, json!({"current":18}))
+            .unwrap();
+        queue.deregister_supervisor(&token).unwrap();
+        assert_eq!(queue.supervisor_disk_status(&token).unwrap(), None);
+        assert!(queue.set_supervisor_disk_status(&token, json!({})).is_err());
+    }
 
     const STOPPED: &str = crate::domain::marks::SUPERVISOR_STOPPED;
 

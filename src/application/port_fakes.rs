@@ -204,6 +204,9 @@ impl EventStore for SupervisorsAndEvents {
 
 #[allow(unused_variables)]
 impl SupervisorRegistry for SupervisorsAndEvents {
+    fn set_supervisor_disk_status(&self, _: &LeaseToken, _: serde_json::Value) -> Result<()> {
+        unreachable!("disk status write is not reached")
+    }
     fn register_supervisor(
         &mut self,
         token: &LeaseToken,
@@ -283,6 +286,9 @@ impl SupervisorRegistry for SupervisorsAndEvents {
 
 #[allow(unused_variables)]
 impl crate::application::SupervisorReads for SupervisorsAndEvents {
+    fn supervisor_disk_status(&self, _: &LeaseToken) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
         Ok(self.registrations.clone())
     }
@@ -628,6 +634,21 @@ pub(crate) struct RunsAndEvents {
     pub(crate) runs: Vec<TaskRun>,
     pub(crate) events: std::collections::HashMap<RunId, Vec<RunEvent>>,
     pub(crate) event_reads: RefCell<std::collections::HashMap<RunId, usize>>,
+}
+
+impl crate::application::SupervisorReads for RunsAndEvents {
+    fn supervisor_disk_status(&self, _: &LeaseToken) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
+        Ok(vec![])
+    }
+    fn handoff_request(&self, _: &LeaseToken) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn repository_binding(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 #[allow(unused_variables)]

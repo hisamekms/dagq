@@ -1126,7 +1126,7 @@ fn a_supervisor_whose_heartbeat_stopped_ends_within_the_leases_grace_and_keeps_w
     };
     await_passes(&passes, 1);
     // The heartbeat fails from now on: the loop ends on an error.
-    let refuse = "CREATE TRIGGER fail_heartbeat BEFORE UPDATE ON supervisors
+    let refuse = "CREATE TRIGGER fail_heartbeat BEFORE UPDATE OF heartbeat_at ON supervisors
          BEGIN SELECT RAISE(ABORT, 'heartbeat refused by the test'); END;";
     rusqlite::Connection::open(&db)
         .unwrap()

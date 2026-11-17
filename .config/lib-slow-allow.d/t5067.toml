@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::disk_status::measurements_reach_the_recorded_human_and_json_status"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、独立した build と worktree+TMPDIR の測定 job が共有した値・対象・時刻が check_disk、claim の控えの記録、status の文と JSON まで届くことを確かめる。準備は復元済みの待ち1本と別の生きた supervisor の WORKER 1本だけにし、worker・review・着地を実行せず、loop の間隔も1 msに縮めた。この1本を測定側と表示側に分けると記録を通じた配線を守れない。算術・理由・未測定と古さの判断は claim_view と host_ops の unit test に分離済み。"
+task = 5067

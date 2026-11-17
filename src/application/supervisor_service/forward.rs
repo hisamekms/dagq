@@ -2060,6 +2060,9 @@ impl SessionRegistry for SupervisorQueue {
 }
 
 impl SupervisorReads for SupervisorQueue {
+    fn supervisor_disk_status(&self, token: &LeaseToken) -> Result<Option<serde_json::Value>> {
+        self.remote("supervisor_disk_status", vec![to_value(token)?])
+    }
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
         self.remote("supervisors", vec![])
     }
@@ -2072,6 +2075,13 @@ impl SupervisorReads for SupervisorQueue {
 }
 
 impl SupervisorRegistry for SupervisorQueue {
+    fn set_supervisor_disk_status(
+        &self,
+        token: &LeaseToken,
+        status: serde_json::Value,
+    ) -> Result<()> {
+        self.remote("set_supervisor_disk_status", vec![to_value(token)?, status])
+    }
     #[allow(clippy::too_many_arguments)]
     fn register_supervisor(
         &mut self,

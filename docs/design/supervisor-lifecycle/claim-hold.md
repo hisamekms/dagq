@@ -104,7 +104,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 - phaseの性質・候補ごとの必要量と可否を一度決め、開始・控え・askが同じ結果を読む入口は`domain::disk::DiskState::decide`。
 - 方式の違いはWとIの出どころだけで、係数を掛けない。
   方式の入口は`domain::disk::stage_budgets`。
-- 予測方式のWとIは、段ごと（WORKER・INTEGRATOR）のピークの直近の標本から別々に求め、段の標本が無い間は1つの見込みに戻る。
+- W・Iの予測はWORKER・INTEGRATOR各段の直近ピーク標本で求め、標本の無い段は1つの見込みに戻る。
   段ごとのピークは方式によらず記録する（`domain::disk::StagePeaks`）。
 - 動くrunが0本なら最低ラインだけで進め、着地待ちがあればclaimより着地が先に進む。
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
@@ -285,6 +285,8 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
 - claimは再開・復旧jobとの列（`slot_order`）で各自の効く優先度で比べ、`run_claimed`の区分とagingの記録は`domain::claim_facts`が持つ。
 
 ## 記録と見え方
+
+statusの容量の内訳はsupervisorの最新の状態を読む（`application::claim_view`）。
 
 - queue全体の控えは`claim_held` / `claim_resumed`（queueのevent）、着地の控えは`landing_held` / `landing_resumed`、候補ごとの控えは`claim_deferred` / `claim_deferral_ended`（taskのevent）で、欄は各判定のdoc commentが持つ。
 - `candidates`と`graph`は記録を`application::claim_view`で読み、開いている控えのtaskを順から除いて別に出す（[ADR-t1992-1](../../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。

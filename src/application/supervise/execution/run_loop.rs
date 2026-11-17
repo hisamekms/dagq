@@ -589,6 +589,9 @@ impl Supervisor<'_> {
                         &self.layout.runs_dir,
                     ),
                     usage: disk_usage(phase, !run.in_container(), true),
+                    task: run.task_id(),
+                    phase: phase.name().to_owned(),
+                    container: run.in_container(),
                     candidate: awaiting_slot
                         || run.status() == RunStatus::AwaitingIntegration
                         || run.status() == RunStatus::Integrating,
@@ -607,12 +610,14 @@ impl Supervisor<'_> {
                 .filter(|r| r.usage.stage == crate::domain::disk::DiskStage::Integrator)
                 .count();
             let landing_waiting = !landings.is_empty() && self.landing_goes_but_for_disk();
+            let parallel = self.claim.parallel;
             self.on_host(|host, env| {
                 host.check_disk(
                     env,
                     options.disk_cleanup_interval,
                     &held,
                     super::super::host_ops::disk::DiskMoves {
+                        parallel,
                         in_flight,
                         landing,
                         landing_waiting,

@@ -74,6 +74,7 @@ struct Measured {
     target: MovingTarget,
     bytes: Option<u64>,
     at: Instant,
+    unix_ms: i64,
 }
 
 /// The latest measure of each registered run, written by the walk's thread and
@@ -146,8 +147,17 @@ impl MovingSizes {
                 // counts toward the measure's age: a walk stuck past the
                 // stale bound leaves a value that is stale already.
                 let at = clock.monotonic();
+                let unix_ms = crate::application::claim_view::disk_measured_at(&*clock);
                 let bytes = target.measure(&measure);
-                lock(&shared).insert(target.run.clone(), Measured { target, bytes, at });
+                lock(&shared).insert(
+                    target.run.clone(),
+                    Measured {
+                        target,
+                        bytes,
+                        at,
+                        unix_ms,
+                    },
+                );
             }
         }));
     }
@@ -168,6 +178,15 @@ impl MovingSizes {
             } else if walking.join().is_err() {
                 warn!("the measure of the runs moving panicked");
             }
+        }
+    }
+
+    /// One immutable pass read: reservation and display must not observe
+    /// different values if the measurement job finishes between their reads.
+    pub(in crate::application::supervise) fn frozen(&self) -> Self {
+        Self {
+            measured: Arc::new(Mutex::new(lock(&self.measured).clone())),
+            ..Self::default()
         }
     }
 
@@ -192,6 +211,25 @@ impl MovingSizes {
             Duration::from_secs(MOVING_SIZE_INTERVAL_SECS),
         )
         .map(|bytes| (bytes, m.at))
+    }
+
+    /// Display the same target's raw value, retaining stale bytes and time.
+    pub(in crate::application::supervise) fn snapshot(
+        &self,
+        target: &MovingTarget,
+        now: Instant,
+    ) -> (Option<u64>, Option<i64>, bool) {
+        let measured = lock(&self.measured);
+        match measured.get(&target.run).filter(|m| m.target == *target) {
+            Some(m) => (
+                m.bytes,
+                Some(m.unix_ms),
+                now.saturating_duration_since(m.at)
+                    > Duration::from_secs(MOVING_SIZE_INTERVAL_SECS)
+                        * crate::domain::disk::MOVING_SIZE_STALE_INTERVALS,
+            ),
+            None => (None, None, false),
+        }
     }
 
     /// Trusted sizes shared by reservation, exceedance and stage peak
@@ -447,6 +485,14 @@ mod tests {
             + Duration::from_secs(1);
         assert_eq!(moving.remaining(&ab, expected, stale), 20 * GIB);
         assert_eq!(
+            moving.snapshot(&ab[1], stale),
+            (Some(12 * GIB), Some(0), true)
+        );
+        assert_eq!(
+            moving.snapshot(&target("b", Some("/different")), stale),
+            (None, None, false)
+        );
+        assert_eq!(
             moving.remaining_with_counts(&ab, expected, stale),
             (20 * GIB, 0, 2)
         );
@@ -466,6 +512,7 @@ mod tests {
         wait(&mut moving, TEST);
         assert_eq!(walks.load(Ordering::SeqCst), 5);
         assert_eq!(moving.remaining(&ab, expected, start), 6 * GIB);
+        let frozen = moving.frozen();
         // Another worktree of `a`: whole, and walked at once.
         let moved = [target("a", Some("/a2")), target("b", Some("/b"))];
         assert_eq!(moving.remaining(&moved, expected, start), 10 * GIB);
@@ -479,6 +526,11 @@ mod tests {
         assert_eq!(
             moving.remaining(&moved, expected, start + interval),
             19 * GIB
+        );
+        assert_eq!(frozen.current(&ab[1], start + interval), Some(12 * GIB));
+        assert_eq!(
+            frozen.snapshot(&ab[1], start + interval),
+            (Some(12 * GIB), Some(0), false)
         );
         // A run no longer moving is forgotten; with none moving no walk.
         moving.pass(&[], &measure, &dyn_clock, start + interval * 2);

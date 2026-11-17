@@ -198,6 +198,9 @@ impl EventStore for JobQueue {
 
 #[allow(unused_variables)]
 impl SupervisorReads for JobQueue {
+    fn supervisor_disk_status(&self, _: &LeaseToken) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
         unreachable!("supervisors is not what the test reaches")
     }
@@ -211,6 +214,9 @@ impl SupervisorReads for JobQueue {
 
 #[allow(unused_variables)]
 impl SupervisorRegistry for JobQueue {
+    fn set_supervisor_disk_status(&self, _: &LeaseToken, _: serde_json::Value) -> Result<()> {
+        unreachable!("disk status write is not reached")
+    }
     fn register_supervisor(
         &mut self,
         token: &LeaseToken,

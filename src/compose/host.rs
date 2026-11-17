@@ -1614,6 +1614,7 @@ pub(super) fn host_metrics_port(
             take(now, &toolchains).with_disk(disk(&runs).or_else(|| disk(&queue_dir)))
         }),
         held_targets: Some(crate::application::supervise::HeldTargetsPort {
+            clock: Arc::new(crate::infrastructure::clock::SystemClock),
             interval: settings.held_targets_interval,
             // A `dagq.toml` that does not read names no directory: unknown,
             // not 0 bytes.
