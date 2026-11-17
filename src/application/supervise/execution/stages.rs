@@ -107,10 +107,20 @@ impl SlotTable {
             .collect()
     }
 
-    /// The slots in use: every run but the waiting ones and those waiting
-    /// to go back (ADR-0062 decision 5).
-    pub(super) fn used(&self) -> usize {
-        self.slots.iter().filter(|slot| !slot.out_of_slot()).count()
+    /// Worker capacity shared by claim, resume, recovery, adoption, stranded
+    /// runs, e2e admission, landing-answer admission and human-wait returns.
+    /// Review and e2e stay workers; only human waits and the bounded landing
+    /// lane leave capacity (ADR-t5107-1).
+    pub(super) fn used(&self, parallel: usize) -> usize {
+        light_slots::worker_slots(
+            self.slots.iter().filter(|slot| !slot.out_of_slot()).count(),
+            self.slots
+                .iter()
+                .filter(|slot| !slot.out_of_slot() && matches!(slot.phase, Phase::Landing(_)))
+                .count(),
+            self.landing_queue(),
+            parallel,
+        )
     }
 
     /// The runs that wait only for their landing turn (ADR-t1591-1).
@@ -452,8 +462,8 @@ pub(super) struct ClaimState {
     pub(super) supervisor_error: Option<String>,
     /// True only before deployment rules have ever been read successfully.
     pub(super) repository_config_missing: bool,
-    /// `[supervisor] light_changes` as last read (ADR-t1591-1): the tasks
-    /// claimed in the room the landing queue leaves.
+    /// `[supervisor] light_changes` as last read: candidate classification,
+    /// independent of worker capacity.
     pub(super) light_changes: crate::domain::light_slots::LightChanges,
     /// Since when, in Unix milliseconds, a claim this process would make
     /// waits for the spacing after the queue's latest claim (ADR-t1479-1);
@@ -487,13 +497,7 @@ pub(super) struct ClaimState {
 impl ClaimState {
     /// The room for the next claim under `parallel` (ADR-t1591-1).
     pub(super) fn room(&self, parallel: usize) -> light_slots::ClaimRoom {
-        light_slots::claim_room(
-            self.slots.used(),
-            self.slots.landing_queue(),
-            parallel,
-            self.slots.returning(),
-            !self.light_changes.is_empty(),
-        )
+        light_slots::claim_room(self.slots.used(parallel), parallel, self.slots.returning())
     }
 
     /// Record where the slots of a class fill up or free again, as the
@@ -525,7 +529,7 @@ impl ClaimState {
                 pre_claim::open_at_start(newest.as_ref().ok().map(|newest| newest.first()), &full)
             }
         };
-        let used = self.slots.used();
+        let used = self.slots.used(parallel);
         pre_claim::record_slots_full(&mut open, &full, |kind, class, after| {
             let payload = pre_claim::slots_full_payload(token, class, after, used, parallel);
             match log.record_queue_event(kind, payload) {
@@ -814,13 +818,13 @@ mod tests {
             table.admit(slot(id));
         }
         assert_eq!(
-            (table.used(), table.waiting(), table.returning()),
+            (table.used(3), table.waiting(), table.returning()),
             (3, 0, 0)
         );
         table.leave_for(0, waiting(None));
         table.leave_for(1, waiting(Some(10)));
         assert_eq!(
-            (table.used(), table.waiting(), table.returning()),
+            (table.used(3), table.waiting(), table.returning()),
             (1, 2, 1)
         );
         let files = crate::application::memory_files::MemoryFiles::default();
@@ -829,7 +833,7 @@ mod tests {
         assert_eq!(regained.and_then(|w| w.ended).map(|(at, _)| at), Some(10));
         assert!(table.regain(1, &files, now).is_none());
         assert_eq!(
-            (table.used(), table.waiting(), table.returning()),
+            (table.used(3), table.waiting(), table.returning()),
             (2, 1, 0)
         );
     }
@@ -846,8 +850,8 @@ mod tests {
     }
 
     /// The room for a claim follows the slots the table holds: full slots
-    /// leave none, a landing queue leaves room for a light task only when
-    /// light changes are set, and a run waiting to go back takes the room
+    /// leave none, a landing queue leaves room for any change regardless of
+    /// light changes, and a run waiting to go back takes the room
     /// first.
     #[test]
     fn the_claim_room_follows_the_slots_held() {
@@ -855,8 +859,8 @@ mod tests {
         let set = ChangeSet::new(vec![docs.clone()]).unwrap();
         let light = LightChanges::new(vec![docs], Some(&set)).unwrap();
         for (light, want) in [
-            (LightChanges::default(), ClaimRoom::None),
-            (light, ClaimRoom::LightOnly),
+            (LightChanges::default(), ClaimRoom::Any),
+            (light, ClaimRoom::Any),
         ] {
             let mut claim = claim_state(light);
             assert_eq!(claim.room(2), ClaimRoom::Any);
@@ -870,6 +874,75 @@ mod tests {
             claim.slots.leave_for(2, waiting(Some(1)));
             assert_eq!(claim.room(2), ClaimRoom::None);
         }
+    }
+
+    /// Every admission path reads this table through used_slots; claim room
+    /// adds only returning precedence. Literal counts cover the phase wiring,
+    /// including a failed landing leaving the lane and a human return.
+    #[test]
+    fn admission_uses_worker_capacity_across_landing_review_e2e_and_returns() {
+        let mut claim = claim_state(LightChanges::default());
+        claim.parallel = 3;
+        claim.slots.admit(slot("worker"));
+        let mut landing = slot("landing");
+        landing.phase = Phase::Landing(None);
+        claim.slots.admit(landing);
+        for id in ["queued1", "queued2"] {
+            let mut queued = slot(id);
+            queued.landing_turn = true;
+            claim.slots.admit(queued);
+        }
+        assert_eq!(claim.slots.used(3), 1);
+        assert_eq!(claim.room(3), ClaimRoom::Any);
+        assert!(
+            !super::super::landing::approved_landing_waits(false, claim.slots.used(3), 3, || Ok(
+                false
+            ))
+            .unwrap()
+        );
+        // A landing failure's needs_session is no longer a landing phase.
+        claim.slots.slots[1].run = with_status(&claim.slots[1], RunStatus::NeedsSession);
+        claim.slots.slots[1].phase = Phase::AwaitingSlot;
+        assert_eq!(claim.slots.used(3), 2);
+        // A resume may now take the one free worker slot, as may review/e2e.
+        for phase in [
+            Phase::ReviewHeld {
+                session: None,
+                retried: false,
+                providers: vec![],
+            },
+            Phase::AwaitingE2e,
+        ] {
+            let mut active = slot("active");
+            active.phase = phase;
+            claim.slots.admit(active);
+            assert_eq!(claim.slots.used(3), 3);
+            assert_eq!(claim.room(3), ClaimRoom::None);
+            assert!(
+                super::super::landing::approved_landing_waits(
+                    false,
+                    claim.slots.used(3),
+                    3,
+                    || Ok(false)
+                )
+                .unwrap()
+            );
+            claim.slots.release(4);
+        }
+        claim.slots.leave_for(0, waiting(Some(1)));
+        assert_eq!(claim.slots.used(3), 1);
+        assert_eq!(claim.room(3), ClaimRoom::None);
+        let files = crate::application::memory_files::MemoryFiles::default();
+        assert!(claim.slots.regain(0, &files, origin()).is_some());
+        assert_eq!(claim.slots.used(3), 2);
+        assert_eq!(claim.room(3), ClaimRoom::Any);
+        for id in ["queued3", "queued4", "queued5"] {
+            let mut queued = slot(id);
+            queued.landing_turn = true;
+            claim.slots.admit(queued);
+        }
+        assert_eq!(claim.slots.used(3), 4);
+        assert_eq!(claim.room(3), ClaimRoom::None);
     }
 
     /// The load windows follow the runs the slots hold.

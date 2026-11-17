@@ -46,7 +46,7 @@ hostの負荷・空き容量・providerの壁で止まるときはqueue全体の
 passの初め（[run.env]の検査の次）: 空き容量 → 足りなければ掃除のjob → それでも足りなければinboxにask
 fill pass（adopt・answerの適用・resume・triage・sweepの後）
   └─ claimの前: queue全体の控え（provider → 空き容量 → load average）→ 控えるならこのpassはclaimしない
-       └─ claimのloop: claimの間隔 → 軽い枠か → 候補ごとの控え（worker → build → hotspot）
+       └─ claimのloop: claimの間隔 → workerのslotの空き → 候補ごとの控え（worker → build → hotspot）
             └─ 残りの候補を実行区分の上限とagingで並べる → claim → 進行中のrunを読み直して次の周
 ```
 
@@ -54,7 +54,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 - queue全体の控えの判定は`domain::claim_hold::ClaimHold::judge`で、supervisorの側は`Supervisor::hold_claims`である。
 - 候補ごとの控えの判定は`domain::claim_defer`（hotspot・worker）と`domain::build_wait`、supervisorの側は`application/supervise/execution/claim_defer.rs`である。
-- claimの間隔は`domain::claim_spacing`、軽い枠は`domain::light_slots`、実行区分の上限とagingは`domain::claim_order`、調査中の計画は`domain::investigation`が持つ。
+- claimの間隔は`domain::claim_spacing`、workerのslotは`domain::light_slots`、実行区分の上限とagingは`domain::claim_order`、調査中の計画は`domain::investigation`が持つ。
 - 空き容量の閾値は`domain::disk`、確かめと掃除と着地の控えは`application/supervise/host_ops/disk.rs`が持つ。
 - 認証と利用上限のaskの検知・answerの適用・askを閉じることは[認証と利用上限のaskの待ちとanswer](queue-hold.md)が持ち、ここはその控えだけを持つ。
 - taskを1つずつ待たせるholdは別の層で、下の「taskのhold」。
@@ -191,16 +191,15 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 - 間隔の待ちは`claim_held` / `claim_resumed`にせず、observerと`stats`の控えの数え方に混ぜない。
 - `--once`のsupervisorは、runが無く次のclaimが間隔を待つpassで終わる。
 
-## 着地待ちが空けた軽い枠
+## workerのslotと着地の列
 
-- reviewとe2eを終えて着地の順番を待つだけのrunが空けた枠では、repositoryが軽いと決めたchangeのtaskだけをclaimする（[ADR-t1591-1](../../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)）。
-- 着地待ちの印は`Slot::landing_turn`で、見るたびに付け直し、着地待ちに出入りするeventは無い。
-- 判定は`domain::light_slots::claim_room`で、軽い枠の周は`--paths`を宣言した軽いchangeのtaskだけを残し、interrupt・urgentでも軽くないtaskは残さない。
-- queue全体の控えはloopの前に効くので軽い枠でもclaimせず、claimの間隔も同じに効く（`domain::light_slots::gated`）。
-- parkしたrunのresume・待ちからの戻り・triage・adoptは軽い枠を使わない。
-- 軽い枠の周で取れない候補は`light_room`の控えとして記録し、agingは軽いtaskだけに当てる（`claim_order::light_room_deferred`）。
-  控えは通常の枠の短い空きを挟んでも続け、`candidates`は生きたsupervisorの通常の枠が空けば順から外さない（`claim_order::in_effect`）。
-- `stats`の空きslotと`kpi`のslotの使用率は軽い枠を数えず、着地待ちを含めて数える。
+着地中と、review・e2eを終えて着地の順番だけを待つrunは着地の列に属し、workerのslotに数えない。
+順番待ちを外に数える上限はworkerの並列度までで、超過分はworkerのslotに数えて背圧にする。
+review・e2e・revise・resumeの途中はworkerのslotに残す。
+軽い枠は無く、claimの可否はchangeによらずworkerのslotの空きで決まり、人の待ちからの戻りを新しいclaimより先にする。
+load・ディスク・claimの間隔の関門はすべてのclaimに効き、着地はloadで止めない。
+`stats`の空きslotと`kpi`のslotの使用率は着地待ちを含めて数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
+数え方の入口は `domain::light_slots::worker_slots`、claimの可否は `domain::light_slots::claim_room`。
 
 ## 調査中の計画の上限
 

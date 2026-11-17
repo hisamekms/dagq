@@ -1139,7 +1139,8 @@ impl DiskState {
     }
 
     /// floor((free - reserve - U - empty-slot I) / W). The caller combines
-    /// this with the configured parallel/available-slot upper bound as before.
+    /// this with the worker parallel/available-worker-slot upper bound;
+    /// integrating runs and bounded landing-turn waits do not consume it.
     /// Idle progress allows at least one even when the empty slot consumes
     /// the room. Unknown free space or W=0 imposes no numeric limit.
     pub fn claims(&self, share: f64) -> Option<usize> {

@@ -3096,15 +3096,20 @@ impl Supervisor<'_> {
     /// ([`RunHistory::queued_approval`]) or by the recovery of a landing
     /// it may land again (task 1118, [`RunHistory::recovered_landing`]):
     /// awaiting integration, nobody
-    /// leasing it, once a slot is free, no run integrates, and the landing
+    /// leasing it, once worker capacity is free, no run integrates, and the landing
     /// would not fail on a missing program (ADR-0049 decision 9), an
     /// unresolved landing branch (ADR-t615-1) or short free disk space
-    /// (task 377). Called before new claims, so a queued run lands first;
-    /// the queue is read from the events, so a run approved under another
+    /// (task 377). Called before new claims, so an eligible run starts
+    /// landing first. An occupied landing lane keeps it queued but leaves
+    /// worker claims free; they need not wait for that landing to finish.
+    /// The queue is read from the events, so a run approved under another
     /// supervisor is landed once, with its ask left closed (task 949).
     /// A landing that fails to start is only noted by the caller, which goes on,
-    /// and the run stays queued for a later pass. `approved_only` leaves the
-    /// recovered landings out: only the runs a `land` answer queued
+    /// and the run stays queued for a later pass.
+    /// Worker capacity is checked before leasing: this run may still need
+    /// e2e, which enters the worker stage before the serial landing lane.
+    /// Existing landing-lane runs do not consume that capacity.
+    /// `approved_only` leaves recovered landings out: only the runs a `land` answer queued
     /// ([`RunHistory::queued_approval`]).
     pub(super) fn start_approved_landings(
         &mut self,
@@ -3614,7 +3619,7 @@ pub(super) fn landing_answer_to_apply(
 
 /// Whether a run queued to land waits on this pass: a hold of the landing
 /// (`held`: a missing `[run.env]` program, the CI hold, an unresolved
-/// landing branch or short disk space), no free slot (`used` of
+/// landing branch or short disk space), no free worker slot (`used` of
 /// `parallel`), or another run integrating (`integrating`, read only when
 /// nothing before it waits).
 pub(super) fn approved_landing_waits(

@@ -385,7 +385,7 @@ task = 1707
 # 6.024s, class D
 [[test]]
 name = "runtime_light_slots::a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: slot allocation and resume ordering"
+reason = "B 境界（Git・SQLite・workerのプロセス）: 着地の順番待ちの隣で実際のsupervisorがneeds_sessionのrunをresumeし、そのworker容量が空いてから同じ優先度の重いtaskをclaimする順を、実際のsessionとSQLiteのresume_started/run_claimedの順で確かめる。容量の判断はdomain::light_slotsのunit test"
 task = 1707
 
 # 5.514s, class B
@@ -909,7 +909,7 @@ task = 1489
 # 12.1s (stress 5 with eleven others at once, task 1489)
 [[test]]
 name = "runtime_light_slots::in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show"
-reason = "B 境界（SQLite・Git・supervisor の配線・CLI）: 着地待ちが空けた軽い枠で supervisor が軽い候補だけに aging を当て、取れない候補を light_room で記録し、candidates がその記録から claim と同じ順と aged を出すことを、着地の順番を待つ run・load の保留・ready の時刻の差で確かめる。aging の判断は domain::claim_order、表示の入力は application::claim_view の unit test"
+reason = "B 境界（Git・SQLite・workerのプロセス・CLI）: 実際のsupervisorがloadの保留後に重い候補も含めた順でclaimし、candidatesが残る全候補の順とagedを表示してlight_roomの控えを持たないことを、着地の順番待ち、ready時刻の差、GitのworktreeとSQLiteのeventを通して確かめる。agingの判断はdomain::claim_orderのunit test"
 task = 1489
 
 # 11.2s (stress 5 with twelve others at once; 5.4 s alone, task 1489)
@@ -1530,8 +1530,8 @@ task = 2163
 
 # 11.759s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
-name = "runtime_light_slots::the_landing_queue_leaves_room_for_light_tasks_only"
-reason = "B 境界（守る境界）: the supervisor's slot wiring: one supervisor claims a light task beside a run waiting for its landing turn, with Git, SQLite and the stub worker processes"
+name = "runtime_light_slots::the_landing_queue_leaves_room_for_the_heavy_interrupt"
+reason = "B 境界（Git・SQLite・workerのプロセス）: 実際のsupervisorが着地の順番待ちの隣で重いinterruptをclaimし、run_claimedにlight_roomを付けず、順番待ちの超過で次のclaimを止め、statusが着地待ちを示すことを、GitのworktreeとSQLiteのeventとstub workerを通して確かめる。容量の判断はdomain::light_slotsのunit test"
 task = 2394
 
 # 10.485s in task 2394's stress, whose change to it was the type of its kind comparisons
@@ -1732,7 +1732,7 @@ task = 2240
 # 11s to 23s in stress under the host's load (task 2409): the fixture's landing queue, then the config read again on each turn
 [[test]]
 name = "runtime_light_slots::a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes"
-reason = "B 境界（supervisor の配線・dagq.toml の読み直し・SQLite・CLI）: 着地待ちが空けた軽い枠と空いた通常の枠を実際の supervisor の pass で行き来させ、light_room の記録が 1 本のまま続き stats と status の claim_deferrals が増えないこと、空いた枠の claim が記録を持つ task を取ることを確かめる。続ける判断は domain::claim_order::class_deferral_step の unit test"
+reason = "B 境界（dagq.tomlの読み直し・Git・SQLite・workerのプロセス・CLI）: 着地待ちの隣で実際のsupervisorがparallelとclaim_spacingの変更を読み直し、間隔中は重いtaskをclaimせず、candidatesの順を保ってlight_roomを記録せず、間隔を外すとそのtaskをclaimすることを確かめる。容量と間隔の判断はdomainのunit test"
 task = 2409
 
 # 3s to 8s in stress under the host's load (task 2409): the fixture's claimed run, then a supervisor's passes

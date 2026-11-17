@@ -1,7 +1,7 @@
 //! The answers of `approve_landing` asks wired from the answer to what the
 //! supervisor does with the run: a pass applies the answer whatever the
-//! slots and closes the ask, a `land` queues the run, which lands once
-//! there is room, before new claims, and in the order of the approvals; a
+//! slots and closes the ask. A `land` queues the run for the serial
+//! landing, in approval order; claims can use worker room beside that lane. A
 //! `retry_review` reviews a failed review's run again; a supervisor that
 //! drains applies the answers but starts no new work (ADR-t3330-1). Which
 //! answer applies, and when an approved run lands, is
@@ -112,13 +112,14 @@ fn running(queue: &mut SqliteQueue, task: TaskId) -> bool {
 /// A `land` answer, with a reason, given while the only slot runs another
 /// task is applied on the next pass: the ask closes, `landing_queued`
 /// (`via: approve`) is recorded and the run waits unleased, `status`
-/// saying it is queued to land. Once the slot is free, it lands before
-/// the next task is claimed.
+/// saying it is queued to land. As that worker enters the serial landing,
+/// the next task can claim its worker room even while the approved run
+/// still waits unleased for the occupied landing lane.
 #[test]
-fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim() {
+fn a_land_answer_waits_unleased_and_does_not_hold_worker_claims_behind_a_landing() {
     const LAND_WITH_A_REASON: &str = "land: review 3, the findings are docs only";
     let mut wiring = Wiring::new(
-        "a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim",
+        "a_land_answer_waits_unleased_and_does_not_hold_worker_claims_behind_a_landing",
         Script {
             receipts: vec![succeeded, succeeded, succeeded],
             verdicts: vec![concern(), verdict("pass", "fine")],
@@ -140,13 +141,24 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
         }
         Ok(Some(0))
     });
-    let second = wiring.ready_task(&["true"]);
+    const SECOND_LANDING: &str = "second-landing-check";
+    let second = wiring.ready_task(&[SECOND_LANDING]);
+    let (release_landing, landing) = mpsc::channel();
+    wiring.verifier.on_command(
+        SECOND_LANDING,
+        Box::new(move || {
+            landing
+                .recv_timeout(super::harness::LIMIT)
+                .expect("the next worker claim releases the landing");
+        }),
+    );
     let third = wiring.ready_task(&["true"]);
     // Task 2's turn holds the only slot until the answer is applied.
     let (release, released) = mpsc::channel();
     wiring.agent.hold_next_turn(released);
     let mut answered = false;
     let mut observed = None;
+    let mut claimed_during_landing = false;
     wiring.supervise_once_while(|queue| {
         if !answered {
             if running(queue, second) {
@@ -192,26 +204,42 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
             }
             return false;
         }
-        if queue.read_ask(ask.id).unwrap().closed_at.is_none() {
+        if observed.is_none() {
+            if queue.read_ask(ask.id).unwrap().closed_at.is_none() {
+                return false;
+            }
+            let detail = queue.show(first).unwrap();
+            let queued: Vec<Value> = payloads(&detail, "landing_queued")
+                .into_iter()
+                .cloned()
+                .collect();
+            observed = Some((
+                queue.show(second).unwrap().runs[0].status(),
+                detail.runs[0].status(),
+                queued,
+                queue.run_lease(detail.runs[0].id()).unwrap().is_some(),
+                wiring.status(),
+            ));
+            let _ = release.send(());
             return false;
         }
-        let detail = queue.show(first).unwrap();
-        let queued: Vec<Value> = payloads(&detail, "landing_queued")
-            .into_iter()
-            .cloned()
-            .collect();
-        observed = Some((
+        if queue.show(third).unwrap().runs.is_empty() {
+            return false;
+        }
+        assert_eq!(
             queue.show(second).unwrap().runs[0].status(),
-            detail.runs[0].status(),
-            queued,
-            queue.run_lease(detail.runs[0].id()).unwrap().is_some(),
-            wiring.status(),
-        ));
-        let _ = release.send(());
+            RunStatus::Integrating
+        );
+        let approved = queue.show(first).unwrap().runs[0].clone();
+        assert_eq!(approved.status(), RunStatus::AwaitingIntegration);
+        assert!(queue.run_lease(approved.id()).unwrap().is_none());
+        claimed_during_landing = true;
+        release_landing.send(()).unwrap();
         true
     });
     let (second_status, first_status, queued, leased, status) =
         observed.expect("the answer was applied");
+    assert!(claimed_during_landing);
     assert_eq!(second_status, RunStatus::Running);
     assert_eq!(first_status, RunStatus::AwaitingIntegration);
     assert_eq!(queued, [json!({"via": "approve", "ask_id": ask.id})]);
@@ -246,15 +274,19 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
         .collect::<Vec<_>>();
     assert_eq!(approved.len(), 1);
     assert_eq!(approved[0]["ask_id"], ask.id.as_i64());
-    // Task 2 held the slot and landed first; the approved run landed
-    // before task 3 was claimed.
+    // Task 3 claims worker capacity while task 2 is held integrating and
+    // the approved run waits unleased. The landing lane remains serial.
     assert!(
         first_event(&mut queue, second, "run_integrated")
             < first_event(&mut queue, first, "integration_started")
     );
     assert!(
-        first_event(&mut queue, first, "run_integrated")
+        first_event(&mut queue, second, "integration_started")
             < first_event(&mut queue, third, "run_claimed")
+    );
+    assert!(
+        first_event(&mut queue, third, "run_claimed")
+            < first_event(&mut queue, second, "run_integrated")
     );
     assert!(
         queue

@@ -337,9 +337,7 @@ impl Supervisor<'_> {
         pass: &mut ClaimPass,
     ) -> Result<ClaimStep> {
         loop {
-            // A heavy task needs a slot with the landing queue in it, as
-            // always; the room the landing queue leaves takes only a light
-            // task (ADR-t1591-1).
+            // Every change uses the same worker capacity (ADR-t5107-1).
             let room = self.claim_room(parallel);
             if room == ClaimRoom::None {
                 return Ok(ClaimStep::Stop);

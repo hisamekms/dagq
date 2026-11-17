@@ -12,6 +12,8 @@ amends:
   - adr-0071 decision 8
   - adr-0071 decision 12
   - adr-t610-1 decision 1
+amended_by:
+  - adr-t5107-1
 owners:
   - hisamekms
 tags:

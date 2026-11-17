@@ -39,9 +39,8 @@ use super::{
     supervisor_life::{self, LifeEnd},
 };
 
-/// The slots a class of tasks needs (ADR-t1591-1): a heavy task needs a
-/// slot with the landing queue in it, a light one only the room the
-/// landing queue leaves.
+/// Historical slot classes retained for recorded intervals. New claims
+/// share worker capacity regardless of the candidate's light classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotClass {
@@ -67,8 +66,8 @@ impl SlotClass {
 }
 
 /// The classes whose slots are all full when the next claim has `room`:
-/// `heavy` without a free slot, `light` (only when the supervisor has
-/// light changes) without even the light room.
+/// `heavy` without worker capacity, and `light` (when configured) at the
+/// same boundary. `LightOnly` remains readable for historical callers.
 pub fn full_classes(room: ClaimRoom, light: bool) -> BTreeSet<SlotClass> {
     let mut full = BTreeSet::new();
     if room != ClaimRoom::Any {

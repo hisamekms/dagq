@@ -1,6 +1,5 @@
-//! Runtime tests: a run that waits only for its landing turn leaves room
-//! for a task of `[supervisor] light_changes` that declares its `--paths`,
-//! and only for one (ADR-t1591-1).
+//! Runtime tests: landing-turn waits leave worker capacity for any change.
+//! Historical light-room deferrals remain readable.
 use crate::runtime_support;
 use dagq::application::DraftPlannerStore;
 use dagq::domain::EventKind;
@@ -89,14 +88,10 @@ fn landing_queued(db: &Path, task: TaskId) -> bool {
         .any(|event| event.kind == EventKind::LandingQueued)
 }
 
-/// With `light_changes = ["docs"]` and one slot, a run whose review passed
-/// waits for its landing turn behind another landing: the room it leaves
-/// claims the `docs` task that declares its paths, and neither the
-/// `feature` task (interrupt) nor the `docs` task without paths, which wait
-/// for a slot with the landing queue in it. `status` shows the landing
-/// queue out of the slots, and the light claim says so.
+/// A landing-turn wait leaves room for the heavy interrupt first. Once
+/// that run queues too, the excess over parallel supplies backpressure.
 #[test]
-fn the_landing_queue_leaves_room_for_light_tasks_only() {
+fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
     let (_dir, repo, db, blocker) = awaiting_run();
     // Another landing holds the single integration slot.
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -138,7 +133,7 @@ fn the_landing_queue_leaves_room_for_light_tasks_only() {
     });
     await_passes(&passes, SOME_PASSES);
 
-    let heavy = add_task(&db, "heavy", "feature", &["src/**"], Priority::Interrupt);
+    let heavy = add_task(&db, "heavy", "feature", &["file-*"], Priority::Interrupt);
     let unscoped = add_task(&db, "unscoped", "docs", &[], Priority::High);
     let light = add_task(&db, "light", "docs", &["file-*"], Priority::Normal);
     // The fixture's run of task 1 was the first claim.
@@ -146,10 +141,10 @@ fn the_landing_queue_leaves_room_for_light_tasks_only() {
     let claimed = claims(&db);
     assert_eq!(claimed[1].0, first, "{claimed:?}");
     assert!(claimed[1].1.get("light_room").is_none(), "{claimed:?}");
-    assert_eq!(claimed[2].0, light, "{claimed:?}");
-    assert_eq!(claimed[2].1["light_room"], true, "{claimed:?}");
-    // It counted the run in the landing queue among the slots.
-    assert_eq!(claimed[2].1["slots"], 1, "{claimed:?}");
+    assert_eq!(claimed[2].0, heavy, "{claimed:?}");
+    assert!(claimed[2].1.get("light_room").is_none(), "{claimed:?}");
+    // The queued run leaves worker capacity.
+    assert_eq!(claimed[2].1["slots"], 0, "{claimed:?}");
     // The table read at the start is no change.
     assert!(
         !SqliteQueue::open(&db)
@@ -185,10 +180,10 @@ fn the_landing_queue_leaves_room_for_light_tasks_only() {
         .unwrap_or_else(|| panic!("{status}"));
     assert_eq!(listed["progress"]["slot"], "landing_queue", "{listed}");
 
-    // Further passes claim neither the heavy task nor the one without paths.
+    // The queued excess holds further claims.
     await_passes(&passes, SOME_PASSES);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    for task in [heavy, unscoped] {
+    for task in [light, unscoped] {
         assert_eq!(
             queue.show(task).unwrap().task.status(),
             TaskStatus::Ready,
@@ -226,11 +221,8 @@ fn task_events(db: &Path, task: TaskId) -> Vec<(i64, String)> {
         .collect()
 }
 
-/// A parked `needs_session` run waits for a normal slot: while the landing
-/// queue fills `parallel`, it is not resumed and only the light task is
-/// claimed; once the slots free, it is resumed ahead of a new claim of the
-/// same effective priority (ADR-t1850-1): its task, set to interrupt while
-/// in progress, goes before the interrupt one.
+/// A parked run resumes in the worker capacity the landing queue leaves,
+/// ahead of a new claim at the same priority.
 #[test]
 fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
     let (_dir, repo, db) = fixture();
@@ -290,36 +282,24 @@ fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
     });
     await_passes(&passes, SOME_PASSES);
 
-    // The run parks while the landing queue fills the slot.
+    queue
+        .set_priority(TaskId::new(2), Some(Priority::Interrupt))
+        .unwrap();
+    // The landing queue leaves worker capacity for the parked run.
     queue
         .park_rechecked(parked.id(), None, "parked for the test", json!({}))
         .unwrap()
         .unwrap();
-    let heavy = add_task(&db, "heavy", "feature", &["src/**"], Priority::Interrupt);
-    let light = add_task(&db, "light", "docs", &["file-*"], Priority::Normal);
-    // Tasks 1 and 2, then `first`, then the light one.
-    wait_until(&db, Duration::from_secs(60), |_| claims(&db).len() == 4);
-    let claimed = claims(&db);
-    assert_eq!(claimed[3].0, light, "{claimed:?}");
-    assert_eq!(claimed[3].1["light_room"], true, "{claimed:?}");
-    await_passes(&passes, SOME_PASSES);
-    let kinds = task_events(&db, TaskId::new(2));
-    assert!(
-        !kinds.iter().any(|(_, kind)| kind == "resume_started"),
-        "{kinds:?}"
-    );
-    assert_eq!(
-        queue.run(parked.id()).unwrap().status(),
-        RunStatus::NeedsSession
-    );
-    assert_eq!(queue.show(heavy).unwrap().task.status(), TaskStatus::Ready);
-
-    // The other landing gives its slot back: `first` and the light run
-    // land, and the freed slot resumes the parked run, raised to the heavy
-    // task's priority, before the claim.
-    queue
-        .set_priority(TaskId::new(2), Some(Priority::Interrupt))
-        .unwrap();
+    let heavy = add_task(&db, "heavy", "feature", &["file-*"], Priority::Interrupt);
+    wait_until(&db, Duration::from_secs(120), |_| {
+        task_events(&db, TaskId::new(2))
+            .iter()
+            .any(|(_, kind)| kind == "resume_started")
+    });
+    // Once the resumed turn releases worker capacity, the next claim may
+    // start even while the first run still waits in the landing lane.
+    wait_until(&db, Duration::from_secs(120), |_| claims(&db).len() == 4);
+    stop.store(true, Ordering::SeqCst);
     queue
         .abort_integration(
             blocker.id(),
@@ -329,12 +309,6 @@ fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
             &dagq::domain::Reason::new(ReasonCode::Other),
         )
         .unwrap();
-    wait_until(&db, Duration::from_secs(120), |_| {
-        task_events(&db, TaskId::new(2))
-            .iter()
-            .any(|(_, kind)| kind == "resume_started")
-    });
-    stop.store(true, Ordering::SeqCst);
     let resumed = task_events(&db, TaskId::new(2))
         .into_iter()
         .find(|(_, kind)| kind == "resume_started")
@@ -346,6 +320,7 @@ fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
         .filter(|(_, kind)| kind == "run_claimed")
         .map(|(id, _)| id)
         .collect();
+    assert_eq!(heavy_claims.len(), 1, "{heavy_claims:?}");
     assert!(
         heavy_claims.iter().all(|id| *id > resumed),
         "{heavy_claims:?}"
@@ -374,13 +349,8 @@ fn own_file_spike_agent() -> String {
     )
 }
 
-/// In the room the landing queue leaves, the aging compares only the light
-/// tasks (ADR-t1487-2 decision 3, ADR-t1489-1), and `candidates` shows the
-/// same order: a heavy implementation that waited longest is deferred for
-/// the light room, so the light Spikes past `class_aging` go before a
-/// fresh light implementation of the same priority. The claim records
-/// that the first Spike aged, and `candidates` then shows the second one
-/// first, aged, with the heavy task in `deferred` as `light_room`.
+/// Aging compares all candidate changes in the worker capacity the landing
+/// queue leaves; candidates shows no new light-room deferral.
 #[test]
 fn in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show() {
     let (_dir, repo, db, blocker) = awaiting_run();
@@ -428,7 +398,7 @@ fn in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show() {
     // The claims wait while the tasks line up.
     set_load(40.0);
     await_passes(&passes, SOME_PASSES);
-    let heavy = add_task(&db, "heavy", "feature", &["src/**"], Priority::Normal);
+    let heavy = add_task(&db, "heavy", "feature", &["file-*"], Priority::Normal);
     let fresh = add_draft(
         &db,
         "light implementation",
@@ -454,12 +424,12 @@ fn in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show() {
     thread::sleep(Duration::from_millis(1100));
     ready(&db, fresh);
     set_load(1.0);
-    // The fixture's run of task 1, then `first`, then the light room's.
+    // The oldest implementation is now a candidate too: it goes first.
     wait_until(&db, Duration::from_secs(60), |_| claims(&db).len() == 3);
     let claimed = claims(&db);
-    assert_eq!(claimed[2].0, spikes[0], "{claimed:?}");
-    assert_eq!(claimed[2].1["light_room"], true, "{claimed:?}");
-    assert_eq!(claimed[2].1["aged"], true, "{claimed:?}");
+    assert_eq!(claimed[2].0, heavy, "{claimed:?}");
+    assert!(claimed[2].1.get("light_room").is_none(), "{claimed:?}");
+    assert_eq!(claimed[2].1["aged"], false, "{claimed:?}");
 
     let view = crate::common::cli::ok(&db, &["candidates"]);
     let ids: Vec<i64> = view["candidates"]
@@ -468,8 +438,16 @@ fn in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show() {
         .iter()
         .map(|task| task["id"].as_i64().unwrap())
         .collect();
-    assert_eq!(ids, [spikes[1].as_i64(), fresh.as_i64()], "{view}");
-    assert_eq!(view["aged"], json!([spikes[1].as_i64()]), "{view}");
+    assert_eq!(
+        ids,
+        [spikes[0].as_i64(), spikes[1].as_i64(), fresh.as_i64()],
+        "{view}"
+    );
+    assert_eq!(
+        view["aged"],
+        json!([spikes[0].as_i64(), spikes[1].as_i64()]),
+        "{view}"
+    );
     let deferred: Vec<(i64, String)> = view["deferred"]
         .as_array()
         .unwrap()
@@ -481,11 +459,7 @@ fn in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show() {
             )
         })
         .collect();
-    assert_eq!(
-        deferred,
-        [(heavy.as_i64(), "light_room".to_owned())],
-        "{view}"
-    );
+    assert!(deferred.is_empty(), "{view}");
 
     stop.store(true, Ordering::SeqCst);
     queue
@@ -572,14 +546,9 @@ fn shown(db: &Path) -> (Vec<i64>, Vec<(i64, String)>) {
     (ids, deferred)
 }
 
-/// The landing queue's room and a free normal slot taking turns, here by
-/// `parallel` going from 1 to 2 and back while the claim spacing holds
-/// every claim: the heavy task's `light_room` deferral stays one record,
-/// so `stats` counts one deferral and `status` shows the same one
-/// throughout, while `candidates` shows the task deferred in the light
-/// room and first in the order over the free slot, as the claim would
-/// take it. With the spacing gone, a free slot claims it as shown, while
-/// it is still recorded, and only then does the record end.
+/// Claim spacing still gates heavy tasks beside the landing queue. Changing
+/// parallel creates no light-room deferrals, and removing spacing claims
+/// the heavy task in normal order.
 #[test]
 fn a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes() {
     let (_dir, repo, db, blocker) = awaiting_run();
@@ -626,78 +595,28 @@ fn a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes() {
         landing_queued(&db, first)
     });
     await_passes(&passes, SOME_PASSES);
-    // From here the spacing holds every claim, in either room.
+    // From here the spacing holds every claim.
     set_supervisor(&repo, &db, &passes, 1, 3600);
     // Heavy for its change: its paths are those its worker writes.
     let heavy = add_task(&db, "heavy", "feature", &["file-*"], Priority::Normal);
-    wait_until(&db, Duration::from_secs(60), |_| {
-        !events_of(&db, heavy, EventKind::ClaimDeferred).is_empty()
-    });
-    let deferred = events_of(&db, heavy, EventKind::ClaimDeferred);
-    assert_eq!(deferred[0]["reason"], "light_room", "{deferred:?}");
-    let open = |db: &Path| -> Vec<(Value, Value)> {
-        runtime::status(db).unwrap()["claim_deferrals"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|open| (open["task_id"].clone(), open["since"].clone()))
-            .collect()
-    };
-    let before = open(&db);
-    assert_eq!(before.len(), 1, "{before:?}");
-    assert_eq!(before[0].0, json!(heavy), "{before:?}");
-
-    let in_light_room = (Vec::new(), vec![(heavy.as_i64(), "light_room".to_owned())]);
-    assert_eq!(shown(&db), in_light_room);
-    // Another supervisor's records of its slots, many more than the
-    // newest few of the queue: the light room's supervisor is read by its
-    // own newest one, however old.
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    for _ in 0..300 {
-        for kind in [EventKind::SlotsFullStarted, EventKind::SlotsFullEnded] {
-            queue
-                .record_queue_event(kind, json!({"supervisor": "elsewhere", "class": "light"}))
-                .unwrap();
-        }
-    }
-    assert_eq!(shown(&db), in_light_room);
-
-    // A free normal slot and the light room, by turns.
-    for _ in 0..2 {
-        set_supervisor(&repo, &db, &passes, 2, 3600);
-        assert_eq!(shown(&db), (vec![heavy.as_i64()], Vec::new()));
-        assert_eq!(open(&db), before);
-        set_supervisor(&repo, &db, &passes, 1, 3600);
-        assert_eq!(shown(&db), in_light_room);
-    }
-    assert_eq!(events_of(&db, heavy, EventKind::ClaimDeferred).len(), 1);
-    assert!(events_of(&db, heavy, EventKind::ClaimDeferralEnded).is_empty());
-    assert_eq!(open(&db), before);
-    {
-        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
-        assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
-    }
+    await_passes(&passes, SOME_PASSES);
+    assert!(events_of(&db, heavy, EventKind::ClaimDeferred).is_empty());
+    let in_worker_room = (vec![heavy.as_i64()], Vec::new());
+    assert_eq!(shown(&db), in_worker_room);
     assert_eq!(claims(&db).len(), 2);
-
-    // A free slot with no spacing claims the heavy task, still recorded:
-    // its record ends as it leaves the candidates.
+    set_supervisor(&repo, &db, &passes, 2, 3600);
+    assert_eq!(shown(&db), in_worker_room);
+    set_supervisor(&repo, &db, &passes, 1, 3600);
+    assert_eq!(shown(&db), in_worker_room);
+    // A worker slot with no spacing claims the heavy task.
     set_supervisor(&repo, &db, &passes, 2, 0);
     wait_until(&db, Duration::from_secs(60), |_| claims(&db).len() == 3);
     // The claim takes it first, as `candidates` showed over the free slot.
     let claimed = claims(&db);
     assert_eq!(claimed[2].0, heavy, "{claimed:?}");
     assert!(claimed[2].1.get("light_room").is_none(), "{claimed:?}");
-    wait_until(&db, Duration::from_secs(60), |_| {
-        !events_of(&db, heavy, EventKind::ClaimDeferralEnded).is_empty()
-    });
-    let ended = events_of(&db, heavy, EventKind::ClaimDeferralEnded);
-    assert_eq!(ended.len(), 1, "{ended:?}");
-    assert_eq!(ended[0]["why"], "not_candidate", "{ended:?}");
-    assert_eq!(events_of(&db, heavy, EventKind::ClaimDeferred).len(), 1);
-    {
-        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
-        assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
-    }
+    assert!(events_of(&db, heavy, EventKind::ClaimDeferred).is_empty());
+    assert!(events_of(&db, heavy, EventKind::ClaimDeferralEnded).is_empty());
 
     stop.store(true, Ordering::SeqCst);
     queue

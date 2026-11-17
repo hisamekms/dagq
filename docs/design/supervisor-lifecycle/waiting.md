@@ -28,16 +28,17 @@ related:
 待ちの約束は[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)、最初の決定は[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)を読む。
 待ちの実行の入口は `src/application/supervise/execution/waiting.rs`、イベントからの状態の導出と集計の入口は `src/domain/waiting.rs`。
 
-着地の順番待ちは人の待ちとは別で、並列の上限の件数まで空けた枠は軽いtaskだけが使う（[ADR-t1591-1](../../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)、[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)）。
-着地待ちはsessionを閉じているため人の待ちの上限にも数にも含めず、resumeや人の待ちからの戻り、重いtaskのclaimに対するslotの数え方も変えない。
-人の待ちから戻るrunが空きを待つあいだは、軽い枠でも新しいclaimをしない。
+着地の列は人の待ちとは別で、workerのslotとの境界は[claimを控える](claim-hold.md#workerのslotと着地の列)を読む。
+着地の列はsessionを閉じているため人の待ちの上限にも数にも含めない。
+人の待ちから戻るrunがworkerのslotの空きを待つあいだは、新しいclaimをしない。
 
 ## 待ちの出入り
 
 待ちはrunのstatusを変えずにslotに付ける印で、戻ればphaseの続きから進む（印の定義は `Waiting`）。
 待ちのrunもsupervisorが持ち続けるため、drainもその終了を待つ。
 slotの数え方を知りたいときは `Supervisor::used_slots` を読む。
-着地中と着地の順番待ちもslotに数え、statusとstatsも同じ集合を数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
+workerのslotは人の待ちと着地の列を除き、着地の順番待ちのうち上限を超えた分だけを含む。
+戻りもこのworkerのslotの空きを待つ。
 
 待ちに入れる条件と上限を超えたrunの扱いは `Supervisor::start_waits`、見張りが待ちを終える条件は `Supervisor::watch_waiting` を読む。
 見張りはsessionへ送らず、答えはslotに戻った後のtickで届ける。

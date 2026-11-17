@@ -929,8 +929,8 @@ task = 3803
 [[boundary]]
 id = "landing-queue-leaves-a-light-room-for-the-claim"
 kind = "supervisorの配線"
-test = "runtime_light_slots::the_landing_queue_leaves_room_for_light_tasks_only"
-reason = "着地の待ちが slot を埋める間に、supervisor の claim が light_changes の task だけを部屋に取り status がそれを示すことは、supervisor の配線を通してしか確かめられない。部屋の数と入れる task の判断は domain::light_slots の unit test"
+test = "runtime_light_slots::the_landing_queue_leaves_room_for_the_heavy_interrupt"
+reason = "着地の順番待ちの隣で重いinterruptがclaimされ、light_roomの印を持たず、順番待ちの超過で次のclaimが止まりstatusに着地待ちが出ることを、実際のGitのworktree、SQLiteのeventとworkerのプロセスを通して確かめる。容量と戻り優先の判断はdomain::light_slotsのunit test"
 task = 3803
 
 [[boundary]]

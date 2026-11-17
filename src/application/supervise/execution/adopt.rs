@@ -28,6 +28,8 @@ impl Supervisor<'_> {
     /// a recorded wait below max_waiting needs no free slot. With no room
     /// for a wait, adoption waits for a slot and restore_waiting ends that
     /// wait as phase_changed, leaving its ask eligible to wait again.
+    /// The count excludes existing landing-lane runs: adoption can still
+    /// rebuild review/resume/e2e and therefore needs worker capacity.
     pub(super) fn adopt_stale_runs(&mut self, parallel: usize) -> Result<()> {
         const CALLER: &str = "adopt.adopt_stale_runs";
         let _caller = crate::application::supervisor_service::caller::scope(CALLER);

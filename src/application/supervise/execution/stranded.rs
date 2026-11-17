@@ -17,7 +17,9 @@ impl Supervisor<'_> {
     /// landing, never reviewed again. The lease's transaction judges the
     /// run again, its events as they stand then included, so two
     /// supervisors take a run once and none takes one another's landing
-    /// held for a person since this look.
+    /// held for a person since this look. Worker capacity is needed for
+    /// the precheck/session exit or outstanding e2e before this run can
+    /// join the landing lane; runs already in that lane do not count.
     pub(super) fn take_up_stranded_landings(&mut self, parallel: usize) -> Result<()> {
         if self.registration.draining() {
             return Ok(());

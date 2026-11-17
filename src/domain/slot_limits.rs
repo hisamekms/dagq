@@ -80,8 +80,8 @@ pub struct SupervisorConfig {
     pub runtime_planners: Option<usize>,
     /// Seconds; 0 spaces no claim.
     pub claim_spacing: Option<usize>,
-    /// The changes claimed in the room the landing queue leaves
-    /// (ADR-t1591-1); none claims nothing there. It has no flag, so every
+    /// The repository's classification of light changes, independent of
+    /// claim capacity; omission classifies none as light. It has no flag, so every
     /// supervisor reads it again on each pass, even one given all four
     /// flags. It is checked against `[tasks] changes` once the whole file
     /// is read.

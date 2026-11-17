@@ -226,14 +226,12 @@ pub(super) fn runs_slots_and_waits(
 /// here for a leased run not in it). `used` counts the
 /// leased runs that do not wait, landing ones included (ADR-t610-1), less
 /// `landing_queue`: those that wait only for their landing turn, up to
-/// `parallel` (ADR-t1591-1). A heavy task is claimed while `used` and
-/// `landing_queue` together are under `parallel`, a light one (of
-/// `[supervisor] light_changes`, with no returning run) while `used` is;
-/// `used` and `landing_queue` together are the supervisor's slots in use,
-/// and at `parallel` a returning run and a `needs_session` resume wait as
-/// a heavy claim does. The two can pass `parallel` while a light task runs
-/// in the room the landing queue leaves, or a run a person moved goes back
-/// at once. `count` is what
+/// `parallel` (ADR-t1591-1). Claims of every change and priority, resumes and
+/// returning runs use the worker-slot count: leased runs without human
+/// waits, excluding integrating runs and up to `parallel` landing-turn
+/// waits. Excess landing-turn waits count as workers. Returning runs go
+/// before new claims. The reporting projection above remains separate.
+/// `count` is what
 /// `--max-waiting` bounds (ADR-0071 (f2)): the runs that wait and those
 /// that wait to go back (`state: returning` in `waiting`), with `limit`
 /// and `source` the registration's `max_waiting` and where it comes from.

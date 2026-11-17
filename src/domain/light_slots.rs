@@ -1,16 +1,13 @@
-//! The slots a run waiting only for its landing turn leaves, and the light
-//! changes that may use them (ADR-t1591-1): a run whose review passed and
-//! whose e2e is done waits outside the slots for the single landing, up to
-//! `parallel` of them, and the room it leaves is claimed only by a task of
-//! one of `[supervisor] light_changes` that declares its `--paths`. A heavy
-//! task is claimed as before, only while the slots with the landing queue
-//! in them are under `parallel`.
+//! Worker capacity excludes human waits and the serial landing lane.
+//! Landing-turn waits outside worker capacity are capped at `parallel`.
 
 use super::change::{ChangeSet, TaskChange};
 use super::claim_spacing;
 
 /// `[supervisor] light_changes`: the changes a repository calls light.
-/// Empty (the default) claims nothing outside the slots.
+/// Values come from `[tasks] changes`; the runtime assigns them no meaning.
+/// This classifies candidates, never opens claim capacity. Empty classifies
+/// none as light; tasks without declared paths are not light either.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LightChanges(Vec<TaskChange>);
 
@@ -21,7 +18,7 @@ impl LightChanges {
     pub fn new(values: Vec<TaskChange>, changes: Option<&ChangeSet>) -> Result<Self, String> {
         if values.is_empty() {
             return Err(
-                "names no change; leave the key out to claim none in the light room".into(),
+                "names no change; leave the key out to classify no changes as light".into(),
             );
         }
         for (index, value) in values.iter().enumerate() {
@@ -50,7 +47,7 @@ impl LightChanges {
         self.0.is_empty()
     }
 
-    /// Whether a task of `change` with `paths` may take the light room: its
+    /// Whether a task of `change` with `paths` is classified as light: its
     /// change is light, and it declares the paths it changes (a task with
     /// none may change anything).
     pub fn admits(&self, change: Option<&TaskChange>, paths: &[String]) -> bool {
@@ -70,44 +67,43 @@ pub fn outside_the_slots(landing_queue: usize, parallel: usize) -> usize {
 pub enum ClaimRoom {
     /// A free slot: any task, in the claim order.
     Any,
-    /// Only the room the landing queue left: a light task.
+    /// Historical light room, retained for recorded classes and deferrals.
+    /// The worker-capacity judgment never returns this variant.
     LightOnly,
     /// No claim.
     None,
 }
 
-/// The room for the next claim. `used` is the slots as they were always
-/// counted (every leased run that does not wait for a person, the landing
-/// queue in them), `landing_queue` the runs among them that wait only for
-/// their landing turn, `returning` the runs whose wait ended and that wait
-/// to go back. A heavy task needs `used` under `parallel`, as before; a
-/// light task needs only `used` less the landing queue outside the slots
-/// under it, with `light` set and no run waiting to go back, which comes
-/// before any new work (ADR-0071 decision 8). A resume and a run going back
-/// from a wait use the normal room only.
-pub fn claim_room(
-    used: usize,
-    landing_queue: usize,
+/// Worker slots in use among leased runs that have no human-wait mark.
+/// Integrating runs leave worker capacity entirely. Landing-turn waits
+/// leave it up to `parallel`; their excess supplies backpressure. Review,
+/// e2e, revise and resume remain workers, including a failed landing that
+/// returned to `needs_session`. Inputs describe disjoint landing stages.
+pub fn worker_slots(
+    nonwaiting: usize,
+    integrating: usize,
+    queued: usize,
     parallel: usize,
-    returning: usize,
-    light: bool,
-) -> ClaimRoom {
-    if used < parallel {
+) -> usize {
+    nonwaiting.saturating_sub(integrating + outside_the_slots(queued, parallel))
+}
+
+/// New claims use worker capacity regardless of change, paths or priority.
+/// Runs returning from human waits take precedence over every new claim.
+/// Resume/adopt/recovery and returning runs compare the same worker count
+/// with `parallel`, without the new-claim returning gate.
+pub fn claim_room(used: usize, parallel: usize, returning: usize) -> ClaimRoom {
+    if returning == 0 && used < parallel {
         ClaimRoom::Any
-    } else if light
-        && returning == 0
-        && used - outside_the_slots(landing_queue, parallel).min(used) < parallel
-    {
-        ClaimRoom::LightOnly
     } else {
         ClaimRoom::None
     }
 }
 
-/// The room after the gates every claim passes, the light ones too: no
+/// The room after the gates every claim passes: no
 /// claim while the claims are held (the load or the disk), nor while the
 /// claim spacing in effect (`spacing_secs`) after the queue's latest claim
-/// (`last_claim_ms`, a light one too) waits at `now_ms` (ADR-t1479-1).
+/// (`last_claim_ms`) waits at `now_ms` (ADR-t1479-1).
 pub fn gated(
     room: ClaimRoom,
     held: bool,
@@ -168,77 +164,65 @@ mod tests {
     }
 
     #[test]
-    fn without_light_changes_the_room_is_the_slots_as_before() {
-        for used in 0..6 {
-            for queue in 0..=used {
-                let room = claim_room(used, queue, 3, 0, false);
-                let expected = if used < 3 {
-                    ClaimRoom::Any
-                } else {
-                    ClaimRoom::None
-                };
-                assert_eq!(room, expected, "used {used}, landing queue {queue}");
-            }
+    fn landing_stages_leave_two_claims_for_any_change() {
+        // One worker, one integrator, two queued landings: two more workers.
+        let used = worker_slots(4, 1, 2, 3);
+        assert_eq!(used, 1);
+        for light in [
+            LightChanges::default(),
+            LightChanges::new(vec![change("docs")], Some(&set())).unwrap(),
+        ] {
+            // A heavy interrupt is not classified light but gets the same room.
+            assert!(!light.admits(Some(&change("feature")), &["src/**".into()]));
+            assert_eq!(claim_room(used, 3, 0), ClaimRoom::Any);
+            assert_eq!(claim_room(used + 1, 3, 0), ClaimRoom::Any);
+            assert_eq!(claim_room(used + 2, 3, 0), ClaimRoom::None);
         }
     }
 
     #[test]
-    fn the_landing_queue_leaves_room_for_light_tasks_only() {
-        // Three slots full of runs waiting for the landing turn.
-        assert_eq!(claim_room(3, 3, 3, 0, true), ClaimRoom::LightOnly);
-        // A light run claimed into the room counts in the slots.
-        assert_eq!(claim_room(4, 3, 3, 0, true), ClaimRoom::LightOnly);
-        assert_eq!(claim_room(6, 3, 3, 0, true), ClaimRoom::None);
-        // A heavy task still needs a slot with the landing queue in it.
-        assert_eq!(claim_room(2, 2, 3, 0, true), ClaimRoom::Any);
-        // No landing queue: no light room.
-        assert_eq!(claim_room(3, 0, 3, 0, true), ClaimRoom::None);
-        // Past `parallel`, the landing queue counts in the slots.
+    fn landing_queue_excess_is_worker_backpressure() {
         assert_eq!(outside_the_slots(5, 3), 3);
-        assert_eq!(claim_room(6, 5, 3, 0, true), ClaimRoom::None);
-        assert_eq!(claim_room(5, 5, 3, 0, true), ClaimRoom::LightOnly);
+        assert_eq!(worker_slots(7, 1, 5, 3), 3);
+        assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
     }
 
     #[test]
-    fn a_run_going_back_or_resumed_waits_for_a_normal_slot() {
-        // A run whose wait ended goes back before any new work: the light
-        // room claims nothing while it waits.
-        assert_eq!(claim_room(3, 2, 3, 1, true), ClaimRoom::None);
-        // A run back in `needs_session` from its landing is resumed only in
-        // a normal slot (`used` under `parallel`): with the landing queue
-        // filling the slots, only a light claim has room.
-        assert_eq!(claim_room(3, 2, 3, 0, true), ClaimRoom::LightOnly);
-        assert_ne!(claim_room(3, 2, 3, 0, true), ClaimRoom::Any);
+    fn returning_runs_precede_claims_and_failed_landings_are_workers() {
+        assert_eq!(claim_room(worker_slots(4, 1, 2, 3), 3, 1), ClaimRoom::None);
+        // Landing failure moves out of the lane into needs_session.
+        assert_eq!(worker_slots(4, 0, 2, 3), 2);
+        assert_eq!(claim_room(2, 3, 0), ClaimRoom::Any);
+        assert_eq!(worker_slots(5, 0, 2, 3), 3);
+        assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
+        // Review and e2e are ordinary workers, not queued landings.
+        assert_eq!(worker_slots(3, 0, 0, 3), 3);
     }
 
     #[test]
-    fn the_load_hold_and_the_claim_spacing_gate_the_light_room_too() {
+    fn the_load_hold_and_the_claim_spacing_gate_every_claim() {
         let t0 = 1_791_072_000_000;
-        // The load hold holds a light claim as any other.
-        assert_eq!(
-            gated(ClaimRoom::LightOnly, true, None, None, t0),
-            ClaimRoom::None
-        );
-        // Within the spacing after the latest claim, no light claim.
+        // A worker slot does not bypass the load gate.
+        assert_eq!(gated(ClaimRoom::Any, true, None, None, t0), ClaimRoom::None);
+        // Within the spacing after the latest claim, no new claim.
         let latest = Some(t0);
         assert_eq!(
-            gated(ClaimRoom::LightOnly, false, Some(180), latest, t0 + 10_000),
+            gated(ClaimRoom::Any, false, Some(180), latest, t0 + 10_000),
             ClaimRoom::None
         );
-        // A light claim starts the next spacing: the claim after it, light
-        // or not, waits for it.
+        // Every claim starts the next spacing.
         assert_eq!(
             gated(ClaimRoom::Any, false, Some(180), latest, t0 + 179_000),
             ClaimRoom::None
         );
         assert_eq!(
-            gated(ClaimRoom::LightOnly, false, Some(180), latest, t0 + 180_000),
-            ClaimRoom::LightOnly
+            gated(ClaimRoom::Any, false, Some(180), latest, t0 + 180_000),
+            ClaimRoom::Any
         );
         // No spacing in effect (the load hold off): only the hold gates.
         assert_eq!(
-            gated(ClaimRoom::LightOnly, false, None, latest, t0 + 1_000),
-            ClaimRoom::LightOnly
+            gated(ClaimRoom::Any, false, None, latest, t0 + 1_000),
+            ClaimRoom::Any
         );
         assert_eq!(gated(ClaimRoom::Any, false, None, None, t0), ClaimRoom::Any);
     }

@@ -179,14 +179,11 @@ fn asked_since(asked_at: i64) -> SystemTime {
 }
 
 impl Supervisor<'_> {
-    /// The slots in use: every run but the waiting ones and those waiting
-    /// to go back (decision 5).
-    /// Landing and landing-queue runs still count here; only the light
-    /// claim allowance excludes landing-queue runs (`Slot::in_landing_queue`).
-    /// Status and stats use the same occupied set, with status showing the
-    /// landing queue separately (ADR-t610-1, ADR-t1591-1).
+    /// Worker slots in use, excluding human waits and the bounded landing
+    /// lane. All admission and return decisions share this count; reporting
+    /// has its own projection of the recorded phases.
     pub(super) fn used_slots(&self) -> usize {
-        self.claim.slots.used()
+        self.claim.slots.used(self.claim.parallel)
     }
 
     /// The runs held against `--max-waiting`: the waiting ones and those
