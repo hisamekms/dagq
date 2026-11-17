@@ -8,6 +8,7 @@ updated: 2026-10-07
 accepted_on: 2026-10-07
 amended_by:
   - adr-t3294-1
+  - adr-t4962-1
 related:
   - adr-0047
   - adr-t883-1

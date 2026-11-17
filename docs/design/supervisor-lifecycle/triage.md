@@ -11,6 +11,7 @@ related:
   - adr-0039
   - adr-0047
   - adr-t1818-2
+  - adr-t4962-1
 ---
 
 # Triage (supervisor)
@@ -90,7 +91,9 @@ resumeされるか、下の [providerが使えない場合](#codexで動かす) 
 
 ## 人の手での引き継ぎ
 
-userとinbox（人の言葉で）は、`in_progress`のtaskの最新runが`failed`か`interrupted`のとき、`dagq ready ID --inherit --reason ...`でそのrunのbranchを次のrunに引き継いでtaskを`ready`に戻せる（[ADR-t1962-1](../../adr/2026-10-07-t1962-1-retry-carrying-the-branch-over-by-hand.md)）。
+人は、`in_progress`のtaskの最新runが`failed`か`interrupted`のとき、`dagq ready ID --inherit --reason ...`でそのrunのbranchを次のrunに引き継いでtaskを`ready`に戻せる（[ADR-t1962-1](../../adr/2026-10-07-t1962-1-retry-carrying-the-branch-over-by-hand.md)）。
+手での引き継ぎはplan reviewのbypassに数え、ローカルの既定の配置でもinboxの中継を拒む（[ADR-t4962-1](../../adr/2026-11-17-t4962-1-manual-carry-over-requires-a-direct-human-answer.md)）。
+人が`DAGQ_ROLE`の無い自分のterminalで直接打ち、TTYで対象を確かめた答えだけをhuman_attestedとして受ける。
 decideのaskの答えに無い引き継ぎを、人の判断として直接打つための操作で、decideの答えの集合（ADR-0047決定3）は変えない。
 確定の前提と記録は `SqliteQueue::inherit_by_hand` のdoc commentが持つ。
 認可は計画管理の`ready`が行い、引き継ぎの確定は実行と着地が公開するportが行う（境界をまたぐtransactionのT10、`src/context_boundaries/ownership.rs`）。
