@@ -72,6 +72,13 @@ worker が使い捨ての queue を操作できない理由と、worker が代�
 - **folder trust**: inbox のように対話で開く session を使うときは、先に使い捨て repository の root で一度 `claude` を起動して trust dialog を承認する（worktree で dialog が出るかは親 repository の root が信頼済みかで決まる。[provider-lifecycle](../design/provider-lifecycle.md#trust-prompt)）。
   非対話の worker と headless の job はこの dialog に当たらない。
 
+#### plan review の bypass
+
+この文書の使い捨て queue で `tq ready ID --bypass-review` を使うときは、人が自分の terminal（制御端末があり、`DAGQ_ROLE` の無いもの）で打つ。
+その terminal で使い捨て repository に移動し、同じ scratch の queue とバイナリを指す wrapper `tq` を使い、端末に出る確認に人が直接答える。
+inbox の shell は制御端末が無いため、wrapper が `DAGQ_ROLE` を外しても bypass は拒まれ、人が直接答える経路の案内が出る。
+inbox が進めるときは bypass を人に頼むか、plan review を通す。
+
 #### scratch の worker が打つ `dagq` の環境
 
 worker の `dagq` はクライアントモードで動く（[Queue service](../design/queue-service.md#クライアントモード)）。
@@ -184,7 +191,8 @@ run の session の作業の内訳（[provider-lifecycle](../design/provider-lif
    wrapper は `env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` を付ける（inbox の session の terminal は本番 queue の `DAGQ_ROLE`（`inbox`）と `DAGQ_QUEUE` を session の env に持つので、そのまま打つと scratch の queue の操作がその role の権限と記録で扱われる。
    人が scratch の queue を自分（`user`）として操作するために外すもので、worker の拒否を迂回するためのものではない。
    このスモークを worker は行わない（[隔離](#隔離)））。
-2. `tq add` で task を 1 件登録し（`--verify 'cargo test'`、`--change feature`）、`tq ready ID --bypass-review`。
+2. `tq add` で task を 1 件登録する（`--verify 'cargo test'`、`--change feature`）。
+   [plan review の bypass](#plan-review-の-bypass)のとおり、人が自分の terminal で `tq ready ID --bypass-review` を打つ。
    description で worker に順番どおり次をさせる: (a) `cargo build`、`cargo test`、`cargo test --test does_not_exist`（失敗する）をそれぞれ `run_in_background: true` で起動して完了の通知を待つ、(b) Agent tool を `run_in_background: true` で起動して完了の通知を待つ、(c) foreground で 15 秒以上かかるコマンド（`cargo test --release`）を実行する、(d) foreground で `cargo fmt && cargo test`、(e) commit と receipt。
    `sleep N && ...` は Claude Code の harness が `Blocked: sleep N followed by: ...` で拒むので使わない。
 
@@ -220,7 +228,7 @@ run の session の作業の内訳（[provider-lifecycle](../design/provider-lif
      Codex の worker が打つ `dagq` を scratch のバイナリにするには、description に scratch のバイナリの path を書くか、`[run.env]` で scratch のバイナリを先にした `PATH` を渡す。
      クライアントモードの `dagq` は queue の場所を解決しないので `XDG_DATA_HOME` は要らない（scratch の queue の service は、その queue の `up` か `dagq service start` が起動したものを使う）。
    - worker が `dagq` を打つ task のために、使い捨て repository の `dagq.toml` の `[run.env]` を[scratch の worker が打つ `dagq` の環境](#scratch-の-worker-が打つ-dagq-の環境)のとおり置く。
-   - `tq ready ID --bypass-review` を add が返した ID だけに打つ。
+   - [plan review の bypass](#plan-review-の-bypass)のとおり、人が自分の terminal で `tq ready ID --bypass-review` を add が返した ID だけに打つ。
 4. 専用の terminal で `tq supervise --parallel 2 --claude ~/.local/bin/claude --codex ~/.local/bin/codex --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。
    `tq status` の `supervisors[].providers` で claude と codex がどちらも `found: true`、codex の `modes` が `["headless"]` であることを見る。
 5. 両方の task の `worker_question` に `tq answer <id> --text 'yes'` と答える。
@@ -279,7 +287,8 @@ Claude Code の版を上げたとき、または読み手（`ClaudeTurnReader`�
    ```
 
    `tq doctor` の `roles.goal_review` が `{"provider": "codex", "source": "dagq.toml", "model": null, "effort": "low"}` であることを見る。
-3. goal を 1 件（acceptance に「`seed.txt` がある」）と、その goal の task を 1 件（`--verify 'test -f seed.txt'`、description に「`smoke-goal.txt` に 1 行足して commit し、receipt を書く」）登録して `tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
+3. goal を 1 件（acceptance に「`seed.txt` がある」）と、その goal の task を 1 件（`--verify 'test -f seed.txt'`、description に「`smoke-goal.txt` に 1 行足して commit し、receipt を書く」）登録する。
+   [plan review の bypass](#plan-review-の-bypass)のとおり、人が自分の terminal で `tq ready ID --bypass-review` を打つ（add が返した ID だけに打つ）。
 4. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の 4 と同じ `tq supervise ... --codex ~/.local/bin/codex` を起動する。
    task が着地すると goal が候補になり、goal review が Codex で動く。
 5. 確かめる。
@@ -304,7 +313,8 @@ Claude Code の版を上げたとき、または読み手（`ClaudeTurnReader`�
 
 1. [隔離](#隔離)に従い、`dagq-smoke` と bare の `origin`、開発中のバイナリのコピー、専用 queue を作る。
    `dagq.toml` に `[roles.review] provider = "codex"` を書いて commit する。
-2. Codex の headless task を 1 件、簡単なファイルの追加とその存在を確認する verify で登録し、使い捨て queue だけで `ready --bypass-review` にする。
+2. Codex の headless task を 1 件、簡単なファイルの追加とその存在を確認する verify で登録する。
+   [plan review の bypass](#plan-review-の-bypass)のとおり、人が自分の terminal で、使い捨て queue の `tq ready ID --bypass-review` を打つ。
    `supervise --no-claude --parallel 1 --codex <実体の path>` で流す（`--once` の supervise は queue service を起動しないので付けない）。
 3. `events --run RUN --full` の `review_started.launch.provider` が `codex`、`review_finished.verdict` が `pass` で、`show ID` の task が `completed`、run が `integrated`、`origin/main` が進んだことを確かめる。
    run の dir の `review-<N>.out` は `codex exec --json` の JSONL である。
@@ -396,7 +406,8 @@ TUI で選ぶと人の設定に書かれる操作（trust の画面の「Trust a
      `dagq` を inbox の指示の絶対 path で書いた形がどちらで拒まれたかも記録する。
    - inbox の model が tool を呼ばずに断ったものは hook の証拠に数えず、そうと記録する。
 7. inbox に届くものを起こして確かめる。
-   - `dagq-smoke` に task を 1 件登録し、最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打つよう description に書いて、`tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
+   - `dagq-smoke` に task を 1 件登録し、最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打つよう description に書く。
+     [plan review の bypass](#plan-review-の-bypass)のとおり、人が自分の terminal で `tq ready ID --bypass-review` を打つ（add が返した ID だけに打つ）。
      worker の ask が開くと、inbox の watch が返り、inbox が ask を番号つきの選択肢で見せる。
    - 人が答え、inbox がそれを `answer` で書く。
      `tq events --all --full` の `ask_answered` の actor が inbox で、`authorization_denied` と `no_use_case` が無く、worker の run が再開する。
@@ -561,7 +572,8 @@ machine が止まっている間の close は、次に machine が動いた回�
 
 ### container の worker の run（claim から着地まで）
 
-1. task を 1 件登録して `tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
+1. task を 1 件登録する。
+   [plan review の bypass](#plan-review-の-bypass)のとおり、人が自分の terminal で `tq ready ID --bypass-review` を打つ（add が返した ID だけに打つ）。
    `--verify 'test -f smoke-container.txt'`、description に次を順に行い、出力を `smoke-container.txt` に書いて commit し、receipt を書くよう書く。
    - `id -u`、`printenv HOME`、`pwd`、`command -v cargo dagq`、`env | sed 's/=.*//' | sort`（env の名前だけ。値は出さない）。
    - host の `$HOME`（人が description に絶対 path で書く。以下 `<host home>`）の中身: `ls -A <host home>`、`ls -d <host home>/.ssh <host home>/.claude <host home>/.config <host home>/Library 2>&1`、`find <host home> -maxdepth 3 2>&1 | head -50`。
