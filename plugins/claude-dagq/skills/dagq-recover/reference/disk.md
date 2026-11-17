@@ -1,6 +1,6 @@
 # Claims held on free disk space
 
-Read `"$DAGQ" status --role inbox` first. `claim_hold` gives when the hold started, free space, the need and its breakdown: the reserve, the new run's expectation, the moving runs' remaining space and the expectation added for a waiting landing. Read these together before judging the need. A task's older deferral is not the queue's current hold. An active `disk_relax` shows what is relaxed, who recorded it and why, its start and expiry.
+Read `"$DAGQ" status --role inbox` first. `claim_hold` gives when the hold started, free space, the need and its breakdown: the reserve, the new run's WORKER budget W, unused reservations U and the INTEGRATOR slot's budget I. U is the sum of the remaining WORKER and INTEGRATOR reservations, each counted as the budget minus the run's current size, with a minimum of zero. Waiting runs occupy only their current size and hold no reservation. The INTEGRATOR slot is always reserved, whether or not a landing waits; an active INTEGRATOR run's remaining reservation in U occupies that slot, so I is added separately only while the slot is empty. Read these together before judging the need. A task's older deferral is not the queue's current hold. An active `disk_relax` shows what is relaxed, who recorded it and why, its start and expiry.
 
 Tell the person to free space on the host. Leave running runs and their leases alone; never edit the queue database or delete an active run's files. Claims resume automatically when there is room. The notice is a report, not an ask to open; an existing disk ask follows `skills/dagq-inbox/reference/asks.md`.
 
@@ -10,7 +10,7 @@ If the person needs an emergency relaxation, get their words about which part to
 "$DAGQ" disk relax --no-landing-expectation --for 30m --reason "<the person's reason>"
 ```
 
-This example omits the extra expectation for a waiting landing. `--expected <SIZE>` replaces the new run and landing expectation; `--no-remaining` counts moving runs' remaining space as zero. These can be combined when authorized. Choose an expectation from the breakdown and the person's judgment, never a repository-independent size. The reserve cannot be relaxed. A duration is required and limited to a day; no restart is needed. The override ends automatically at its deadline, and `status` and the inbox notice show it while active. A later relaxation replaces the earlier one.
+This example's `--no-landing-expectation` omits only I for an empty INTEGRATOR slot; an active INTEGRATOR run's remaining reservation stays in U. `--expected <SIZE>` overrides both W and I; `--no-remaining` counts U as zero. These can be combined when authorized. Choose an expectation from the breakdown and the person's judgment, never a repository-independent size. The reserve cannot be relaxed. A duration is required and limited to a day; no restart is needed. The override ends automatically at its deadline, and `status` and the inbox notice show it while active. A later relaxation replaces the earlier one.
 
 Once space is available, return to the usual calculation early:
 
