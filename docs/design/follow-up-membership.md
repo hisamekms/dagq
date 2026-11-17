@@ -64,7 +64,7 @@ goal_gapのdraftは所属の判断の対象でないが、runtimeのplannerの`s
 
 ## acceptanceの版と読み取り
 
-`goals.acceptance_version`は、acceptanceの文が変わったときだけtriggerが1増やす。
+`goals.acceptance_version`は、acceptanceの文が変わったときだけSQLiteはtrigger、Postgresはgoalを書くadapterが同じtransactionで1増やす（[版の責務の決定](../adr/2026-11-17-t5155-1-goal-domain-owns-acceptance-version.md)）。
 判断はtransactionの版を保存する。
 `needs_recheck`は保存した版と現在の版の比較で導く。
 `show`と`goal show`が載せる判断と版の意味は`TaskDetail`と`GoalDetail`のdoc commentが持つ。
