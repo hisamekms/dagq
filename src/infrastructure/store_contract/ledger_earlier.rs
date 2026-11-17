@@ -32,7 +32,7 @@ const BUILT: &str = "2030-01-01T00:00:00.000Z";
 const BEFORE: i64 = 150 * DAY;
 const NEAR: i64 = (READ_AT_DAY - 1) * DAY;
 /// The run an older binary writes the row of, its events in the history.
-const OLD_WRITER_RUN: u8 = 90;
+pub(crate) const OLD_WRITER_RUN: u8 = 90;
 
 /// The run id of the settled unit `k`.
 fn unit_run(k: usize) -> String {

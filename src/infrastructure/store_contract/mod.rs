@@ -9,6 +9,7 @@ mod goal_landing_marks;
 mod goal_owners;
 pub(crate) mod ledger_earlier;
 mod ledger_first_executions;
+mod ledger_late_provider;
 mod ledger_open;
 pub(crate) mod ledger_queue_lives;
 pub(crate) mod ledger_queue_named;
@@ -26,6 +27,10 @@ pub use goal_landing_marks::*;
 pub use goal_owners::*;
 pub use ledger_earlier::{ledger_earlier_answers_as_every_row, ledger_earlier_past_an_old_writer};
 pub use ledger_first_executions::*;
+pub use ledger_late_provider::{
+    LATE_WINDOWS, LateWindow, ledger_late_provider_answers_as_every_row,
+    ledger_late_provider_answers_as_every_row_of,
+};
 pub use ledger_open::*;
 pub use ledger_queue_named::{
     WHOLE_STATES, WholeState, ledger_queue_named_answers_as_every_row,
@@ -369,6 +374,10 @@ fn cases_sized<S: ContractStore, F: Fn() -> Result<S>, const SMALL: bool>()
         (
             "ledger queue views pair asks whichever comes first",
             Case::Fixed(ledger_queue_views_pair_asks_whichever_comes_first::<S, F>),
+        ),
+        (
+            "ledger late provider answers as every row",
+            Case::Fixed(ledger_late_provider_answers_as_every_row::<S, F>),
         ),
         (
             "ledger range answers as every row",
@@ -975,7 +984,7 @@ mod tests {
                 })
                 .collect()
         }
-        const EXPECTED: [(&str, Fixture, Fixture); 74] = [
+        const EXPECTED: [(&str, Fixture, Fixture); 75] = [
             ("leader lifecycle", Fixed, Fixed),
             ("leader singleton", Fixed, Fixed),
             ("stale writer", Fixed, Fixed),
@@ -1047,6 +1056,7 @@ mod tests {
                 Fixed,
                 Fixed,
             ),
+            ("ledger late provider answers as every row", Fixed, Fixed),
             (
                 "ledger range answers as every row",
                 Histories(30, 300),
@@ -1193,9 +1203,9 @@ mod tests {
         let sqlite_volume = cases::<SqliteQueue, SqliteOpen>();
         let postgres = cases::<Postgres, PostgresOpen>();
         let sqlite_small = cases_sized::<SqliteQueue, SqliteOpen, true>();
-        assert_eq!(sqlite_volume.len(), 74);
-        assert_eq!(postgres.len(), 74);
-        assert_eq!(sqlite_small.len(), 74);
+        assert_eq!(sqlite_volume.len(), 75);
+        assert_eq!(postgres.len(), 75);
+        assert_eq!(sqlite_small.len(), 75);
         assert_eq!(snapshot(sqlite_volume), full, "SQLite volume");
         assert_eq!(snapshot(postgres), full, "Postgres run");
         assert_eq!(snapshot(sqlite_small), small, "SQLite small interference");

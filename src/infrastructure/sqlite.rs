@@ -3345,6 +3345,60 @@ mod store_contract_tests {
     fn ledger_queue_views_kept_through_generations() {
         contract(|open| store_contract::ledger_queue_views_kept_through_generations(&open));
     }
+    /// `ledger_late_provider_answers_as_every_row`, one test of each window
+    /// of [`store_contract::LATE_WINDOWS`] on a history of its own, so that
+    /// they run in parallel; the windows and their checks are the case's,
+    /// and Postgres runs the case whole ([`store_contract::run`]).
+    mod ledger_late_provider_answers_as_every_row {
+        use super::*;
+        use store_contract::LateWindow;
+
+        fn of(window: LateWindow) {
+            contract(|open| {
+                store_contract::ledger_late_provider_answers_as_every_row_of(&open, &[window])
+            });
+        }
+        /// Every window has its test here (the match is exhaustive) and is
+        /// one of the case's, once.
+        #[test]
+        fn every_window_is_tested() {
+            let windows: std::collections::BTreeSet<String> = store_contract::LATE_WINDOWS
+                .iter()
+                .map(|window| {
+                    let _tested: fn() = match window {
+                        LateWindow::AtTime => at_a_time,
+                        LateWindow::AtEvent => at_an_event,
+                        LateWindow::SinceUntilTimes => since_until_of_times,
+                        LateWindow::SinceUntilEvents => since_until_of_events,
+                        LateWindow::CompareAt => compare_at,
+                    };
+                    format!("{window:?}")
+                })
+                .collect();
+            assert_eq!(windows.len(), 5);
+            assert_eq!(store_contract::LATE_WINDOWS.len(), 5);
+        }
+        #[test]
+        fn at_a_time() {
+            of(LateWindow::AtTime);
+        }
+        #[test]
+        fn at_an_event() {
+            of(LateWindow::AtEvent);
+        }
+        #[test]
+        fn since_until_of_times() {
+            of(LateWindow::SinceUntilTimes);
+        }
+        #[test]
+        fn since_until_of_events() {
+            of(LateWindow::SinceUntilEvents);
+        }
+        #[test]
+        fn compare_at() {
+            of(LateWindow::CompareAt);
+        }
+    }
     #[test]
     fn ledger_range_answers_as_every_row() {
         contract(|open| store_contract::ledger_range_answers_as_every_row(&open));
