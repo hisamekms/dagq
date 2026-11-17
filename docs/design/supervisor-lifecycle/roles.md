@@ -36,7 +36,9 @@ related:
 - **inbox**: 人に届くものすべての窓口になるsession。
   openなask（worker・supervisor・job・observerの質問）を人に見せてanswerを書き戻し、それ以外のattentionを人に知らせ、人の指示があるときだけ`dagq-recover` skillの手順を実行する（workerのrunへの`run send`とplannerへの`planner send`はどれにも拒まれ（ADR-t1433-2）、workerとplannerへの答えは`answer`で記録する）。
   OIDCの発行元のある配置ではapprove_landingの着地の承認を書けず、人が自分の最近のloginの資格で答え、inboxの権限は親の人の役割の範囲に狭まる。
-  発行元の無い配置では今どおり全てのaskのanswerを書き戻す（[Authorization](../authorization.md#policy)、[ADR-t3985-1](../../adr/2026-11-03-t3985-1-team-version-identity-by-oidc-human-roles-on-staticpolicy-runner-registration-per-person-inbox-and-no-delegated-landing-approval.md)）。
+  発行元の無い配置では普通のaskのanswer（守るpathに当たらないrunのapprove_landingを含む）を書き戻し、中継として記録する。
+  この配置でも守るpathに当たるrunのapprove_landingと弱める操作はinboxが書けず、人がDAGQ_ROLEの無いTTYで直接答えたものだけをhuman_attestedとして受ける。
+  中継と人の直接の経路の境界と記録は[監査](../audit.md)、決定は[ADR-t4840-3](../../adr/2026-11-12-t4840-3-protected-paths-and-weakening-operations-need-a-direct-human-answer.md)が持つ。
   人が頼んだ計画は人の言葉のまま`request add`で計画の依頼として記録し、runtimeのplannerに移譲する（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）。
   唯一の常駐sessionで、人が自分のterminalで打つ`dagq inbox`が`DAGQ_ROLE=inbox`で、`inbox_prompt`付きでその前面に起動する（`up`は開かない。[`dagq inbox`](up-down.md#dagq-inbox)）。
   初期promptは短く、CLIの手順を持たず（手順はskillが持つ）、skillを変えてもpromptは変わらない。
