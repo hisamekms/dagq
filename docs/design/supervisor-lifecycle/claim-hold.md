@@ -108,7 +108,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
 - 予約はbuildするか・着地のレーンにいるかで付け替え、残りは予約量から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いて数える。
   待ちのrunは予約を持たず今の大きさだけを占め、INTEGRATORの枠は着地待ちの有無によらず常に取る。
-  不明な大きさは予約量のまま数える。
+  信頼できない今の大きさ（量れない・古い・別のrun）は予約量のまま数える。
 - 動いているrunが想定を初めて超えたときの記録は`domain::disk::size_exceeded_expected`が判断する（再起動後は再度1回を許す）。
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はlocalのsupervisorが各passの資源の読みの前にmain checkoutから読み直す（[Run environment](run-environment.md)）。
