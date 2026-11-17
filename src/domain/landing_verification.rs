@@ -24,15 +24,21 @@ use serde_json::{Value, json};
 pub const TABLE: &str = "landing_verification";
 
 /// The key of [`LandingVerification::replaces`]: an array of non-blank
-/// strings, no one twice; required.
+/// strings, no one twice; required with `command`.
 pub const REPLACES: &str = "replaces";
 
 /// The key of [`LandingVerification::command`]: a non-blank string;
-/// required.
+/// required with `replaces`.
 pub const COMMAND: &str = "command";
 
 /// The keys [`TABLE`] takes.
-pub const KEYS: [&str; 2] = [REPLACES, COMMAND];
+pub const KEYS: [&str; 3] = [REPLACES, COMMAND, NON_INCREMENTAL];
+
+/// Boolean key, default false: pair removal of the declared profiles'
+/// incremental outputs with their non-incremental environment for every
+/// landing command and retry. It can be set without `replaces` and `command`.
+/// No profile supporting this is a config error.
+pub const NON_INCREMENTAL: &str = "non_incremental";
 
 /// The environment variable holding the commit of main the run was
 /// rebased onto: the base of the diff that lands (`git diff
@@ -62,6 +68,9 @@ pub const KNOWN_FAILURES_FILE: &str = "ci-known-failures.json";
 /// `[landing_verification]` of `dagq.toml` (ADR-t1925-1 decision 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandingVerification {
+    /// Whether to clear incremental outputs and disable their use only
+    /// during landing verification; false preserves existing builds.
+    pub non_incremental: bool,
     /// What marks a task's verification command as one to replace: a
     /// command that contains any of these texts, as written, is replaced
     /// (the repository's coverage gate, say).
@@ -70,6 +79,35 @@ pub struct LandingVerification {
     /// worktree like the others, with `[run.env]` and the variables
     /// [`BASE_ENV`], [`KNOWN_FAILURES_ENV`] and [`FIX_RUN_ENV`].
     pub command: String,
+}
+
+/// Decide without effects which outputs and variables a landing needs.
+/// Repeated declarations of a profile contribute only once; declaration
+/// paths do not restrict the outputs of this run's worktree.
+pub fn non_incremental(
+    config: Option<&LandingVerification>,
+    toolchains: &super::toolchain::Toolchains,
+) -> Result<Vec<super::toolchain::NonIncrementalBuild>, String> {
+    if !config.is_some_and(|config| config.non_incremental) {
+        return Ok(Vec::new());
+    }
+    let mut seen = Vec::new();
+    let mut builds = Vec::new();
+    for profile in toolchains.profiles() {
+        if seen.contains(&profile.name()) {
+            continue;
+        }
+        seen.push(profile.name());
+        if let Some(build) = profile.non_incremental_build() {
+            builds.push(build);
+        }
+    }
+    if builds.is_empty() {
+        return Err(format!(
+            "dagq.toml: [{TABLE}] {NON_INCREMENTAL} requires a declared profile supporting non-incremental builds"
+        ));
+    }
+    Ok(builds)
 }
 
 /// One command the landing runs: `command`, and the task's commands it
@@ -164,9 +202,33 @@ mod tests {
 
     fn config() -> LandingVerification {
         LandingVerification {
+            non_incremental: false,
             replaces: vec!["cargo llvm-cov nextest".into()],
             command: "sh scripts/landing-verify.sh".into(),
         }
+    }
+
+    #[test]
+    fn non_incremental_builds_require_support_and_pair_outputs_with_environment() {
+        use crate::domain::toolchain::{Toolchains, fake};
+        assert!(
+            non_incremental(None, &Toolchains::this_repository())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            non_incremental(Some(&config()), &Toolchains::this_repository())
+                .unwrap()
+                .is_empty()
+        );
+        let mut enabled = config();
+        enabled.non_incremental = true;
+        let builds = non_incremental(Some(&enabled), &Toolchains::this_repository()).unwrap();
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].dirs, ["target/debug/incremental"]);
+        assert_eq!(builds[0].env, [("CARGO_INCREMENTAL".into(), "0".into())]);
+        assert!(non_incremental(Some(&enabled), &Toolchains::none()).is_err());
+        assert!(non_incremental(Some(&enabled), &fake::only_fake()).is_err());
     }
 
     fn commands(list: &[&str]) -> Vec<String> {
@@ -251,6 +313,7 @@ mod tests {
     #[test]
     fn several_matching_commands_run_the_replacement_once() {
         let config = LandingVerification {
+            non_incremental: false,
             replaces: vec!["llvm-cov".into(), "nextest run".into()],
             command: "landing".into(),
         };

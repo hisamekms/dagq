@@ -111,6 +111,20 @@ impl ToolProcess {
 /// `classname` and `name`.
 pub type JunitTestName = fn(&str, &str) -> String;
 
+/// The outputs and environment paired when a landing disables incremental
+/// builds. Paths are relative to the command's worktree. `lock_for` names
+/// the compiler's lock protecting an entry, or none for ordinary entries;
+/// cleanup holds that lock while removing the entry and retains busy ones.
+#[derive(Debug, Clone)]
+pub struct NonIncrementalBuild {
+    /// Worktree-relative directories containing incremental outputs.
+    pub dirs: Vec<String>,
+    /// Variables appended to every landing command after the run environment.
+    pub env: Vec<(String, String)>,
+    /// The compiler lock protecting a session entry or its lock file itself.
+    pub lock_for: fn(&Path) -> Option<std::path::PathBuf>,
+}
+
 /// The knowledge of one language's tools (ADR-t2268-1 decision 1). Each
 /// method reads a verification command's output without the terminal's
 /// colors: `text` whole, or `lines`, its lines trimmed (the same lines,
@@ -118,6 +132,13 @@ pub type JunitTestName = fn(&str, &str) -> String;
 /// the order [`crate::domain::verify_failure::classify`] keeps, each
 /// declared profile in turn, and takes the first answer.
 pub trait ToolchainProfile: Sync {
+    /// Outputs to clear and environment to append after `[run.env]` for
+    /// non-incremental landing verification; unsupported by default.
+    /// This changes neither worker builds nor recheck/target builds.
+    fn non_incremental_build(&self) -> Option<NonIncrementalBuild> {
+        None
+    }
+
     /// The name a declaration's `profile` names it by.
     fn name(&self) -> &'static str;
 

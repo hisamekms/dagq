@@ -300,6 +300,17 @@ const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
 const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
+
+/// The landing table while it is being read; the replacement pair is
+/// required together, while the build mode can stand alone.
+#[derive(Default)]
+struct LandingTable {
+    line: usize,
+    replaces: Option<Vec<String>>,
+    command: Option<String>,
+    non_incremental: Option<bool>,
+}
+
 /// `[verification]`: the time limit of one verification command
 /// (`command_timeout_secs`, a positive whole number of seconds); what it
 /// bounds and its default are on [`VerificationConfig`]. A binary older
@@ -818,9 +829,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // the file is read whole (its `workflow` is required).
     let mut ci_watch: Option<(usize, CiWatchConfig)> = None;
     let mut ci_watch_keys: Vec<String> = Vec::new();
-    // `[landing_verification]`'s header line and its keys as read; both
-    // are required, which is checked once the file is read whole.
-    let mut landing: Option<(usize, Option<Vec<String>>, Option<String>)> = None;
+    // `[landing_verification]`'s header line, replacement pair, and optional
+    // mode; the pair is checked once the file is read whole.
+    let mut landing: Option<LandingTable> = None;
     // `[container.image]`'s header line and its keys as read; its
     // `containerfile` is required, which is checked once the file is read
     // whole.
@@ -1216,7 +1227,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 areas.get_or_insert_with(Vec::new);
             }
             if *known == LANDING_VERIFICATION_TABLE {
-                landing = Some((number, None, None));
+                landing = Some(LandingTable {
+                    line: number,
+                    ..Default::default()
+                });
             }
             if *known == CONTAINER_IMAGE_TABLE {
                 container_image = Some((number, ProjectImage::default()));
@@ -2099,10 +2113,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
             }
             Some(LANDING_VERIFICATION_TABLE) => {
-                let (_, replaces, command) =
-                    landing.as_mut().expect("[landing_verification] was opened");
+                let LandingTable {
+                    replaces,
+                    command,
+                    non_incremental,
+                    ..
+                } = landing.as_mut().expect("[landing_verification] was opened");
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
                 match key {
+                    landing_verification::NON_INCREMENTAL => {
+                        ensure!(
+                            non_incremental.is_none(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                        );
+                        *non_incremental = Some(parse_bool(rest.trim()).with_context(with)?);
+                    }
                     landing_verification::REPLACES => {
                         ensure!(
                             replaces.is_none(),
@@ -2654,13 +2679,29 @@ pub fn parse_config(text: &str) -> Result<Config> {
         );
         config.container_image = Some(image);
     }
-    if let Some((line, replaces, command)) = landing {
+    if let Some(LandingTable {
+        line,
+        replaces,
+        command,
+        non_incremental,
+    }) = landing
+    {
         let missing = |key: &str| {
             format!("{CONFIG_FILE_NAME}:{line}: [{LANDING_VERIFICATION_TABLE}] has no {key}")
         };
+        let only_mode = replaces.is_none() && command.is_none() && non_incremental.is_some();
         config.landing_verification = Some(LandingVerification {
-            replaces: replaces.with_context(|| missing(landing_verification::REPLACES))?,
-            command: command.with_context(|| missing(landing_verification::COMMAND))?,
+            non_incremental: non_incremental.unwrap_or(false),
+            replaces: if only_mode {
+                Vec::new()
+            } else {
+                replaces.with_context(|| missing(landing_verification::REPLACES))?
+            },
+            command: if only_mode {
+                String::new()
+            } else {
+                command.with_context(|| missing(landing_verification::COMMAND))?
+            },
         });
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
@@ -2748,6 +2789,16 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
             }
         }
+    }
+    if config
+        .landing_verification
+        .as_ref()
+        .is_some_and(|c| c.non_incremental)
+    {
+        let profiles = Toolchains::resolve(&crate::domain::toolchain::BUILTIN, &config.toolchains)
+            .map_err(anyhow::Error::msg)?;
+        landing_verification::non_incremental(config.landing_verification.as_ref(), &profiles)
+            .map_err(anyhow::Error::msg)?;
     }
     Ok(config)
 }
@@ -9522,8 +9573,31 @@ LITERAL = 'no \n escapes # here'
         }
     }
 
-    /// `[landing_verification]` needs both `replaces` and `command`; the
-    /// file without it runs a task's commands as registered (ADR-t1925-1).
+    #[test]
+    fn non_incremental_landing_config_rejects_missing_support_and_bad_values() {
+        assert!(parse_config("[toolchains.rust]\nprofile = 'rust'\n[landing_verification]\nnon_incremental = true\n").unwrap().landing_verification.unwrap().replaces.is_empty());
+        let table = "[landing_verification]\nreplaces = ['gate']\ncommand = 'landing'\n";
+        for value in ["true", "'true'"] {
+            assert!(parse_config(&format!("{table}non_incremental = {value}\n")).is_err());
+        }
+        assert!(parse_config(&format!("{table}non_incremental = false\n")).is_ok());
+        let config =
+            format!("{table}non_incremental = true\n[toolchains.rust]\nprofile = 'rust'\n");
+        assert!(
+            parse_config(&config)
+                .unwrap()
+                .landing_verification
+                .unwrap()
+                .non_incremental
+        );
+        assert!(
+            parse_config(&format!(
+                "{table}non_incremental = true\nnon_incremental = false\n"
+            ))
+            .is_err()
+        );
+    }
+
     #[test]
     fn parses_the_landing_verification_table() {
         assert_eq!(parse_config("").unwrap().landing_verification, None);
@@ -9534,6 +9608,7 @@ LITERAL = 'no \n escapes # here'
             .unwrap()
             .landing_verification,
             Some(LandingVerification {
+                non_incremental: false,
                 replaces: vec!["cargo llvm-cov nextest".into()],
                 command: "sh scripts/landing.sh".into(),
             })
@@ -9577,7 +9652,7 @@ LITERAL = 'no \n escapes # here'
             ),
             (
                 "[landing_verification]\nreplaces = ['a']\ncommand = 'x'\nmode = 'y'\n",
-                "dagq.toml:4: unknown key mode in [landing_verification]; the keys are replaces, command",
+                "dagq.toml:4: unknown key mode in [landing_verification]; the keys are replaces, command, non_incremental",
             ),
             (
                 "[landing_verification]\nreplaces = ['a']\ncommand = 'x'\n[landing_verification]\n",

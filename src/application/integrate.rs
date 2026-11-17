@@ -2837,6 +2837,18 @@ fn land(
         }
         env
     };
+    let non_incremental = if commands.is_empty() {
+        Vec::new()
+    } else {
+        landing_verification::non_incremental(
+            verifier.landing_verification()?.as_ref(),
+            &toolchains,
+        )
+        .map_err(anyhow::Error::msg)?
+    };
+    for build in &non_incremental {
+        run_env.extend(build.env.clone());
+    }
     // The verification's token, revoked when it goes at the verification's
     // end, however it ends (ADR-t2114-1 decision 2). A run on the host does
     // not use it: the container's verification is handed its file.
@@ -2895,6 +2907,14 @@ fn land(
             .containers
             .publish_materials(&verification.prepared)
             .context("copy the verification's materials into the run directory")?;
+    }
+    if !commands.is_empty() && !non_incremental.is_empty() {
+        let outputs = super::landing_build_cleanup::remove(files, worktree, &non_incremental);
+        queue.record_runtime_event(
+            run.id(),
+            EventKind::LandingIncrementalRemoved,
+            json!({"run_id": run.id(), "outputs": outputs}),
+        )?;
     }
     // The landing's verification, done once more when only flaky tests
     // failed (task 768, ADR-t768-1): a new attempt of every command on the
@@ -5813,6 +5833,7 @@ mod tests {
             "cargo llvm-cov --locked --fail-under-lines 80".into(),
         ];
         let config = landing_verification::LandingVerification {
+            non_incremental: false,
             replaces: vec![
                 "cargo llvm-cov nextest".into(),
                 "cargo llvm-cov --locked --fail-under-lines 80".into(),

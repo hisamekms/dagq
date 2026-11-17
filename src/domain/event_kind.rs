@@ -573,6 +573,7 @@ event_kinds! {
     UpdateStarted => "update_started",
     UsageLimited => "usage_limited",
     ValidationFinished => "validation_finished",
+    LandingIncrementalRemoved => "landing_incremental_removed",
     VerificationCommand => "verification_command",
     WorkspaceClosed => "workspace_closed",
     WorkspaceCreated => "workspace_created",
@@ -1672,6 +1673,13 @@ pub const TURN_STARTED: &str = EventKind::TurnStarted.as_str();
 /// without one.
 pub const USAGE_LIMITED: &str = EventKind::UsageLimited.as_str();
 pub const VALIDATION_FINISHED: &str = EventKind::ValidationFinished.as_str();
+/// One best-effort cleanup before a landing's first verification command.
+/// `run_id` identifies the run; `outputs` lists each absolute `dir`, freed
+/// allocated `bytes` (null if measurement failed), `retained` entries with
+/// their `path`, `reason` and `lock`, and `failures` with `path` and `error`.
+/// Locked entries remain. Cleanup failures do not stop verification.
+pub const LANDING_INCREMENTAL_REMOVED: &str = EventKind::LandingIncrementalRemoved.as_str();
+
 pub const VERIFICATION_COMMAND: &str = EventKind::VerificationCommand.as_str();
 pub const WORKSPACE_CLOSED: &str = EventKind::WorkspaceClosed.as_str();
 pub const WORKSPACE_CREATED: &str = EventKind::WorkspaceCreated.as_str();
@@ -2284,6 +2292,10 @@ mod tests {
             (EventKind::UpdateStarted, "update_started"),
             (EventKind::UsageLimited, "usage_limited"),
             (EventKind::ValidationFinished, "validation_finished"),
+            (
+                EventKind::LandingIncrementalRemoved,
+                "landing_incremental_removed",
+            ),
             (EventKind::VerificationCommand, "verification_command"),
             (EventKind::WorkspaceClosed, "workspace_closed"),
             (EventKind::WorkspaceCreated, "workspace_created"),

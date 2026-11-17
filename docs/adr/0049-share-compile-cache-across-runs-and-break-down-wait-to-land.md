@@ -9,6 +9,7 @@ accepted_on: 2026-09-26
 supersedes:
   - adr-0040
 amended_by:
+  - adr-t5177-1
   - adr-t791-1
   - adr-t1215-1
   - adr-t1404-1

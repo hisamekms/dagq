@@ -553,6 +553,14 @@ impl ToolchainProfile for Rust {
         }
     }
 
+    fn non_incremental_build(&self) -> Option<super::NonIncrementalBuild> {
+        Some(super::NonIncrementalBuild {
+            dirs: vec!["target/debug/incremental".into()],
+            env: vec![("CARGO_INCREMENTAL".into(), "0".into())],
+            lock_for: incremental::lock_for,
+        })
+    }
+
     fn build_output(&self) -> Option<BuildOutput> {
         Some(BUILD_OUTPUT)
     }

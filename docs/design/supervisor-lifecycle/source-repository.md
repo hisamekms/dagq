@@ -65,6 +65,8 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 
 ### 言語・道具の知識の今の場所
 
+着地の検証をincrementalなしで流すときに消すdirとenvはprofileが持つ（`ToolchainProfile::non_incremental_build`）。
+
 この判定で分けず、道具の知識はRustのprofileの実装が持ち、宣言したrepositoryでだけ働くもの（ADR-t2268-1決定1・2）。
 言語に依らない部分はruntimeの共通の既定に、このrepositoryに固有の部分は`dagq.toml`に置く（ADR-t2268-1決定2・4）。
 

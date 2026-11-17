@@ -65,6 +65,17 @@ pub(super) fn stale_entries(
     stale
 }
 
+/// rustc uses the same sibling lock for working and finalized sessions.
+/// A lock file itself must also be free before cleanup can unlink it.
+pub(super) fn lock_for(path: &Path) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    if name.ends_with(LOCK) {
+        return Some(path.to_owned());
+    }
+    let (prefix, _, _) = session(name)?;
+    Some(path.with_file_name(format!("{prefix}{LOCK}")))
+}
+
 fn sorted(mut names: Vec<String>) -> Vec<String> {
     names.sort();
     names

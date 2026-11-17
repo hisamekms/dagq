@@ -29,6 +29,7 @@ mod full_disk;
 mod human_disk;
 mod landing_answers;
 mod landing_binding;
+mod landing_incremental;
 mod main_log;
 mod pass_reads;
 mod previous_run_decisions;

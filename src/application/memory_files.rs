@@ -18,6 +18,7 @@ pub struct MemoryFiles {
     /// The most bytes one read takes, as the run directory's reads are
     /// bounded; none when unbounded.
     read_limit: Option<u64>,
+    busy_locks: Mutex<std::collections::HashSet<PathBuf>>,
     rejected_suffix: Mutex<Option<String>>,
     /// The directories that are there ([`Self::put_dir`]); none else is.
     dirs: Mutex<std::collections::HashSet<PathBuf>>,
@@ -30,6 +31,11 @@ pub struct MemoryFiles {
 }
 
 impl MemoryFiles {
+    /// Model a compiler lock held by another process until the test ends.
+    pub fn hold_lock(&self, path: &Path) {
+        self.busy_locks.lock().unwrap().insert(path.to_owned());
+    }
+
     /// Files whose reads take at most `limit` bytes each.
     pub fn bounded(limit: u64) -> Self {
         Self {
@@ -103,6 +109,11 @@ fn missing() -> io::Error {
 }
 
 impl RunFiles for MemoryFiles {
+    fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        Ok((!self.busy_locks.lock().unwrap().contains(path))
+            .then(|| Box::new(()) as Box<dyn std::any::Any + Send>))
+    }
+
     fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
         for parent in dir.ancestors() {
             self.put_dir(parent);
@@ -260,7 +271,11 @@ impl RunFiles for MemoryFiles {
             .unwrap()
             .keys()
             .any(|path| path.starts_with(dir));
-        Ok(empty && self.dirs.lock().unwrap().remove(dir))
+        let removed = empty && self.dirs.lock().unwrap().remove(dir);
+        if removed {
+            self.tree_sizes.lock().unwrap().remove(dir);
+        }
+        Ok(removed)
     }
     fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
         let mut bytes = match self.bytes(path) {

@@ -78,6 +78,8 @@ askやcontainerの知らせで休むrunを死んだrunとして回収しない�
 
 ## 着地の検証
 
+設定がonなら着地の検証の前にそのrunのincrementalのbuildの出力を消し、着地の検証をincrementalなしで流し、workerのbuildは変えない。
+
 [ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)に従い、着地の検証を軽くし、最終関門をmainのCIにする。
 置き換えと材料の受け渡しはruntimeの汎用の仕組みで、repositoryの設定があるときだけ働く。
 登録のコマンドは書き換えず着地ごとに決め直すので、設定を外せば登録のコマンドに戻る。

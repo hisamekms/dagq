@@ -123,6 +123,8 @@ pub(super) enum Outcome {
     Fails,
 }
 
+type CommandEnvironment = (String, Vec<(String, String)>);
+
 /// The verification of a test: each command it is asked to run is
 /// recorded with where it ran and ends as the test says (passing unless
 /// named), with scripted exits and logs when supplied; otherwise its log
@@ -140,6 +142,7 @@ pub(super) struct FakeVerifier {
     results: Mutex<HashMap<String, std::collections::VecDeque<(i32, String)>>>,
     ran: Mutex<Vec<(String, PathBuf)>>,
     config: Mutex<String>,
+    pub(super) environments: Mutex<Vec<CommandEnvironment>>,
     /// Whether `dagq.toml` sets the verification to the container.
     in_container: std::sync::atomic::AtomicBool,
     /// What runs as the command it names starts, once.
@@ -165,6 +168,7 @@ impl FakeVerifier {
             results: Mutex::default(),
             ran: Mutex::default(),
             config: Mutex::default(),
+            environments: Mutex::default(),
             in_container: std::sync::atomic::AtomicBool::new(false),
             on_command: Mutex::default(),
             program_missing: std::sync::atomic::AtomicBool::new(false),
@@ -276,7 +280,7 @@ impl Verifier for FakeVerifier {
     }
 
     fn run_env(&self, _: &Path) -> Result<Vec<(String, String)>> {
-        Ok(Vec::new())
+        crate::infrastructure::run_env::parse_run_env(&self.config.lock().unwrap())
     }
 
     fn role_models(&self) -> Result<crate::domain::actor_model::RoleModels> {
@@ -364,6 +368,15 @@ impl Verifier for FakeVerifier {
         Ok(crate::infrastructure::run_env::parse_config(&self.config.lock().unwrap())?.recheck)
     }
 
+    fn landing_verification(
+        &self,
+    ) -> Result<Option<crate::domain::landing_verification::LandingVerification>> {
+        Ok(
+            crate::infrastructure::run_env::parse_config(&self.config.lock().unwrap())?
+                .landing_verification,
+        )
+    }
+
     fn toolchains(&self) -> Result<crate::domain::toolchain::Toolchains> {
         Ok(crate::domain::toolchain::Toolchains::this_repository())
     }
@@ -380,9 +393,13 @@ impl Verifier for FakeVerifier {
         &self,
         command: &str,
         cwd: &Path,
-        _: &[(String, String)],
+        env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit> {
+        self.environments
+            .lock()
+            .unwrap()
+            .push((command.to_owned(), env.to_vec()));
         self.ran
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
