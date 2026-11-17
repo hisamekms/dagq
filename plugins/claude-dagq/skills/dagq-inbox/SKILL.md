@@ -19,11 +19,15 @@ This session holds no state. After a restart, compaction or `/clear` (never Code
 "$DAGQ" status --role inbox
 ```
 
-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `unreachable` (`status`, `watch`): the service is down: tell the person, `up` on their word (`reference/watch.md`). An `inbox_guardrail` without its guardrail (`reference/status.md`): tell the person, write your handoff, and have them reopen the inbox (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+`asks` lists open asks; `attention` has everything waiting with its `next`; `cursor` starts the next `watch`. Asks first (step 3), then the rest (step 4).
+
+`unreachable` (`status`, `watch`): on the host, the service is down; tell the person, `up` on their word, following `reference/watch.md`. An HTTPS inbox on the person's machine may lose its parent `dagq inbox` or get no relay answer: follow the error as `reference/watch.md` says (reopen the inbox or check the control side), without suggesting `up`.
+
+An `inbox_guardrail` without its guardrail: report it, write your handoff and have the person reopen the inbox (`reference/status.md`).
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (Codex: `reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed`; handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch, start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
+Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`; no shell loop (Codex: `reference/watch.md`). Handle each return (steps 3, 4), then restart from its `cursor`. Failures: `reference/watch.md`. Keep one watch; never loop on `status`. Start it first when a hook says so. On the host, `status`'s `inbox_watcher` says whether a watch runs. The HTTPS relay writes no watcher record; this field cannot show whether its watch runs (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 
