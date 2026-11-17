@@ -110,9 +110,10 @@ Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181
   代わりに起動の記録に渡したhookのkeyとhashを残し、届かないhookの記録から欠けを読む（下の「inboxの区間」）。
 - 約束: 人のCodexの設定（`CODEX_HOME`か`~/.codex`の`config.toml`・`auth.json`）と`~/.claude`は書かない（[ADR-t3331-1](../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
   TUIが自分で書き足す欄は、引数で止められるものは止め、止められないものはexecの前に人のfileを読むだけで確かめ、欠けていれば開かない。
-- 境界: sandboxはどこも書かせず、1つのsocket（hostではqueue service、人のマシンでは中継）への接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
-  hostではinboxの`dagq`がinboxのtokenとともにserviceへ送る。
-  人のマシンではinboxの`dagq`はtokenを持たずに中継へ送り、sandboxの外の親だけが置き場のinboxのtokenをbearerに付けて制御側へ送る。
+- 境界: Codexのsandboxはどこも書かせず、1つのsocket（hostではqueue service、人のマシンのHTTPSのinboxではsessionごとの中継）への接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
+  hostではinboxの`dagq`がinboxのtokenとともにqueue serviceのsocketへ送る。
+  人のマシンのHTTPSのinboxではagentのCLIはtokenを持たずに中継へ送り、sandboxの外の親のプロセスだけが置き場からinboxのtokenを読み、bearerに付けてHTTPSの宛てへ送る。
+  中継の資格情報の扱いは`application::inbox_relay`と[Queue serviceの「クライアントモード」](queue-service.md#クライアントモード)を参照する。
   どちらも受けた側がinboxのprincipalで認可する。
   queueのdirとDBはsandboxから書けないので、それを書く制御側のコマンド（`up`・`integrate`など）はCodexのinboxからは動かず、人が自分のterminalで打つ。
   hookはsandboxの外のhostで動き、queueはinboxの身元の`dagq`で読む。
