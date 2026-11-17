@@ -104,16 +104,19 @@ workers = true
 # 実装（worker）と review の provider の組の試し（request 216、ADR-t4005-1。振る舞いは docs/design/supervisor-lifecycle/worker-model.md の「限定の試し」と
 # docs/design/supervisor-lifecycle/review.md の「reviewのprovider」）。task ごとに名前と task の ID の hash で決定的に群を決め、
 # A（実装は task の provider の Claude、review は [roles.review]・[review.subagents.*] の設定のまま）と
-# B（実装 Codex・review Claude）を比べる。どちらの群も書いた provider と見る provider が違う（A でも Claude を名指す subagent は設定のまま Claude で動く）。
-# B の割合は人の指示（request 225、2026-11-03「50%にしましょうか。壊れるリスクは少ないので」）で 50%
-# （B を有効にした 2026-11-03 から 50% の着地までは 10% で動いた）。
+# B（実装 Codex・review Claude）を比べる。A の review は [roles.review] に従うので、それを claude にした今は A も実装 Claude・review Claude になる。
+# B の割合は人の決定（request 339、2026-11-16「Worker は Codex、Reviewer は Claude」）で 100% にした
+# （2026-11-03 に 10% で有効にし、request 225 で 50% にした）。repository で worker の既定の provider を変える設定は無いので、
+# 試しに入る run の worker を全部 Codex にする形として割合を 100% にする。A の群（対照群）が無くなるので A/B の比べはここで終わる。
+# 試しの外の run（Spike・既定でない provider の task・headless でない claim・hold の解除で provider を選んだ task）と、
+# 前の run で A を持った task の resume・revise・retry の worker は群に従わず task（か hold の解除で選んだ）の provider のまま動き
+# （既定の task は Claude、provider を codex にした task や Codex を選んだ hold の解除は Codex）、review は下の [roles.review] の Claude。
 # B の worker は上の [provider_fallback] workers = true に従い、Codex が控えに入れば Claude へ切り替わり、その run は provider の組の比べで
 # 切り替えた run として数えられる（ADR-t4005-1 の決定6・7 と、それを amends にする ADR-t4118-1）。
-# 群を広げる・止める・全面に入れ替えるのは kpi の群の比べの値を見て planner か人が別に決める。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
 # [worker.provider_trial] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 4006・4007 を含んでから足した。
 enabled = true
-treatment_percent = 50
+treatment_percent = 100
 treatment_worker = "codex"
 treatment_review = "claude"
 
@@ -324,20 +327,20 @@ tags = ["headless", "codex", "cmux", "throughput", "enterprise", "planning", "ob
 # docs/design/supervisor-lifecycle/actor-model.md の provider）。model と effort は書かず、
 # Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する。
 # Codex で動ける役割は actor-model.md の provider の項（domain::actor_model::CODEX_ROLES）が持つ。
-# この repository で codex にしている役割は、この節とこの下に続く [roles.*] の節（足した task はそれぞれのコメント）で、
-# [roles.*] の節を持たない役割は provider を書かず、今までどおり Claude で動く。
+# この repository で codex にしている役割は、この節とこの下に続く [roles.*] の節のうち provider = "codex" を書いたもの
+# （足した task はそれぞれのコメント）で、[roles.review]・[roles.recovery] は claude を書き、[roles.*] の節を持たない役割は
+# provider を書かず Claude で動く。
 # [roles.<role>] の provider を知らない旧バイナリは dagq.toml を読めなくなるので、
 # 固定バイナリが task 1065 を含んでから足した。
 provider = "codex"
 
 [roles.review]
-# 通常の run の review job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
-# 「inbox と worker は Claude、それ以外の actor は Codex」の review の分。goal 80、ADR-t1207-1、task 1208。
-# 書式と振る舞いは docs/design/supervisor-lifecycle/review.md と actor-model.md の provider）。
-# model と effort は書かず、Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する。
-# review の codex を知らない旧バイナリ（CODEX_ROLES に review が無い）は設定の誤りとして拒むので、
-# 固定バイナリが task 1207 を含んでから足した。
-provider = "codex"
+# 通常の run の review job を Claude で動かす（人の 2026-11-16 の決定、request 339「Worker は Codex、Reviewer は Claude」）。
+# 2026-10-01 の決定（goal 80、ADR-t1207-1）で Codex にしていたのを戻した。worker を Codex にする上の [worker.provider_trial] の B の群は
+# review を treatment_review の Claude にするが、試しの外の run と前の run で A を持った task の再 run は群に従わずこの節で review されるので、
+# それらの review も Claude にするためにここも claude にする。書式と振る舞いは docs/design/supervisor-lifecycle/review.md と actor-model.md の provider。
+# model と effort は書かず、Claude の既定に任せる。
+provider = "claude"
 
 [roles.plan_review]
 # plan review の job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
@@ -347,6 +350,14 @@ provider = "codex"
 # （--no-claude では切り替えず plan review by hand に渡す）。plan_review の codex を知らない旧バイナリ
 # （CODEX_ROLES に plan_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1218 を含んでから足した。
 provider = "codex"
+
+[throughput_review]
+# 毎時・日次・週次の見直しの kpi・stats を止める（人の 2026-11-16 の決定、request 340）。job_read の重い読みが queue service を
+# busy にし、人と inbox の読みが拒まれるため（goal 290）。止める前の 2026-11-16 00〜15 時 JST は job_read が 1 時間あたり 25〜164 分・
+# busy の拒否 13〜60 回、止めた後の 16〜19 時は 4 時間で 49 分・拒否 0 回だった。
+# 戻す条件: goal 290 の task 4973・4974 が着地して service の busy が解けたら、kpi_stats の行を消して既定の on に戻す。
+# supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
+kpi_stats = false
 
 [roles.throughput_review]
 # スループットの見直し（毎時・日次・週次）の job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
@@ -371,13 +382,11 @@ provider = "codex"
 effort = "low"
 
 [roles.recovery]
-# 復旧 job（終わった run の triage と生きている run の復旧）を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
-# 「inbox と worker は Claude、それ以外の actor は Codex」の復旧 job の分。goal 80、task 1226）。
-# 書式と振る舞いは docs/design/supervisor-lifecycle/triage.md の「Codexで動かす」と actor-model.md の provider。
-# model と effort は書かず、Codex の既定の model と medium に任せる。
-# 固定バイナリが task 1225（復旧 job の Codex 対応）と task 1378（Git の外の job に
-# --skip-git-repo-check を付ける）を両方含むことを verify の関門で確かめてから足す。
-provider = "codex"
+# 復旧 job（終わった run の triage と生きている run の復旧）を Claude で動かす（人の 2026-11-16 の決定、request 339「復旧 job は Claude」）。
+# 2026-10-01 の決定（goal 80、task 1226）で Codex にしていたのを戻した。既定も Claude だが、決定の記録を設定のそばに残すため節を消さずに書く。
+# 書式と振る舞いは docs/design/supervisor-lifecycle/triage.md と actor-model.md の provider。
+# model と effort は書かず、Claude の既定に任せる。
+provider = "claude"
 
 [areas]
 # stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
@@ -639,7 +648,8 @@ cached_input_usd_per_mtok = 0.1
 output_usd_per_mtok = 10.0
 default_run_usd = 0.242
 
-# Claude を dev の周の送り先に宣言する（[roles.review] は codex で各 agent の表に provider が無いので、宣言が無いと agent eval --provider claude は拒まれる）。
+# Claude を dev の周の送り先に宣言する（足したときは [roles.review] が codex で各 agent の表に provider が無く、宣言が無いと agent eval --provider claude は
+# 拒まれた。[roles.review] を claude にした今も、default_run_usd の見込みを持たせるために表を残す）。
 # 7 本の表に provider を書くと本番の review まで動くので、測るためには宣言にする。本番の review の provider の解決はこの表を読まない。
 # default_run_usd は 1 回の見込み: 組み込みの $0.40 では $30 の上限に 75 回しか入らず plugin-generic（114 回）と receipt-evidence（104 回）が k 1 でも拒まれるが、
 # 0.2 なら比べの k の回の数（最大 114 回で $22.8）が全て上限に収まる。Claude の実績は design-layers の claude-haiku-5-5 で回あたり $0.004〜0.014（周 1171773・1199023）で、
