@@ -51,6 +51,11 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `request a plan for the waiting tasks`: tasks of open goals wait on a task of a closed goal that will never complete. On the person's word, a planning request naming the stranded task (`--ref task:A`), or the person decides in their own terminal.
   - A request's outcomes and its planner's question: `reference/requests.md`.
 - The host and its services (the person fixes them; tell them the error the attention carries):
+
+  On the host, follow the steps below, running commands only within your authority and on the person's word where required.
+
+  For an HTTPS inbox on the person's machine, report the attention's `next` and `last_error` to the person. The host checks and repairs below belong on the control side (the deployment): the person or its administrator checks there, following the deployment's operating procedures. Do not run `doctor`, `service status`, `queue-broker status`, `up` or other control-side commands through the relay; it refuses them. Local process, Podman and log checks on the person's machine do not check the deployment. Connection failures: `watch.md`.
+
   - `stop sccache on the host; the supervisor starts it`: the supervisor could not replace an unhealthy server. Show `doctor`'s server identity; the person stops it and leaves the start to the supervisor.
   - `install tool`: a program the run environment or the CI watch needs is missing on the supervisor's PATH. The person installs it, or asks through a planning request for a task that stops naming it.
   - `log in to gh`: the person runs `gh auth login` in their own terminal; the inbox does not log in.
