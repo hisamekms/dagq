@@ -15,7 +15,7 @@ Read this when the inbox runs on Codex, or when its start, its hooks or its guar
 
 - On both, a SessionStart hook prints `status --role inbox` at the start, after a compaction and after `/clear`; start again from step 1. On Codex it also comes after an automatic compaction (source `compact`, the same session going on), and it names the watch to run first, from the status's cursor.
 - Claude: look at the session's background tasks first; a watch still running brings its own notice (`watch.md`). Codex has none: no watch outlives a turn, so run the watch again.
-- To start the conversation over, use `/clear`. On Codex never use `/new`: it moves the conversation into a new worktree of Codex's own, away from the main checkout the inbox runs in. Never resume an earlier Codex session by hand either: it starts without the inbox's hooks and instructions. To restart, the person ends the inbox and runs `dagq inbox` again (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+- To start the conversation over, use `/clear`. On Codex never use `/new`: it moves the conversation into a new worktree of Codex's own, away from the inbox's working directory in either route: the main checkout on the host, or the directory where the person ran `dagq inbox` on their own machine for an HTTPS control side (through the relay). Never resume an earlier Codex session by hand either: it starts without the inbox's hooks and instructions. To restart, the person ends the inbox and runs `dagq inbox` again (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
 
 ## Hooks and the guardrail
 
