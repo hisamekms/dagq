@@ -2063,14 +2063,17 @@ enum DiskCommand {
     /// (an administrator, when people authenticate) and the inbox at a person's word. Prints
     /// what it recorded.
     Relax {
-        /// The size a new run, and a landing, is expected to take, in place of the recent runs'
-        /// (e.g. 8GiB); kept as the samples' while there are none.
+        /// Override both the new run's WORKER reservation W and the landing's INTEGRATOR
+        /// reservation I from the configured method (e.g. 8GiB). Recent with no samples stays
+        /// unsampled.
         #[arg(long, value_parser = dagq::domain::disk::parse_size, conflicts_with = "clear")]
         expected: Option<u64>,
-        /// A claim adds no expectation for a run waiting to land.
+        /// A claim omits only I for the empty INTEGRATOR slot, normally reserved whether or not
+        /// a landing waits. An active INTEGRATOR run's remaining reservation still counts in U.
         #[arg(long, conflicts_with = "clear")]
         no_landing_expectation: bool,
-        /// The moving runs' remaining counts 0.
+        /// Count U, the unused reservations (WORKER and INTEGRATOR runs' remaining reservations),
+        /// as zero for claims.
         #[arg(long, conflicts_with = "clear")]
         no_remaining: bool,
         /// How long it lasts (e.g. 30m, 6h), at most 24h.
