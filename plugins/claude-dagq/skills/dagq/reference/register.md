@@ -30,7 +30,7 @@ Pick `--verify`, `--paths`, `--evidence`, `--change` and the files named per `re
 
 ## From draft to ready
 
-A one-shot task omits `--goal`. `add` makes a `draft`; `submit` (refusing what `lint` rejects) puts the drafts in one proposal for plan review. `pass` readies them; `revise` returns them to `draft` with reasons to fix and `submit --proposal ID` again; `concern` asks the person through the inbox. Withdraw a dropped plan with `proposal withdraw ID` (`reference/inspect.md`). Only plan review readies a task; `ready --bypass-review` skips it only on a person's explicit word. A ready task missing from `candidates` is blocked (`show ID`).
+A one-shot task omits `--goal`. `add` makes a `draft`; `submit` (refusing what `lint` rejects) puts the drafts in one proposal for plan review. `pass` readies them; `revise` returns them to `draft` with reasons to fix and `submit --proposal ID` again; `concern` asks the person through the inbox. Withdraw a dropped plan with `proposal withdraw ID` (`reference/inspect.md`). Only plan review readies a task; to bypass it, the person must type `ready --bypass-review` directly in their own terminal without `DAGQ_ROLE` and confirm the target on its TTY. The inbox is refused even when relaying the person's explicit word (`reference/authority.md`, "The inbox acts on the person's behalf"). A ready task missing from `candidates` is blocked (`show ID`).
 
 ## Changing a registered task
 

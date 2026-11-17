@@ -61,7 +61,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 "$DAGQ" candidates
 ```
 
-`add` makes a `draft`, never claimed; `submit` puts drafts in one proposal for plan review (`pass`, `revise`, `concern`). Only plan review readies a task (`ready --bypass-review` only on a person's explicit word). Proposals, withdrawing, editing, dependencies and `--priority` (a task's own; `set-priority TASK --inherit` gives it back to the goal's): `reference/register.md`.
+`add` makes an unclaimed `draft`; `submit` sends drafts to plan review (`pass`, `revise`, `concern`). Bypass requires a person typing `ready --bypass-review` in their own terminal without `DAGQ_ROLE`; the inbox is refused even on their word (`reference/authority.md`). Proposals, edits, dependencies, priority and `set-priority TASK --inherit`: `reference/register.md`.
 
 ## 3. Inspect
 
