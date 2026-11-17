@@ -496,15 +496,16 @@ impl HostOpsState {
         }
     }
     /// Once a cleanup for room is done: record `auto_repaired` when it
-    /// freed something, with the free bytes read again.
+    /// freed something, with the free bytes read again. Return that same
+    /// reading so a counted remainder need not spend the old shortage.
     pub(in crate::application::supervise) fn cleaned_for_disk(
         &mut self,
         env: &mut HostEnv<'_>,
         request: DiskRequest,
         removed: &Cleaned,
-    ) {
+    ) -> Option<u64> {
         if removed.bytes == 0 {
-            return;
+            return None;
         }
         let after = self.free_bytes(env);
         info!(
@@ -519,6 +520,7 @@ impl HostOpsState {
         ) {
             warn!(error = %format_args!("{error:#}"), "the cleanup for disk space could not be recorded: {error:#}");
         }
+        after
     }
     /// Open the disk ask of this shortage, or add to the open one the
     /// runs whose landing waits for the disk (`joining`, from

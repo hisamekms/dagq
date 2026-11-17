@@ -31,8 +31,10 @@ scratchの命名は `domain::recheck_scratch_name`、restoreの互換は `replan
 ## 終わっていないrunのビルド成果物
 
 人の答えを待つrunなどがビルド成果物を持ち続けると、空き容量が足りずclaimと着地が控えられる（[空き容量](claim-hold.md#空き容量)）。
-誰も作業していないrunの答え待ちなら通常の掃除で、他の待ちなら空き容量のための掃除でビルド成果物を消す。
-開いたaskがstalledだけの答え待ちはビルド成果物を残し、turnの時間上限で止まった後のresume待ちは空き容量のための削除からだけ外すが、いずれも古いcacheの通常の掃除には残す。
+待ちのrunのビルド成果物を消すかは、予約の方式と独立の掃除モードが決める。
+既定ではclaimが空き容量で止まるときだけ、待ちに入った古い順に必要量まで消し、人の答え待ちも通常の掃除では残す。
+通常の掃除で消すモードと、容量不足でも残すモードも選べる（入口は `WaitingBuildCleanup` と `cleanup::waiting_outputs_selected`）。
+開いたaskがstalledだけの答え待ちはビルド成果物を残し、turnの時間上限で止まった後のresume待ちはビルド成果物の丸ごとの削除から外すが、いずれも古いcacheの通常の掃除には残す。
 理由は[待ちの間の削除の測定](../../plans/run-incremental-removal-on-wait-spike.md#後続の実装の-task-への推奨)を読む。
 対象と区別を知りたいときは `WorktreeCleanup` を読む。
 宣言したprofileのビルド成果物だけを消し、Gitが追跡するソースは残す（入口は `cleanup::remove_build_outputs`、宣言の責務は[Toolchain profiles](../toolchain-profiles.md#buildの出力の置き場)）。
@@ -45,12 +47,12 @@ leaseやslotを持つrunには通常は触れない。
 人が打つ`integrate`はこの予約を見ない。
 消した後に着地やresumeが始まれば、検証とworkerがsccacheでビルドし直して進む。
 
-全runを見直す通常の掃除では、buildの止まっているrunの古いcacheだけを消す（入口は `cleanup::remove_stale_entries`）。
+全runを見直す通常の掃除では、モードによるビルド成果物の削除とは独立に、buildの止まっているrunの古いcacheを消す（入口は `cleanup::remove_stale_entries`）。
 rustcのlockを取らないので、作業中・検証・review・e2eの最中のrunには触れない。
 次のbuildで戻るので、空くのはbuildの止まっている間だけである。
 消したrunを再び候補にする条件は `cleanup::leave_pruned` を読む。
 古いcacheを消したbytesはrunの大きさの見積もりに数えない（[claimを控える](claim-hold.md#閾値)）。
-空き容量のための掃除は、これらのrunのビルド成果物を丸ごと消す。
+モードが削除を選んだ待ちのrunでは、ビルド成果物を丸ごと消す。
 
 終わったrunに付随するファイルの掃除は `cleanup` のmodule docから辿れる。
 run_dirの記録は残し、scratchpadは求めたdirの外や人のsessionのものに触れない。

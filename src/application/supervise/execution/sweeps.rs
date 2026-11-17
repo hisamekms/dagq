@@ -430,7 +430,8 @@ impl Supervisor<'_> {
 
     /// The runs the slots hold, which a cleanup leaves alone, but for the
     /// waiting ones and those waiting for the landing slot it may take for
-    /// disk space ([`Self::waiting_worktrees`], [`Self::landing_worktrees`]).
+    /// cleanup according to the waiting-build mode
+    /// ([`Self::waiting_worktrees`], [`Self::landing_worktrees`]).
     pub(super) fn cleanup_held(&self) -> cleanup::Held {
         cleanup::Held {
             runs: self.held_runs(),
@@ -440,13 +441,14 @@ impl Supervisor<'_> {
     }
 
     /// The runs in the slots that wait for the landing slot
-    /// (`AwaitingSlot`), which a cleanup for disk space may take the build
+    /// (`AwaitingSlot`), which the configured cleanup mode may take the build
     /// outputs of ([`cleanup::LandingRun`]): none while a landing recheck
     /// runs or this process drains (a stop or a handoff lands or hands
     /// them over as before). The landing queue keeps no order of its own:
     /// each pass looks at the slots in turn, and the first of them that
     /// finds the landing slot free lands. So the last slot is the last to
-    /// land, and they are offered from the last slot to the first.
+    /// land, and they are offered from the last slot to the first as a
+    /// tie-breaker; cleanup orders them together with other waits by age.
     fn landing_worktrees(&self) -> Vec<cleanup::LandingRun> {
         let recheck = self.landing.rechecks.running();
         let draining = self.registration.draining();

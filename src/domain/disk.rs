@@ -38,6 +38,62 @@ pub enum DiskEstimate {
     Fixed,
 }
 
+/// Waiting-build cleanup, independent of the reservation estimate method.
+/// `[disk] waiting_build_cleanup` accepts "eager", "lazy" (the default),
+/// or "never"; other values are configuration errors with a line number.
+/// Eager removes eligible waiting builds during ordinary cleanup. Lazy
+/// removes them only when a claim lacks space, oldest wait first until
+/// enough bytes have gone. The Never mode retains outputs even when claims lack space.
+/// All modes retain the separate pruning of obsolete incremental sessions.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingBuildCleanup {
+    Eager,
+    #[default]
+    Lazy,
+    Never,
+}
+
+/// An eligible, quiescent waiting build, after ownership/activity checks.
+/// `since` is the wait's start in milliseconds; unknown starts sort last.
+/// `bytes` is recoverable space, zero when not yet measured. A streaming
+/// caller may offer unknown sizes and replan after each actual removal.
+#[derive(Debug, Clone, Copy)]
+pub struct WaitingBuild {
+    pub since: i64,
+    pub bytes: u64,
+}
+
+/// Indices of waiting builds to remove, oldest first (stable for ties).
+/// `shortage` is the claim's missing bytes, not a landing's shortage;
+/// None or zero means a claim is not blocked by space. Callers supply only
+/// eligible stopped waits: unleased ones or those offered by their owner,
+/// never another owner's lease, active work, or output-excluded waits.
+/// Keeping eligibility outside this policy lets wait-specific age/output
+/// restrictions evolve without changing mode or budgeting semantics.
+pub fn waiting_build_plan(
+    mode: WaitingBuildCleanup,
+    builds: &[WaitingBuild],
+    shortage: Option<u64>,
+) -> Vec<usize> {
+    let mut remaining = match mode {
+        WaitingBuildCleanup::Never => return Vec::new(),
+        WaitingBuildCleanup::Eager => u64::MAX,
+        WaitingBuildCleanup::Lazy => shortage.unwrap_or(0),
+    };
+    let mut order: Vec<usize> = (0..builds.len()).collect();
+    order.sort_by_key(|&i| builds[i].since);
+    order.retain(|&i| {
+        if mode == WaitingBuildCleanup::Eager {
+            return true;
+        }
+        let take = remaining > 0;
+        remaining = remaining.saturating_sub(builds[i].bytes);
+        take
+    });
+    order
+}
+
 /// The `[disk]` table of `dagq.toml`.
 /// `estimate` is a string, `"recent"` by default or `"fixed"`; other values
 /// are read errors with a line number. In fixed mode `run_size` is required,
@@ -63,6 +119,8 @@ pub struct DiskConfig {
     /// Fixed INTEGRATOR reservation I: positive size string `landing_size`.
     /// Omitted means `run_size`; recent mode warns and ignores it.
     pub landing_size: Option<u64>,
+    /// Waiting build removal policy; independent of `estimate`.
+    pub waiting_build_cleanup: WaitingBuildCleanup,
 }
 
 impl Default for DiskConfig {
@@ -72,13 +130,20 @@ impl Default for DiskConfig {
             estimate: DiskEstimate::Recent,
             run_size: None,
             landing_size: None,
+            waiting_build_cleanup: WaitingBuildCleanup::Lazy,
         }
     }
 }
 
 impl DiskConfig {
     /// The setting names of the `[disk]` table.
-    pub const KEYS: [&str; 4] = ["reserve", "estimate", "run_size", "landing_size"];
+    pub const KEYS: [&str; 5] = [
+        "reserve",
+        "estimate",
+        "run_size",
+        "landing_size",
+        "waiting_build_cleanup",
+    ];
     /// The settings of an older `[disk]` that are read no more: the
     /// thresholds follow the reserve and the configured expectation with no
     /// factor (ADR-t4473-1), so a `dagq.toml` that still has them is
@@ -1557,6 +1622,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn waiting_build_modes_select_only_the_oldest_needed_builds() {
+        use WaitingBuildCleanup::{Eager, Lazy, Never};
+        let builds = [
+            WaitingBuild {
+                since: 3,
+                bytes: 20 * GIB,
+            }, // c
+            WaitingBuild {
+                since: 1,
+                bytes: 20 * GIB,
+            }, // a
+            WaitingBuild {
+                since: 2,
+                bytes: 20 * GIB,
+            }, // b
+        ];
+        for shortage in [None, Some(0)] {
+            assert!(waiting_build_plan(Lazy, &builds, shortage).is_empty());
+        }
+        assert_eq!(waiting_build_plan(Lazy, &builds, Some(30 * GIB)), [1, 2]);
+        assert_eq!(waiting_build_plan(Lazy, &builds, Some(20 * GIB)), [1]);
+        assert_eq!(waiting_build_plan(Lazy, &builds, Some(61 * GIB)), [1, 2, 0]);
+        assert_eq!(waiting_build_plan(Eager, &builds, None), [1, 2, 0]);
+        assert!(waiting_build_plan(Never, &builds, Some(30 * GIB)).is_empty());
+    }
+
     /// The incremental sessions removed of a run's build outputs are no
     /// sample's record: the run's next build writes them again.
     #[test]
@@ -1627,7 +1719,13 @@ mod tests {
     fn the_settings_are_set_by_name() {
         assert_eq!(
             DiskConfig::KEYS,
-            ["reserve", "estimate", "run_size", "landing_size"]
+            [
+                "reserve",
+                "estimate",
+                "run_size",
+                "landing_size",
+                "waiting_build_cleanup"
+            ]
         );
         assert_eq!(DiskConfig::default().reserve, DEFAULT_RESERVE_SHARE);
         for key in DiskConfig::RETIRED_KEYS {

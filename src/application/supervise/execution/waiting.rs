@@ -396,6 +396,25 @@ impl Supervisor<'_> {
     /// until it arrived, since the ended ask is consumed (ADR-0071).
     /// A stall ends on an idle marker or receipt newer than Waiting::since.
     pub(super) fn watch_waiting(&mut self, slot: &mut Slot) -> Result<Step> {
+        let cleaning = self.host.cleanup().cleaning();
+        let mut guard = cleanup::lock_cleaning(&cleaning);
+        let run = slot.run.id().clone();
+        // The same lock protects the job's reach and everything a waiting
+        // watch can start. An unreached offer holds no answer back.
+        guard
+            .watch_waiting(&run, |guard| {
+                let step = self.watch_waiting_unreserved(slot, guard);
+                let waiting = slot.waiting_now() && matches!(&step, Ok(Step::Continue));
+                (step, waiting)
+            })
+            .unwrap_or(Ok(Step::Continue))
+    }
+
+    fn watch_waiting_unreserved(
+        &mut self,
+        slot: &mut Slot,
+        cleaning: &mut cleanup::Cleaning,
+    ) -> Result<Step> {
         if !self
             .queue
             .holds_lease(slot.run.id(), self.registration.token())?
@@ -406,15 +425,10 @@ impl Supervisor<'_> {
         // parked as well: its session lost to the replanning's fence is not
         // opened again (ADR-t1521-2 decision 1).
         if let Some(step) = self.park_step(slot)? {
+            cleaning.withdraw(slot.run.id());
             return Ok(step);
         }
         if !slot.waiting_now() {
-            return Ok(Step::Continue);
-        }
-        // A cleanup for disk space removes its build outputs: the wait
-        // holds still until it passed the run, so no answer ends it, and
-        // no turn or reopened session starts in the worktree meanwhile.
-        if cleanup::lock_cleaning(&self.host.cleanup().cleaning()).reserved(slot.run.id()) {
             return Ok(Step::Continue);
         }
         let run = slot.run.clone();
@@ -436,6 +450,7 @@ impl Supervisor<'_> {
             // the wait goes on (task 1372). Given up, a session whose
             // processes an attempt forgot is ended back in its slot as one
             // that exited.
+            cleaning.withdraw(slot.run.id());
             if let Reopen::Waiting = self.reopen_lost_session(slot, &processes, wrapper)? {
                 return Ok(Step::Continue);
             }

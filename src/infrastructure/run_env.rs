@@ -86,7 +86,7 @@ use crate::{
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
         container_image::{ProjectImage, repository_path_problem},
         container_runtime::{RUNTIME_KEY, Runtime, RuntimeConfig, RuntimeTarget, refuse_container},
-        disk::{DiskConfig, DiskEstimate},
+        disk::{DiskConfig, DiskEstimate, WaitingBuildCleanup},
         exit::ExitConfig,
         fresh_session::FreshSessionConfig,
         headless_job::ReviewJobs,
@@ -2466,6 +2466,17 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         "fixed" => DiskEstimate::Fixed,
                         _ => anyhow::bail!(
                             "{CONFIG_FILE_NAME}:{number}: value of {key}: expected \"recent\" or \"fixed\", not {text:?}"
+                        ),
+                    };
+                } else if key == "waiting_build_cleanup" {
+                    let text = parse_string(rest.trim())
+                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                    config.disk.waiting_build_cleanup = match text.as_str() {
+                        "eager" => WaitingBuildCleanup::Eager,
+                        "lazy" => WaitingBuildCleanup::Lazy,
+                        "never" => WaitingBuildCleanup::Never,
+                        _ => anyhow::bail!(
+                            "{CONFIG_FILE_NAME}:{number}: value of {key}: expected \"eager\", \"lazy\" or \"never\", not {text:?}"
                         ),
                     };
                 } else if key == "landing_size" {
@@ -8968,6 +8979,40 @@ LITERAL = 'no \n escapes # here'
             let output = captured.text();
             assert!(output.contains("run_size is ignored"), "{output}");
             assert!(output.contains("WARN"), "{output}");
+        }
+    }
+
+    #[test]
+    fn waiting_build_cleanup_defaults_and_values_are_independent_of_estimate() {
+        use WaitingBuildCleanup::{Eager, Lazy, Never};
+        assert_eq!(parse_config("").unwrap().disk.waiting_build_cleanup, Lazy);
+        for method in [
+            "",
+            "estimate = 'recent'\n",
+            "estimate = 'fixed'\nrun_size = '20GiB'\n",
+        ] {
+            assert_eq!(
+                parse_config(&format!("[disk]\n{method}"))
+                    .unwrap()
+                    .disk
+                    .waiting_build_cleanup,
+                Lazy
+            );
+            for (value, expected) in [("eager", Eager), ("lazy", Lazy), ("never", Never)] {
+                let config = parse_config(&format!(
+                    "[disk]\n{method}waiting_build_cleanup = '{value}'"
+                ))
+                .unwrap();
+                assert_eq!(config.disk.waiting_build_cleanup, expected);
+            }
+        }
+        for value in ["'other'", "1", "true"] {
+            let error = format!(
+                "{:#}",
+                parse_config(&format!("[disk]\nwaiting_build_cleanup = {value}")).unwrap_err()
+            );
+            assert!(error.contains("dagq.toml:2:"), "{error}");
+            assert!(error.contains("value of waiting_build_cleanup"), "{error}");
         }
     }
 

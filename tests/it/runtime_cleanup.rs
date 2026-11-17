@@ -866,6 +866,12 @@ fn a_landing_waits_for_the_cleanup_of_its_build_outputs() {
     let files = GatedFiles::default();
     let stop = Arc::new(AtomicBool::new(false));
     let options = files.options(SuperviseOptions {
+        // This boundary tests the reservation while ordinary cleanup runs.
+        // Eager explicitly requests full removal without a claim shortage.
+        disk: Some(DiskConfig {
+            waiting_build_cleanup: dagq::domain::disk::WaitingBuildCleanup::Eager,
+            ..DiskConfig::default()
+        }),
         stop: stop.clone(),
         ..SuperviseOptions {
             sweep_interval: Duration::ZERO,
