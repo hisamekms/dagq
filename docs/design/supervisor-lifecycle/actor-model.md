@@ -24,6 +24,8 @@ related:
 
 # Actor model
 
+役割別と役割の組の割当の追加契約は[Agent比較実験](../agent-experiments.md)（実装前の地図）を読む。
+
 worker以外のアクターのsessionのmodelとeffortの設定と、provider・model・effortの記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7の(b)(c)）。
 workerは[Worker model](worker-model.md)。
 計測（transcriptから読む実際のmodel / effort）は[Agent provider lifecycle](../provider-lifecycle.md#modelとeffort)。

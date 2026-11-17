@@ -127,6 +127,8 @@ validationを通ったrun（awaiting_integration）
 
 ## reviewのprovider
 
+役割の割当とreviewの起動の境界は[Agent比較実験](../agent-experiments.md)（実装前の地図）を読む。
+
 - 控えるのは実際に失敗したproviderだけで、起動できないjobは他のjobの答えを保ったまま待つ（[Queue hold](queue-hold.md)）。
 - **runの群**: providerの組の試しを有効にしたrepositoryでは、reviewのjobのproviderはrunの群に従う（[ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)決定5）。
   Codexで実装した群のrunでは、全体の判定とproviderがCodexのsubagent（明示したものと役割の設定を継ぐもの）をClaudeで起動し、Claudeの側のmodelとeffortを渡す。

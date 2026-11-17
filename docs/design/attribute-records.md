@@ -14,6 +14,8 @@ related:
 
 # taskとgoalとfindingの属性の記録
 
+群と役割の割当参照の境界は[Agent比較実験](agent-experiments.md)（実装前の地図）を読む。
+
 `stats`・`kpi`・`report`が状態の表から読むtaskとgoalの属性を、計測の層がEventStoreだけから作れるよう、状態の変更と同じtransactionで新しい値をeventに書く（[計測](measurement.md)の「SSOTとビュー」、ADR-t1662-2）。
 畳むのは`domain::ledger::attributes::fold`で、eventと窓の終わりだけを読み、StateStoreを読まない。
 `application::GraphInput::folded`が畳んだ値から`graph_input`と同じ形（tasksとcandidates）を作る。

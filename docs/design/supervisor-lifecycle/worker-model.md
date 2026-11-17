@@ -82,6 +82,8 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
 
 ## 限定の試し（`[worker.trial]`）
 
+役割の割当へ接続する追加契約は[Agent比較実験](../agent-experiments.md)（実装前の地図）を読む。
+
 `dagq.toml`の`[worker.trial]`で有効にしたときだけ働く（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)、ADR-0079の決定4をamends）。
 有効にするのは人の判断。
 keyと既定値の意味は`domain::worker_model::WorkerTrial`のdoc commentが持つ。
