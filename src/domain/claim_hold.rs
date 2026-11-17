@@ -439,13 +439,13 @@ pub fn disk_hold_attention(
     let gib = |bytes: Option<f64>| bytes.map_or_else(|| "?".to_owned(), super::disk::gib);
     let disk = held.payload.get("disk").map_or_else(String::new, |disk| {
         format!(
-            " (reserve {}, new run {}, remaining of {} moving runs {}, empty INTEGRATOR slot {})",
+            " (reserve {}, new run W {}, unused reservations U {} ({} moving runs), empty INTEGRATOR slot I {})",
             gib(number(disk, "reserve")),
             gib(number(disk, "claim_expected")),
+            gib(number(disk, "claim_remaining")),
             disk.get("moving")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
-            gib(number(disk, "claim_remaining")),
             gib(number(disk, "landing_expected")),
         )
     });
@@ -1140,21 +1140,22 @@ mod tests {
         let payload = json!({
             "reason": "disk_space",
             "value": (35 * GIB) as f64,
-            "threshold": (48 * GIB) as f64,
+            "threshold": (56 * GIB) as f64,
             "supervisor": "s",
             "disk": {"reserve": 11 * GIB, "claim_expected": 12 * GIB,
                      "moving": 2, "claim_remaining": 13 * GIB,
-                     "landing_expected": 12 * GIB, "landing_waiting": false},
+                     "landing_expected": 20 * GIB, "landing_waiting": false},
         });
         let held = event(1, CLAIM_HELD, payload.clone(), "00:00");
         let at = |time: &str| timestamp_millis(&format!("2026-09-26T{time}.000Z")).unwrap();
         let told = disk_hold_attention(Some(&held), 2, at("01:30:00")).unwrap();
         assert_eq!(
             told,
-            "no new run claimed for 30 min: free 35.0 GiB below the 48.0 GiB a new run needs \
-             (reserve 11.0 GiB, new run 12.0 GiB, remaining of 2 moving runs 13.0 GiB, \
-             empty INTEGRATOR slot 12.0 GiB); ready tasks waiting: 2"
+            "no new run claimed for 30 min: free 35.0 GiB below the 56.0 GiB a new run needs \
+             (reserve 11.0 GiB, new run W 12.0 GiB, unused reservations U 13.0 GiB (2 moving runs), \
+             empty INTEGRATOR slot I 20.0 GiB); ready tasks waiting: 2"
         );
+        assert!(!told.contains("waiting landing"), "{told}");
         assert!(told.chars().count() <= 300, "{told}");
         assert_eq!(disk_hold_attention(Some(&held), 2, at("01:29:59")), None);
         assert_eq!(disk_hold_attention(Some(&held), 0, at("07:00:00")), None);
@@ -1171,7 +1172,7 @@ mod tests {
         let bare = event(4, CLAIM_HELD, bare, "00:00");
         assert_eq!(
             disk_hold_attention(Some(&bare), 1, at("02:00:00")).unwrap(),
-            "no new run claimed for 60 min: free 35.0 GiB below the 48.0 GiB a new run needs; \
+            "no new run claimed for 60 min: free 35.0 GiB below the 56.0 GiB a new run needs; \
              ready tasks waiting: 1"
         );
     }

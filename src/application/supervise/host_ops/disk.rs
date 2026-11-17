@@ -42,7 +42,7 @@ pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "With no run moving, the free disk space of the queue's directory is below the reserve, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected}, with unused reservations for each stage). No new run is claimed and no run lands below the reserve. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "With no run moving, the free disk space of the queue's directory is below the reserve, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected} ({source}), with unused reservations for each stage). No new run is claimed and no run lands below the reserve. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
 /// Activity in this pass's unfinished-run registry, independent of slots.
 /// `in_flight` counts entries whose `DiskUsage::active` is true; `landing`
@@ -755,12 +755,19 @@ pub(in crate::application::supervise) fn disk_question(
     let expected = needs
         .expected
         .map_or_else(|| "none yet".into(), |bytes| gib(bytes as f64));
+    let source = match needs.estimate {
+        crate::domain::disk::DiskEstimate::Fixed => {
+            "from the [disk] configuration values in dagq.toml"
+        }
+        crate::domain::disk::DiskEstimate::Recent => "from the sizes of the recent runs",
+    };
     let question = DISK_QUESTION
         .replace("{free}", &show(free))
         .replace("{claim}", &show(Some(needs.claim)))
         .replace("{landing}", &show(Some(needs.landing)))
         .replace("{reserve}", &show(Some(needs.reserve)))
         .replace("{expected}", &expected)
+        .replace("{source}", source)
         .replace(
             "{least}",
             &gib(crate::domain::disk::MIN_RESERVE_BYTES as f64),
@@ -1257,6 +1264,32 @@ mod tests {
         assert!(asks_for_cleanup(None, false, CLEANUP_INTERVAL));
     }
 
+    /// The method carried from the disk decision determines the source named
+    /// in the ask, including when both methods yield the same size.
+    #[test]
+    fn the_question_names_the_configured_estimation_source() {
+        use crate::domain::disk::DiskEstimate;
+        for (estimate, source, absent) in [
+            (
+                DiskEstimate::Fixed,
+                "from the [disk] configuration values in dagq.toml",
+                "from the sizes of the recent runs",
+            ),
+            (
+                DiskEstimate::Recent,
+                "from the sizes of the recent runs",
+                "from the [disk] configuration values in dagq.toml",
+            ),
+        ] {
+            let question = disk_question(Some(GIB), &DiskNeeds { estimate, ..NEEDS }, &[]);
+            assert!(
+                question.contains(&format!("expected to take, 1.0 GiB ({source})")),
+                "{question}"
+            );
+            assert!(!question.contains(absent), "{question}");
+        }
+    }
+
     #[test]
     fn the_question_shows_the_top_five_in_gib_or_no_breakdown() {
         let sizes: Vec<_> = (1..=7)
@@ -1301,7 +1334,9 @@ mod tests {
             "{question}"
         );
         assert!(
-            question.contains("what a run is expected to take, 8.0 GiB,"),
+            question.contains(
+                "what a run is expected to take, 8.0 GiB (from the sizes of the recent runs),"
+            ),
             "{question}"
         );
         assert!(
@@ -1318,6 +1353,9 @@ mod tests {
         assert!(!question.contains("Affected:"));
         let unread = disk_question(None, &DiskNeeds::default(), &[]);
         assert!(unread.contains("unknown free"), "{unread}");
-        assert!(unread.contains("expected to take, none yet,"), "{unread}");
+        assert!(
+            unread.contains("expected to take, none yet (from the sizes of the recent runs),"),
+            "{unread}"
+        );
     }
 }

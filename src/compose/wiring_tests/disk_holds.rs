@@ -333,8 +333,8 @@ fn a_standing_disk_hold_shows_in_status_and_after_30_minutes_in_the_inboxs_atten
     assert_eq!(
         items[0]["last_error"],
         "no new run claimed for 30 min: free 4.0 GiB below the 5.0 GiB a new run needs \
-         (reserve 5.0 GiB, new run 0.0 GiB, remaining of 0 moving runs 0.0 GiB, \
-         empty INTEGRATOR slot 0.0 GiB); ready tasks waiting: 1"
+         (reserve 5.0 GiB, new run W 0.0 GiB, unused reservations U 0.0 GiB (0 moving runs), \
+         empty INTEGRATOR slot I 0.0 GiB); ready tasks waiting: 1"
     );
     // Told, not asked: the only ask is the disk's own, opened by its own
     // condition (nothing moves below the reserve), not by this attention.
