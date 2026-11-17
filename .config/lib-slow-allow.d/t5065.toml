@@ -1,0 +1,14 @@
+[[test]]
+name = "compose::wiring_tests::stage_peaks::a_runs_worker_and_integrator_peaks_are_recorded_as_each_stage_ends"
+reason = "境界: loop 外の計測から段ごとのピークが実際の supervisor・queue service を通り SQLite の run_stage_peak に届くことを、WORKER の receipt と INTEGRATOR の着地の検証の終わりの両方で確かめる。1 task・1 run、1ms の待ち間隔で、worker の turn と着地の検証を保留して計測の walk を 4 回起こすため 1 秒を超える。段の終わりと測った回数の判断の case は domain::disk の unit test に分離済み。"
+task = 5065
+
+[[test]]
+name = "compose::wiring_tests::stage_peaks::the_fixed_method_records_the_stage_peaks_too"
+reason = "境界: 起動時の固定方式でも同じ配線で run_stage_peak が残ることを、実際の supervisor・queue service・SQLite の memdb で確かめる。上の test と同じ最小の 1 task・1 run・4 回の walk で、方式だけを変える。判断の case は domain::disk の unit test に分離済み。"
+task = 5065
+
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_moving_runs_measured_size_lets_the_next_claim_go_beside_it"
+reason = "境界: loop 外で量った動いている run の大きさが実際の supervisor・queue service・SQLite を通り、次の claim を並べて通すことを確かめる。3 task のうち 1 本を着地させて標本を作り、残り 2 本の claim を見るため 1 秒を超える。この task では偽の計測を worktree だけにして、最初の run が残す段ごとのピークが W の標本に入っても想定と同じになるようにした。判断の case は domain::disk の unit test に分離済み。"
+task = 5065

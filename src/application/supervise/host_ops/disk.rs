@@ -27,8 +27,8 @@ use crate::domain::{
     disk::{
         DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskDecision, DiskNeeds, DiskRelaxed, DiskRun,
         DiskStage, DiskState, DiskUsage, LandingCandidate, RELAX_KINDS, RelaxState, RunSample,
-        expected_run_estimate, gib, landing_expectation, relax_state, run_expectation,
-        size_exceeded_expected,
+        StageBudgets, StageObservation, StagePeaks, StageSamples, gib, relax_state,
+        size_exceeded_expected, stage_budgets,
     },
 };
 
@@ -75,8 +75,11 @@ pub(in crate::application::supervise) struct DiskTarget {
 /// What the supervisor knows of the disk between passes.
 #[derive(Debug, Default)]
 pub(in crate::application::supervise) struct DiskWatch {
-    /// The recent runs' samples and when they were read.
-    samples: Option<(Instant, Vec<RunSample>)>,
+    /// The recent runs' samples and stage peaks, and when they were read.
+    samples: Option<(Instant, Vec<RunSample>, StageSamples)>,
+    /// The WORKER and INTEGRATOR peaks of the registered runs in this
+    /// supervisor process, recorded `run_stage_peak` as each stage is left.
+    stage_peaks: StagePeaks<Instant>,
     /// Successfully recorded exceedances for this supervisor process.
     /// Retained across waits/resumes; restart allows one further event.
     exceeded: std::collections::HashSet<RunId>,
@@ -197,7 +200,11 @@ impl HostOpsState {
             .filter(is_disk_ask)
             .collect();
         self.apply_disk_answers(env, &unclosed)?;
-        let (expected, sample_count) = self.expected_run_size(env)?;
+        let StageBudgets {
+            worker: expected,
+            integrator: integrator_expected,
+            sample_count,
+        } = self.expected_run_size(env)?;
         let relaxed = self.relaxation(env)?;
         let free = self.free_bytes(env);
         // Stage reservations and exceedances share trusted sizes measured
@@ -213,12 +220,14 @@ impl HostOpsState {
             .zip(&sizes)
             .map(|(r, (_, current))| DiskRun {
                 stage: r.usage.stage,
-                current: *current,
+                current: current.map(|(bytes, _)| bytes),
             })
             .collect();
+        self.record_stage_peaks(env, moving, &sizes)?;
         for (r, (run_id, size)) in moving.iter().zip(&sizes).filter(|(r, _)| r.usage.active) {
+            let size = size.map(|(bytes, _)| bytes);
             if let Some((bytes, expected)) =
-                size_exceeded_expected(*size, expected, self.disk.exceeded.contains(run_id))
+                size_exceeded_expected(size, expected, self.disk.exceeded.contains(run_id))
             {
                 let task_id = env.queue.run(run_id)?.task_id();
                 env.queue.record_runtime_event(run_id, EventKind::RunSizeExceededExpected,
@@ -232,7 +241,7 @@ impl HostOpsState {
             .filter(|(r, _)| r.candidate)
             .map(|(r, (_, current))| LandingCandidate {
                 run: r.target.run.clone(),
-                current: *current,
+                current: current.map(|(bytes, _)| bytes),
                 integrating: r.usage.stage == DiskStage::Integrator,
                 waiting: r.waiting,
             })
@@ -241,7 +250,7 @@ impl HostOpsState {
             free,
             total: self.total_bytes(env).unwrap_or(0),
             expected,
-            integrator_expected: landing_expectation(&self.disk_config, expected),
+            integrator_expected,
             runs,
             moving: in_flight,
             landing_current: None,
@@ -362,30 +371,72 @@ impl HostOpsState {
         (self.total_space)(&env.layout.runs_dir)
             .or_else(|| env.layout.db.parent().and_then(self.total_space))
     }
-    /// What a new run is expected to take under the configured method;
-    /// recent samples are read again every [`SAMPLES_INTERVAL`]
-    /// ([`crate::application::recent_run_samples`]).
-    fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<(Option<u64>, usize)> {
+    /// W and I under the configured method ([`stage_budgets`]); the recent
+    /// samples and stage peaks are read again every [`SAMPLES_INTERVAL`]
+    /// ([`crate::application::recent_run_samples`],
+    /// [`crate::application::recent_stage_samples`]).
+    fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<StageBudgets> {
         let fresh = self
             .disk
             .samples
             .as_ref()
-            .is_some_and(|(at, _)| samples_fresh(env.generators.clock.since(*at)));
+            .is_some_and(|(at, _, _)| samples_fresh(env.generators.clock.since(*at)));
         if !fresh {
             let samples = crate::application::recent_run_samples(&*env.queue)?;
-            self.disk.samples = Some((env.generators.clock.monotonic(), samples));
+            let stages = match self.disk_config.estimate {
+                crate::domain::disk::DiskEstimate::Recent => {
+                    crate::application::recent_stage_samples(&*env.queue)?
+                }
+                crate::domain::disk::DiskEstimate::Fixed => StageSamples::default(),
+            };
+            self.disk.samples = Some((env.generators.clock.monotonic(), samples, stages));
         }
         let now = crate::application::unix_millis(env.generators.clock.system_time());
         Ok(self
             .disk
             .samples
             .as_ref()
-            .map_or((None, 0), |(_, samples)| {
-                (
-                    run_expectation(&self.disk_config, samples, now),
-                    expected_run_estimate(samples, now).1,
-                )
+            .map_or_else(StageBudgets::default, |(_, samples, stages)| {
+                stage_budgets(&self.disk_config, samples, stages, now)
             }))
+    }
+
+    /// Record `run_stage_peak` for each WORKER or INTEGRATOR stage a
+    /// registered run left since the last pass ([`StagePeaks`]), from this
+    /// pass's trusted `sizes` of `moving`, whatever the method. A record
+    /// that fails ends the pass with its error before the disk decision;
+    /// that peak and the others left this pass are not tried again.
+    fn record_stage_peaks(
+        &mut self,
+        env: &mut HostEnv<'_>,
+        moving: &[DiskTarget],
+        sizes: &[(RunId, Option<(u64, Instant)>)],
+    ) -> Result<()> {
+        let registry: Vec<_> = moving
+            .iter()
+            .zip(sizes)
+            .map(|(r, (run, measure))| StageObservation {
+                run: run.clone(),
+                stage: r.usage.stage,
+                measure: *measure,
+            })
+            .collect();
+        for left in self.disk.stage_peaks.pass(&registry) {
+            let task_id = env.queue.run(&left.run)?.task_id();
+            env.queue.record_runtime_event(
+                &left.run,
+                EventKind::RunStagePeak,
+                serde_json::json!({
+                    "run_id": left.run,
+                    "task_id": task_id,
+                    "phase": left.stage,
+                    "peak_bytes": left.peak_bytes,
+                    "measures": left.measures,
+                    "estimate": self.disk_config.estimate,
+                }),
+            )?;
+        }
+        Ok(())
     }
     /// The relaxation of the needs in effect this pass (ADR-t4727-1), from
     /// the newest of its records alone ([`crate::domain::disk::relax_state`]):

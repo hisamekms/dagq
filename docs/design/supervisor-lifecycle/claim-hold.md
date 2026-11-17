@@ -103,7 +103,9 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 - phaseの性質・候補ごとの必要量と可否を一度決め、開始・控え・askが同じ結果を読む入口は`domain::disk::DiskState::decide`。
 - 方式の違いはWとIの出どころだけで、係数を掛けない。
-  方式の入口は`domain::disk::run_expectation`。
+  方式の入口は`domain::disk::stage_budgets`。
+- 予測方式のWとIは、段ごと（WORKER・INTEGRATOR）のピークの直近の標本から別々に求め、段の標本が無い間は1つの見込みに戻る。
+  段ごとのピークは方式によらず記録する（`domain::disk::StagePeaks`）。
 - 動くrunが0本なら最低ラインだけで進め、着地待ちがあればclaimより着地が先に進む。
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
 - 予約はbuildするか・着地のレーンにいるかで付け替え、残りは予約量から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いて数える。

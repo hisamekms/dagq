@@ -118,6 +118,7 @@ claimと着地の空き容量の判断が、段階ごとの未使用の予約（
 - **数え方**: 何を足して量るかと量れないときの扱いは`moving_sizes`のmoduleと`MovingTarget::measure`のdoc commentが持つ。
 - **取り方**: loopは量らず、loopの外のthreadが置いた値を読むだけで、その値は古いことがある（古い値の扱いは[空き容量の閾値](claim-hold.md#閾値)）。
   仕組みは`moving_sizes`のmoduleのdoc commentが持つ。
+- **段ごとのピーク**: 同じ値から段ごとのピークを記録し、入口は`domain::disk::StagePeaks`のdoc commentが持つ。
 - **限界**: APFSのクローンなど共有のextentを作る道具では、独占する量より大きく出うる。
   Linuxと他のファイルシステムでは調べていない（[Spike](../../plans/disk-run-size-measure-spike.md)）。
 

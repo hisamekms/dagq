@@ -3,7 +3,7 @@
 //! verification, while the free space of the queue's directory (where the
 //! run worktrees are) is short of what one needs. What one needs follows
 //! from a reserve of the volume ([`reserve_bytes`]) and the size a new run
-//! is expected to take from the configured method ([`run_expectation`]),
+//! is expected to take from the configured method ([`stage_budgets`]),
 //! with no factor; [`DiskState::decide`] freezes them for every pass
 //! consumer, and the queue always moves
 //! on above the reserve with no run moving. The `[disk]` table of
@@ -30,7 +30,8 @@ pub const DISK_CLOSE_MARGIN: f64 = 0.05;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiskEstimate {
-    /// The recent samples' maximum or p90 ([`expected_run_estimate`]).
+    /// The recent stage peaks' or run samples' maximum or p90
+    /// ([`stage_budgets`]).
     #[default]
     Recent,
     /// The project's configured `run_size`, independent of samples.
@@ -44,7 +45,8 @@ pub enum DiskEstimate {
 /// with no runtime default. Missing, unreadable or zero sizes are read errors
 /// with a line number, like invalid `reserve`. In recent mode a supplied
 /// `run_size` and `landing_size` are warned of and ignored, even if unreadable.
-/// W and I default to the same recent estimate. Fixed mode takes W from
+/// Recent mode takes W and I from the stage peaks ([`stage_budgets`]).
+/// Fixed mode takes W from
 /// `run_size` and I from `landing_size`, falling back to W when omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DiskConfig {
@@ -503,12 +505,281 @@ pub struct DiskRun {
     pub current: Option<u64>,
 }
 
-/// Fixed uses `landing_size` or W; recent temporarily shares W's estimate
-/// until separate stage samples exist. Both methods use the same formulas.
+/// I when no stage-specific source gives one: fixed uses `landing_size` or
+/// W; recent uses W, which [`stage_budgets`] takes when neither the
+/// INTEGRATOR peaks nor the run samples give I, so W and I are known or
+/// unknown together and an empty INTEGRATOR slot is always reserved once W
+/// is. Both methods use the same formulas.
 pub fn landing_expectation(config: &DiskConfig, worker: Option<u64>) -> Option<u64> {
     match config.estimate {
         DiskEstimate::Fixed => config.landing_size.or(worker),
         DiskEstimate::Recent => worker,
+    }
+}
+
+/// The kind of the record of a stage's peak ([`StagePeaks`]), the one
+/// [`stage_samples`] reads.
+pub const STAGE_PEAK_KIND: EventKind = EventKind::RunStagePeak;
+
+/// One stage of a run left, as [`StagePeaks::pass`] gives it: the largest
+/// trusted size read while the run was in `stage` (WORKER or INTEGRATOR;
+/// the measure held as the stage began counts for it) and how many
+/// distinct measures it read there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagePeak {
+    pub run: super::RunId,
+    pub stage: DiskStage,
+    pub peak_bytes: u64,
+    pub measures: u32,
+}
+
+/// What one pass read of one registered run: its stage now and its trusted
+/// size with the stamp of the measure it comes from (`S`, the walk's start
+/// time for the supervisor), `None` when no size is trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageObservation<S> {
+    pub run: super::RunId,
+    pub stage: DiskStage,
+    pub measure: Option<(u64, S)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Peak<S> {
+    bytes: u64,
+    measures: u32,
+    /// The stamp of the measure last counted in this stage.
+    last: S,
+}
+
+#[derive(Debug, Clone)]
+struct RunPeaks<S> {
+    stage: DiskStage,
+    worker: Option<Peak<S>>,
+    integrator: Option<Peak<S>>,
+}
+
+impl<S: Copy> RunPeaks<S> {
+    fn peak(&mut self, stage: DiskStage) -> Option<&mut Option<Peak<S>>> {
+        match stage {
+            DiskStage::Worker => Some(&mut self.worker),
+            DiskStage::Integrator => Some(&mut self.integrator),
+            DiskStage::Waiting => None,
+        }
+    }
+
+    fn left(&mut self, run: &super::RunId) -> Option<StagePeak> {
+        let stage = self.stage;
+        let peak = (*self.peak(stage)?)?;
+        Some(StagePeak {
+            run: run.clone(),
+            stage,
+            peak_bytes: peak.bytes,
+            measures: peak.measures,
+        })
+    }
+}
+
+/// The peaks of the WORKER and INTEGRATOR stages of the unfinished runs,
+/// read on every pass from the same trusted sizes as the reservations,
+/// whatever the `[disk] estimate` method (the fixed method records them
+/// too: they are the material to review its size and the recent method's
+/// samples).
+///
+/// - A measure counts once per stage: a pass that reads the same measure
+///   again (the walk is slower than the loop, or the run came back from a
+///   wait before the next walk) adds nothing; the measure held as a stage
+///   begins counts for that stage too, so a stage shorter than a walk
+///   interval gives the size it began with.
+/// - A stage is left when the run's stage changes (WORKER at its receipt,
+///   or any wait; INTEGRATOR at the end of the landing's verification) or
+///   when the run leaves the registry (it ended). Each leaving gives one
+///   [`StagePeak`] when the stage saw a measure.
+/// - A run that goes back to WORKER (revise, resume, a rebuild after a
+///   send back) or INTEGRATOR (a retry) keeps that stage's peak and count:
+///   the next leaving gives the peak of all its stints so far, and the
+///   samples take the largest per run and stage ([`stage_samples`]), so a
+///   run is one sample per stage.
+/// - The peaks live in the supervisor process alone: after a restart a
+///   stage under way gives what was measured since; a stage left before
+///   was recorded then. A stopping supervisor records no stage under way.
+#[derive(Debug, Clone)]
+pub struct StagePeaks<S> {
+    runs: std::collections::HashMap<super::RunId, RunPeaks<S>>,
+}
+
+impl<S> Default for StagePeaks<S> {
+    fn default() -> Self {
+        Self {
+            runs: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl<S: Copy + PartialEq> StagePeaks<S> {
+    /// Read `registry`, this pass's observations of every registered run,
+    /// and give the stages left since the last pass; runs no longer
+    /// registered are forgotten.
+    pub fn pass(&mut self, registry: &[StageObservation<S>]) -> Vec<StagePeak> {
+        let mut left = Vec::new();
+        let mut gone: Vec<super::RunId> = self
+            .runs
+            .keys()
+            .filter(|run| !registry.iter().any(|seen| seen.run == **run))
+            .cloned()
+            .collect();
+        gone.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        for run in gone {
+            if let Some(mut peaks) = self.runs.remove(&run) {
+                left.extend(peaks.left(&run));
+            }
+        }
+        for seen in registry {
+            let peaks = self.runs.entry(seen.run.clone()).or_insert(RunPeaks {
+                stage: seen.stage,
+                worker: None,
+                integrator: None,
+            });
+            if peaks.stage != seen.stage {
+                left.extend(peaks.left(&seen.run));
+                peaks.stage = seen.stage;
+            }
+            let Some((bytes, stamp)) = seen.measure else {
+                continue;
+            };
+            let Some(peak) = peaks.peak(seen.stage) else {
+                continue;
+            };
+            match peak {
+                Some(peak) if peak.last == stamp => {}
+                Some(peak) => {
+                    peak.bytes = peak.bytes.max(bytes);
+                    peak.measures = peak.measures.saturating_add(1);
+                    peak.last = stamp;
+                }
+                None => {
+                    *peak = Some(Peak {
+                        bytes,
+                        measures: 1,
+                        last: stamp,
+                    });
+                }
+            }
+        }
+        left
+    }
+}
+
+/// The peak samples of the WORKER and INTEGRATOR stages, one per run and
+/// stage, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StageSamples {
+    pub worker: Vec<RunSample>,
+    pub integrator: Vec<RunSample>,
+}
+
+/// The stage samples of `events`: of the [`STAGE_PEAK_KIND`] records (other
+/// kinds, those without a run, a `peak_bytes`, a known `phase` or a time
+/// that parses are not read), the largest `peak_bytes` per run and
+/// `phase`, at the time of its last record.
+pub fn stage_samples(events: &[RunEvent]) -> StageSamples {
+    let mut runs: std::collections::BTreeMap<(&super::RunId, bool), RunSample> = Default::default();
+    for event in events {
+        if event.kind != STAGE_PEAK_KIND {
+            continue;
+        }
+        let Some(run) = event.run_id.as_ref() else {
+            continue;
+        };
+        let worker = match event
+            .payload
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("worker") => true,
+            Some("integrator") => false,
+            _ => continue,
+        };
+        let (Some(bytes), Some(at)) = (
+            event
+                .payload
+                .get("peak_bytes")
+                .and_then(serde_json::Value::as_u64),
+            super::stats::timestamp_millis(&event.created_at),
+        ) else {
+            continue;
+        };
+        let sample = runs.entry((run, worker)).or_insert(RunSample {
+            bytes,
+            at_millis: at,
+        });
+        sample.bytes = sample.bytes.max(bytes);
+        sample.at_millis = sample.at_millis.max(at);
+    }
+    let mut samples = StageSamples::default();
+    for ((_, worker), sample) in runs {
+        if worker {
+            samples.worker.push(sample);
+        } else {
+            samples.integrator.push(sample);
+        }
+    }
+    samples.worker.sort_by_key(|sample| sample.at_millis);
+    samples.integrator.sort_by_key(|sample| sample.at_millis);
+    samples
+}
+
+/// W and I, and how many samples W was read from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StageBudgets {
+    pub worker: Option<u64>,
+    pub integrator: Option<u64>,
+    pub sample_count: usize,
+}
+
+/// W and I under the configured method, from the ended runs' size samples
+/// (`runs`, [`run_samples`]) and the stage peaks (`stages`,
+/// [`stage_samples`]) at `now_millis`. Fixed: `run_size` and
+/// `landing_size` (or `run_size`), whatever the samples. Recent: W from the
+/// WORKER peaks and I from the INTEGRATOR peaks, each by the rule of
+/// [`expected_run_estimate`] (the newest [`SAMPLE_COUNT`] within
+/// [`SAMPLE_WINDOW_MILLIS`], their largest below [`QUANTILE_SAMPLES`],
+/// their p90 from it). A stage with no peak sample in that window falls back
+/// to the one expectation of `runs` by the same rule, so a queue with no
+/// stage peak yet does not claim one run at a time for want of samples.
+/// An I that neither gives falls back to W ([`landing_expectation`]): a
+/// queue with WORKER peaks but no INTEGRATOR peak nor run sample (before
+/// its first landing, or after an idle window) still reserves the empty
+/// INTEGRATOR slot. `sample_count` is the samples W was read from.
+pub fn stage_budgets(
+    config: &DiskConfig,
+    runs: &[RunSample],
+    stages: &StageSamples,
+    now_millis: i64,
+) -> StageBudgets {
+    match config.estimate {
+        DiskEstimate::Fixed => {
+            let worker = run_expectation(config, runs, now_millis);
+            StageBudgets {
+                worker,
+                integrator: landing_expectation(config, worker),
+                sample_count: expected_run_estimate(runs, now_millis).1,
+            }
+        }
+        DiskEstimate::Recent => {
+            let fallback = || expected_run_estimate(runs, now_millis);
+            let of = |stage: &[RunSample]| match expected_run_estimate(stage, now_millis) {
+                (_, 0) => fallback(),
+                read => read,
+            };
+            let (worker, sample_count) = of(&stages.worker);
+            StageBudgets {
+                worker,
+                integrator: of(&stages.integrator)
+                    .0
+                    .or_else(|| landing_expectation(config, worker)),
+                sample_count,
+            }
+        }
     }
 }
 
@@ -577,7 +848,7 @@ pub struct DiskNeeds {
     pub claims_wait_reason: Option<ClaimsWaitReason>,
     /// The reserve ([`reserve_bytes`]).
     pub reserve: u64,
-    /// What a new run is expected to take ([`run_expectation`]).
+    /// What a new run is expected to take, W ([`stage_budgets`]).
     pub expected: Option<u64>,
     /// Claim threshold: reserve + W + U + empty-slot I; reserve alone
     /// for idle progress, or without samples (NoSamples prevents claims).
@@ -2291,5 +2562,236 @@ mod tests {
                 None
             );
         }
+    }
+
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    /// Stage samples of `gibs`, the newest at [`NOW`], one hour apart.
+    fn stage(gibs: &[u64]) -> Vec<RunSample> {
+        gibs.iter()
+            .enumerate()
+            .map(|(i, gib)| sample(gib * GIB, NOW - i as i64 * HOUR))
+            .collect()
+    }
+
+    /// Acceptance 1 of task 5065: in recent mode W is the p90 of the WORKER
+    /// peaks and I that of the INTEGRATOR peaks, apart; a stage of 4
+    /// samples gives their largest, one of none (or only outside the
+    /// window of 20 samples and 14 days) the one expectation of the run
+    /// samples; fixed gives the configured sizes whatever the samples.
+    #[test]
+    fn stage_budgets_read_each_stages_peaks_and_fall_back_to_the_run_samples() {
+        let recent = DiskConfig::default();
+        let runs = stage(&[11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+        let ten = StageSamples {
+            worker: stage(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            integrator: stage(&[2, 4, 6, 8, 10, 12, 14, 16, 18, 20]),
+        };
+        assert_eq!(
+            stage_budgets(&recent, &runs, &ten, NOW),
+            StageBudgets {
+                worker: Some(9 * GIB),
+                integrator: Some(18 * GIB),
+                sample_count: 10,
+            }
+        );
+        // 4 samples: their largest, not a quantile.
+        let four = StageSamples {
+            integrator: stage(&[3, 7, 5, 2]),
+            ..ten.clone()
+        };
+        assert_eq!(
+            stage_budgets(&recent, &runs, &four, NOW).integrator,
+            Some(7 * GIB)
+        );
+        // None: the run samples' p90, for either stage.
+        let none = StageSamples::default();
+        assert_eq!(
+            stage_budgets(&recent, &runs, &none, NOW),
+            StageBudgets {
+                worker: Some(19 * GIB),
+                integrator: Some(19 * GIB),
+                sample_count: 10,
+            }
+        );
+        assert_eq!(
+            stage_budgets(&recent, &[], &none, NOW),
+            StageBudgets::default()
+        );
+        // WORKER peaks, no INTEGRATOR peak and no run sample: I is W, so the
+        // empty INTEGRATOR slot is still reserved.
+        let worker_only = StageSamples {
+            worker: ten.worker.clone(),
+            integrator: Vec::new(),
+        };
+        assert_eq!(
+            stage_budgets(&recent, &[], &worker_only, NOW),
+            StageBudgets {
+                worker: Some(9 * GIB),
+                integrator: Some(9 * GIB),
+                sample_count: 10,
+            }
+        );
+        // INTEGRATOR peaks alone give I, while W is unknown (NoSamples).
+        let integrator_only = StageSamples {
+            worker: Vec::new(),
+            integrator: ten.integrator.clone(),
+        };
+        assert_eq!(
+            stage_budgets(&recent, &[], &integrator_only, NOW),
+            StageBudgets {
+                worker: None,
+                integrator: Some(18 * GIB),
+                sample_count: 0,
+            }
+        );
+        // Older than 14 days: not read, so the run samples again.
+        let old = StageSamples {
+            worker: vec![sample(100 * GIB, NOW - 14 * DAY - 1)],
+            integrator: stage(&[3, 7, 5, 2]),
+        };
+        assert_eq!(
+            stage_budgets(&recent, &runs, &old, NOW),
+            StageBudgets {
+                worker: Some(19 * GIB),
+                integrator: Some(7 * GIB),
+                sample_count: 10,
+            }
+        );
+        // Beyond the newest 20, and older than 14 days, not read.
+        let mut worker = stage(&[1; 20]);
+        worker.push(sample(50 * GIB, NOW - 21 * HOUR));
+        worker.push(sample(60 * GIB, NOW - 15 * DAY));
+        let window = StageSamples {
+            worker,
+            ..ten.clone()
+        };
+        assert_eq!(
+            stage_budgets(&recent, &runs, &window, NOW).worker,
+            Some(GIB)
+        );
+        // Fixed: the configured sizes, landing_size falling back to run_size.
+        let fixed = DiskConfig {
+            estimate: DiskEstimate::Fixed,
+            run_size: Some(20 * GIB),
+            landing_size: Some(30 * GIB),
+            ..DiskConfig::default()
+        };
+        for stages in [&ten, &none] {
+            let budgets = stage_budgets(&fixed, &runs, stages, NOW);
+            assert_eq!(
+                (budgets.worker, budgets.integrator),
+                (Some(20 * GIB), Some(30 * GIB))
+            );
+        }
+        let fixed = DiskConfig {
+            landing_size: None,
+            ..fixed
+        };
+        let budgets = stage_budgets(&fixed, &[], &ten, NOW);
+        assert_eq!(
+            (budgets.worker, budgets.integrator),
+            (Some(20 * GIB), Some(20 * GIB))
+        );
+    }
+
+    /// The largest `peak_bytes` per run and phase, at its last record;
+    /// other kinds, unknown phases and records without bytes, run or time
+    /// are not read.
+    #[test]
+    fn stage_samples_are_one_per_run_and_phase() {
+        let kind = EventKind::RunStagePeak.as_str();
+        let peak =
+            |phase: &str, bytes: u64| serde_json::json!({"phase": phase, "peak_bytes": bytes});
+        let events = [
+            record(kind, 1, peak("worker", 5), "2026-11-01T00:00:00Z"),
+            record(kind, 1, peak("worker", 9), "2026-11-01T01:00:00Z"),
+            record(kind, 1, peak("worker", 7), "2026-11-01T02:00:00Z"),
+            record(kind, 1, peak("integrator", 4), "2026-11-01T03:00:00Z"),
+            record(kind, 2, peak("worker", 3), "2026-11-02T00:00:00Z"),
+            record(kind, 3, peak("waiting", 30), "2026-11-02T00:00:00Z"),
+            record(
+                kind,
+                3,
+                serde_json::json!({"phase": "worker"}),
+                "2026-11-02T00:00:00Z",
+            ),
+            record(kind, 3, peak("worker", 30), "not a time"),
+            record(
+                BUILD_OUTPUTS_REMOVED,
+                3,
+                peak("worker", 30),
+                "2026-11-02T00:00:00Z",
+            ),
+            RunEvent {
+                payload: peak("worker", 30),
+                created_at: "2026-11-02T00:00:00Z".into(),
+                ..event(kind, None, None)
+            },
+        ];
+        let at = |text: &str| super::super::stats::timestamp_millis(text).unwrap();
+        assert_eq!(
+            stage_samples(&events),
+            StageSamples {
+                worker: vec![
+                    sample(9, at("2026-11-01T02:00:00Z")),
+                    sample(3, at("2026-11-02T00:00:00Z")),
+                ],
+                integrator: vec![sample(4, at("2026-11-01T03:00:00Z"))],
+            }
+        );
+    }
+
+    /// A stage counts each measure once and gives its peak as it is left;
+    /// a run back in WORKER keeps that stage's peak, a measure first read
+    /// in a new stage counts for it, one read again after a wait does not
+    /// count again, waiting is never a peak, a stage that
+    /// saw no measure gives none, and a run leaving the registry gives its
+    /// stage under way.
+    #[test]
+    fn stage_peaks_are_given_as_each_stage_is_left() {
+        let run = |n: usize| crate::domain::RunId::new(run_id(n)).unwrap();
+        let seen = |n: usize, stage: DiskStage, measure: Option<(u64, u32)>| StageObservation {
+            run: run(n),
+            stage,
+            measure,
+        };
+        let left = |n: usize, stage: DiskStage, peak_bytes: u64, measures: u32| StagePeak {
+            run: run(n),
+            stage,
+            peak_bytes,
+            measures,
+        };
+        use DiskStage::{Integrator, Waiting, Worker};
+        let mut peaks = StagePeaks::default();
+        for measure in [
+            None,
+            Some((8, 1)),
+            Some((8, 1)),
+            Some((12, 2)),
+            Some((11, 3)),
+        ] {
+            assert_eq!(
+                peaks.pass(&[seen(1, Worker, measure), seen(2, Worker, None)]),
+                []
+            );
+        }
+        assert_eq!(
+            peaks.pass(&[seen(1, Waiting, Some((11, 3))), seen(2, Waiting, None)]),
+            [left(1, Worker, 12, 3)]
+        );
+        // Back from the wait before a new walk: the same measure, not again.
+        assert_eq!(peaks.pass(&[seen(1, Worker, Some((11, 3)))]), []);
+        assert_eq!(peaks.pass(&[seen(1, Worker, Some((10, 4)))]), []);
+        assert_eq!(
+            peaks.pass(&[seen(1, Integrator, Some((10, 4)))]),
+            [left(1, Worker, 12, 4)]
+        );
+        assert_eq!(peaks.pass(&[seen(1, Integrator, Some((14, 5)))]), []);
+        assert_eq!(peaks.pass(&[]), [left(1, Integrator, 14, 2)]);
+        assert_eq!(peaks.pass(&[]), []);
+        // Measured only while waiting: no peak.
+        assert_eq!(peaks.pass(&[seen(3, Waiting, Some((9, 1)))]), []);
+        assert_eq!(peaks.pass(&[]), []);
     }
 }

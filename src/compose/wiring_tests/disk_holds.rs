@@ -572,7 +572,14 @@ fn a_moving_runs_measured_size_lets_the_next_claim_go_beside_it() {
             ],
         },
     );
-    wiring.moving_sizes = std::sync::Arc::new(|_: &std::path::Path| Ok(Some(EXPECTED)));
+    // The worktree alone is the expectation (no TMPDIR there): the run
+    // stage peaks the first run leaves are W's samples too.
+    wiring.moving_sizes = std::sync::Arc::new(|path: &std::path::Path| {
+        Ok(path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("worktree"))
+            .then_some(EXPECTED))
+    });
     let (release, released) = std::sync::mpsc::channel();
     let (second, third) = one_sample_and_two_ready(&wiring, released);
     let mut beside = false;

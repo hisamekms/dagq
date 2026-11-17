@@ -1379,6 +1379,17 @@ fn disk_short<L: super::RunLog + ?Sized>(
     }
     let (candidate_id, current) = candidate;
     let samples = crate::application::recent_run_samples(queue)?;
+    let budgets = crate::domain::disk::stage_budgets(
+        config,
+        &samples,
+        &match config.estimate {
+            crate::domain::disk::DiskEstimate::Recent => {
+                crate::application::recent_stage_samples(queue)?
+            }
+            crate::domain::disk::DiskEstimate::Fixed => Default::default(),
+        },
+        now_millis,
+    );
     let kinds = crate::domain::disk::RELAX_KINDS.map(EventKind::as_str);
     let relaxed =
         crate::domain::disk::relax_state(queue.latest_queue_event(&kinds)?.as_ref(), now_millis)
@@ -1416,11 +1427,8 @@ fn disk_short<L: super::RunLog + ?Sized>(
         &DiskState {
             free,
             total: total.unwrap_or(0),
-            expected: crate::domain::disk::run_expectation(config, &samples, now_millis),
-            integrator_expected: crate::domain::disk::landing_expectation(
-                config,
-                crate::domain::disk::run_expectation(config, &samples, now_millis),
-            ),
+            expected: budgets.worker,
+            integrator_expected: budgets.integrator,
             moving: activity,
             runs,
             landing_current: current,
@@ -1431,8 +1439,7 @@ fn disk_short<L: super::RunLog + ?Sized>(
     );
     if let Some(short) = short.as_mut() {
         short.needs.estimate = config.estimate;
-        short.needs.sample_count =
-            crate::domain::disk::expected_run_estimate(&samples, now_millis).1;
+        short.needs.sample_count = budgets.sample_count;
     }
     Ok(short)
 }

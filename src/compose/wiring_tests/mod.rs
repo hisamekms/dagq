@@ -39,6 +39,7 @@ mod review_launch;
 mod review_revise_limit;
 mod review_subagents;
 mod ruleset_gate;
+mod stage_peaks;
 mod task_release;
 mod triage;
 mod unapplied_decisions;

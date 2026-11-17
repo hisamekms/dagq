@@ -301,6 +301,14 @@ impl Wiring {
         }
     }
 
+    /// This wiring's supervisor and queues read `clock` (a test that moves
+    /// the monotonic clock to start the walks of the moving runs); the
+    /// sessions keep the stopped clock they were made with.
+    pub(super) fn with_clock(mut self, clock: Arc<dyn crate::application::Clock>) -> Self {
+        self.generators.clock = clock;
+        self
+    }
+
     /// Polling interval of this wiring's supervisor; its overall deadline
     /// is unchanged. Other tests retain their defaults.
     pub(super) fn with_tick(mut self, tick: Duration) -> Self {

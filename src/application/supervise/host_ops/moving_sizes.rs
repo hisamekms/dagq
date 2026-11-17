@@ -172,32 +172,38 @@ impl MovingSizes {
     }
 
     /// Trusted current size for this exact run and target, without walking.
-    pub(in crate::application::supervise) fn current(
-        &self,
-        target: &MovingTarget,
-        now: Instant,
-    ) -> Option<u64> {
+    #[cfg(test)]
+    fn current(&self, target: &MovingTarget, now: Instant) -> Option<u64> {
+        self.current_measure(target, now).map(|(bytes, _)| bytes)
+    }
+
+    /// [`Self::current`] with when the walk of its measure started, which
+    /// tells one measure from the next ([`crate::domain::disk::StagePeaks`]).
+    fn current_measure(&self, target: &MovingTarget, now: Instant) -> Option<(u64, Instant)> {
         let measured = lock(&self.measured);
-        let measure = measured.get(&target.run).map(|m| SizeMeasure {
+        let m = measured.get(&target.run)?;
+        let measure = SizeMeasure {
             bytes: m.bytes,
             age: now.saturating_duration_since(m.at),
             same_target: m.target == *target,
-        });
+        };
         trusted_size(
-            measure.as_ref(),
+            Some(&measure),
             Duration::from_secs(MOVING_SIZE_INTERVAL_SECS),
         )
+        .map(|bytes| (bytes, m.at))
     }
 
-    /// Trusted sizes shared by reservation and exceedance observations.
+    /// Trusted sizes shared by reservation, exceedance and stage peak
+    /// observations, each with its measure's start.
     pub(in crate::application::supervise) fn trusted_sizes(
         &self,
         moving: &[MovingTarget],
         now: Instant,
-    ) -> Vec<(RunId, Option<u64>)> {
+    ) -> Vec<(RunId, Option<(u64, Instant)>)> {
         moving
             .iter()
-            .map(|target| (target.run.clone(), self.current(target, now)))
+            .map(|target| (target.run.clone(), self.current_measure(target, now)))
             .collect()
     }
 

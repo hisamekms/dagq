@@ -1220,6 +1220,20 @@ pub fn recent_run_samples<L: RunLog + ?Sized>(
     Ok(crate::domain::disk::run_samples(&events))
 }
 
+/// The stage peak samples W and I follow in recent mode
+/// ([`crate::domain::disk::stage_samples`]): read from the latest
+/// [`crate::domain::disk::SAMPLE_EVENT_LIMIT`] of
+/// [`crate::domain::disk::STAGE_PEAK_KIND`].
+pub fn recent_stage_samples<L: RunLog + ?Sized>(
+    log: &L,
+) -> anyhow::Result<crate::domain::disk::StageSamples> {
+    let events = log.latest_events_of(
+        crate::domain::disk::STAGE_PEAK_KIND.as_str(),
+        crate::domain::disk::SAMPLE_EVENT_LIMIT,
+    )?;
+    Ok(crate::domain::disk::stage_samples(&events))
+}
+
 /// `path` as text; the runtime keeps every path it records as UTF-8.
 pub fn path_text(path: &std::path::Path) -> anyhow::Result<String> {
     use anyhow::Context;

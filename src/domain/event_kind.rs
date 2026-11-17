@@ -21,8 +21,8 @@
 //! - planning: `task_*`, `dependency_*`, `goal_*`, `proposal_*`, `plan_*`,
 //!   `planner_*`, `draft_*`, `follow_up_*`, `request_*`, `replan_*` and
 //!   `finding_planner_*`.
-//! - execution and landing: `run_*` (but `run_tmp_removed` and
-//!   `run_size_exceeded_expected`), `lease_*`,
+//! - execution and landing: `run_*` (but `run_tmp_removed`,
+//!   `run_size_exceeded_expected` and `run_stage_peak`), `lease_*`,
 //!   `claim_*`, `worktree_*`, `workspace_*`, `wrapper_*`, `session_*`,
 //!   `turn_*`, `review_*`, `revise_*`, `resume_*`, `triage_*`,
 //!   `recovery_*`, `integration_*`, `landing_*`, `conflict_*`,
@@ -60,7 +60,8 @@
 //!   full), `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `incremental_sessions_removed`,
 //!   `build_cache_removed`, `scratchpad_removed` and `run_tmp_removed`,
-//!   the disk observation `run_size_exceeded_expected`,
+//!   the disk observations `run_size_exceeded_expected` and
+//!   `run_stage_peak`,
 //!   `backend_call_failed`, `disk_relax*` (the relaxation of the disk's
 //!   needs, ADR-t4727-1), `headless_job_stopped` and
 //!   `provider_executable_relocated` (named in full: the start of an AI
@@ -457,6 +458,21 @@ event_kinds! {
     /// further record for that run is allowed; history is not queried.
     RunSizeExceededExpected => "run_size_exceeded_expected",
     RunSlotRegained => "run_slot_regained",
+    /// `run_stage_peak`: an unfinished run left its WORKER or INTEGRATOR
+    /// disk stage, whatever the `[disk] estimate` method
+    /// ([`crate::domain::disk::StagePeaks`] says when and how revise,
+    /// resume and a restart count). Payload: `run_id`, the run; `task_id`,
+    /// its task; `phase`, `worker` or `integrator`, the stage left;
+    /// `peak_bytes`, the largest trusted worktree and TMPDIR bytes read in
+    /// that stage, the measure held as it began included (of all its
+    /// stints in this supervisor process);
+    /// `measures`, how many distinct measures that peak was read from;
+    /// `estimate`, `recent` or `fixed`, the configured method then. The
+    /// recent method reads the largest per run and `phase` as W's and I's
+    /// samples ([`crate::domain::disk::stage_budgets`]). Apart from
+    /// `run_size_exceeded_expected`, which is the crossing of the
+    /// expectation, not the end of a stage.
+    RunStagePeak => "run_stage_peak",
     RunTmpRemoved => "run_tmp_removed",
     RunUnfinishedChanged => "run_unfinished_changed",
     RunWaitingAskAdded => "run_waiting_ask_added",
@@ -2125,6 +2141,7 @@ mod tests {
                 "run_size_exceeded_expected",
             ),
             (EventKind::RunSlotRegained, "run_slot_regained"),
+            (EventKind::RunStagePeak, "run_stage_peak"),
             (EventKind::RunTmpRemoved, "run_tmp_removed"),
             (EventKind::RunUnfinishedChanged, "run_unfinished_changed"),
             (EventKind::RunWaitingAskAdded, "run_waiting_ask_added"),

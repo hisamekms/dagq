@@ -3146,7 +3146,9 @@ fn parse_positive_number(text: &str) -> Result<f64> {
 /// default ([`DiskConfig`] names each key, its type and default).
 /// `reserve` takes a share written as `"5%"`; a bad value is an error.
 /// `estimate` is `"recent"` (default) or `"fixed"`; unknown values are errors.
-/// Recent supplies W and I from the same recent run estimate.
+/// Recent supplies W and I from the WORKER and INTEGRATOR peaks, each
+/// falling back to the one recent run estimate without peaks
+/// ([`crate::domain::disk::stage_budgets`]).
 /// Fixed optionally reads `landing_size`, a positive size string for I;
 /// omission uses W from `run_size`. Invalid or zero values are
 /// line-numbered errors.
