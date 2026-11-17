@@ -1336,11 +1336,19 @@ pub fn main_checkout_of(path: &Path) -> Result<PathBuf> {
 /// index is the empty index of a newly initialized checkout. Both SHA-1 and
 /// SHA-256 repositories and index versions 2 through 4 are supported.
 pub(super) fn local_config_is_untracked(root: &Path) -> Result<bool> {
+    // Each file is read as `dagq.toml` is (a regular file, opened without
+    // blocking; the `.git` file and the config of a bounded size), so a
+    // FIFO or a device there is refused rather than waited on.
+    let bounded = |path: &Path| -> Result<String> {
+        let bytes = super::run_env::read_config_bytes(path)?
+            .with_context(|| format!("read {}: no such file", path.display()))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    };
     let dot = root.join(".git");
     let git_dir = if dot.is_dir() {
         dot
     } else {
-        let text = fs::read_to_string(&dot)?;
+        let text = bounded(&dot)?;
         let path = text
             .trim()
             .strip_prefix("gitdir: ")
@@ -1350,7 +1358,7 @@ pub(super) fn local_config_is_untracked(root: &Path) -> Result<bool> {
     if git_dir.join("commondir").exists() {
         return Ok(false);
     }
-    let config = fs::read_to_string(git_dir.join("config"))?;
+    let config = bounded(&git_dir.join("config"))?;
     let hash_bytes = if config.lines().any(|line| {
         line.split_once('=').is_some_and(|(key, value)| {
             key.trim().eq_ignore_ascii_case("objectformat")
@@ -1361,10 +1369,8 @@ pub(super) fn local_config_is_untracked(root: &Path) -> Result<bool> {
     } else {
         20
     };
-    let index = match fs::read(git_dir.join("index")) {
-        Ok(index) => index,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error.into()),
+    let Some(index) = super::run_env::read_index_bytes(&git_dir.join("index"))? else {
+        return Ok(true);
     };
     Ok(!index_tracks_local(&index, hash_bytes)?)
 }
@@ -5255,6 +5261,43 @@ mod tests {
         assert!(index_tracks_local(b"DIRC", 20).is_err());
     }
 
+    /// The tracked check reads the `.git` file, the Git config and the
+    /// index as `dagq.toml` is read: a FIFO or a symlink to `/dev/zero`
+    /// there is refused with why at once (the FIFO has no writer, so a read
+    /// would block), and the layer is not used; a missing index is the
+    /// empty one.
+    #[test]
+    fn the_tracked_check_reads_the_git_files_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        let fifo = |path: &Path| {
+            let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        };
+        let refused = |file: &str| {
+            let error = format!("{:#}", local_config_is_untracked(dir.path()).unwrap_err());
+            assert!(
+                error.contains("not a regular file") && error.contains(file),
+                "{error}"
+            );
+        };
+        fifo(&dir.path().join(".git/config"));
+        refused("config");
+        fs::remove_file(dir.path().join(".git/config")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]\nbare = false").unwrap();
+        assert!(local_config_is_untracked(dir.path()).unwrap());
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join(".git/index")).unwrap();
+        refused("index");
+        fs::remove_file(dir.path().join(".git/index")).unwrap();
+        let admin = dir.path().join("admin");
+        fs::rename(dir.path().join(".git"), &admin).unwrap();
+        fifo(&dir.path().join(".git"));
+        refused(".git");
+        fs::remove_file(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git"), "gitdir: admin\n").unwrap();
+        assert!(local_config_is_untracked(dir.path()).unwrap());
+    }
+
     #[test]
     fn tracked_local_layer_is_discarded_by_the_config_loader() {
         let dir = tempfile::tempdir().unwrap();
@@ -5274,9 +5317,17 @@ mod tests {
         assert!(!local_config_is_untracked(dir.path()).unwrap());
         // The clock is injected so this must reject tracking, not expiry.
         let clock = LocalConfigClock;
-        let rules =
-            crate::infrastructure::run_env::load_operational_rules(dir.path(), &clock).unwrap();
-        assert_eq!(rules.disk.reserve, 0.05);
+        let (rules, layer) =
+            crate::infrastructure::run_env::load_operational_snapshot(dir.path(), &clock);
+        assert_eq!(rules.unwrap().disk.reserve, 0.05);
+        // Rejected, the file is still hashed: an edit of it is a change.
+        assert!(layer.hash.is_some());
+        assert_eq!(
+            layer.state,
+            crate::domain::local_config::LocalLayerState::Rejected {
+                reason: "local config is tracked or outside the main checkout".into()
+            }
+        );
     }
 
     /// The main worktree of a common directory is the directory it is the

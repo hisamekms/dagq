@@ -1781,6 +1781,32 @@ where
     Ok(health::requests(&open, &waiting))
 }
 
+/// [`OneShot`]'s `local_config` of the main checkout `checkout` at `now`
+/// (Unix milliseconds): the layer's read, compared with the newest record
+/// `last` gives (read only while there is a file), and with `doctor`
+/// whether Git ignores it (why not known when an ignore file cannot be
+/// read).
+fn local_config_at(
+    checkout: &Path,
+    now: i64,
+    doctor: bool,
+    last: impl FnOnce() -> Result<Option<crate::domain::RunEvent>>,
+) -> Result<Option<Value>> {
+    let read = crate::infrastructure::run_env::inspect_local_config(checkout, now);
+    if read.state == crate::domain::local_config::LocalLayerState::Absent {
+        return Ok(None);
+    }
+    Ok(health::local_config(
+        &read,
+        last()?.as_ref(),
+        now,
+        doctor.then(|| {
+            crate::infrastructure::run_env::local_config_ignored(checkout)
+                .map_err(|error| format!("{error:#}"))
+        }),
+    ))
+}
+
 impl OneShot {
     /// `status --role`: see [`health::status`], measured to these
     /// generators' now.
@@ -1861,6 +1887,11 @@ impl OneShot {
         if let Some(recurring) = recurring_view(queue)? {
             status["recurring"] = recurring;
         }
+        // The main checkout's dagq.local.toml for every role, the inbox's
+        // included (ADR-t5108-1 decision 7).
+        if let Some(local) = self.local_config_view(queue, false)? {
+            status["local_config"] = local;
+        }
         health::add_held_tasks(
             &mut status,
             &queue.held_tasks()?,
@@ -1879,6 +1910,28 @@ impl OneShot {
             status["requests"] = open_requests(queue)?;
         }
         Ok(status)
+    }
+
+    /// [`health::local_config`] of the bound repository's main checkout
+    /// at these generators' now, with whether Git ignores the file for
+    /// `doctor`; `None` with no main checkout or no file.
+    fn local_config_view<E: TransactionEntries>(
+        &self,
+        queue: &StoreQueue<E>,
+        doctor: bool,
+    ) -> Result<Option<Value>>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
+        // From the binding's files alone: the queue service answers status
+        // and doctor, and runs no Git for them.
+        let Some(checkout) = served_checkout(queue)? else {
+            return Ok(None);
+        };
+        let now = crate::application::unix_millis(self.generators.clock.system_time());
+        local_config_at(&checkout, now, doctor, || {
+            queue.latest_queue_event(&[EventKind::SupervisorLocalConfigChanged.as_str()])
+        })
     }
 
     /// Whether the inbox has a watcher now (ADR-t906-1), from the records
@@ -2009,6 +2062,11 @@ impl OneShot {
                 // (ADR-0072).
                 if let Some(recurring) = recurring_view(&queue)? {
                     report["recurring"] = recurring;
+                }
+                // The main checkout's dagq.local.toml and whether Git
+                // ignores it (ADR-t5108-1 decision 7).
+                if let Some(local) = self.local_config_view(&queue, true)? {
+                    report["local_config"] = local;
                 }
                 // The means the CI watch reads GitHub with (ADR-t1920-1).
                 if let Some(ci_watch) = doctor_ci_watch(&queue)? {
@@ -2494,6 +2552,107 @@ pub(super) fn ci_watch_port(
 
 #[cfg(test)]
 mod tests {
+
+    /// `status` (every role's, the inbox's included: it is added before
+    /// the role's sections) and `doctor` show the layer's keys with the
+    /// committed and local values and the expiry, its rejection's reason,
+    /// and `doctor` warns of a file Git does not ignore (a `!` pattern with
+    /// a `[:class:]` included) and says why it cannot tell when an ignore
+    /// file cannot be read; no file shows nothing.
+    #[test]
+    fn status_and_doctor_show_the_local_layer_and_doctor_its_ignore() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        std::fs::write(dir.path().join("dagq.toml"), "[disk]\nreserve = '5%'\n").unwrap();
+        let now = 1_800_000_000_000;
+        let none = || Ok(None);
+        assert_eq!(local_config_at(dir.path(), now, true, none).unwrap(), None);
+        let local = dir.path().join("dagq.local.toml");
+        std::fs::write(
+            &local,
+            "[local]\nexpires_at = '2027-01-18T08:00:00Z'\n[disk]\nreserve = '12%'\n",
+        )
+        .unwrap();
+        let status = local_config_at(dir.path(), now, false, none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status["state"], "effective", "{status}");
+        assert_eq!(status["expires_at"], "2027-01-18T08:00:00.000Z");
+        assert_eq!(status["keys"][0]["key"], "reserve");
+        assert_eq!(status["keys"][0]["committed"], "\"5%\"");
+        assert_eq!(status["keys"][0]["local"], "\"12%\"");
+        assert_eq!(status.get("ignored"), None);
+        let doctor = local_config_at(dir.path(), now, true, none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doctor["ignored"], false);
+        assert!(
+            doctor["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("not ignored by .gitignore"),
+            "{doctor}"
+        );
+        std::fs::write(dir.path().join(".gitignore"), "dagq.local.toml\n").unwrap();
+        let doctor = local_config_at(dir.path(), now, true, none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doctor["ignored"], true);
+        assert_eq!(doctor["warnings"], json!([]));
+        // A `!` pattern with a `[:class:]` unignores it, as Git judges.
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "*.toml\n!dagq.[[:lower:]]ocal.toml\n",
+        )
+        .unwrap();
+        let doctor = local_config_at(dir.path(), now, true, none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doctor["ignored"], false, "{doctor}");
+        assert!(
+            doctor["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("not ignored by .gitignore"),
+            "{doctor}"
+        );
+        // A .gitignore that cannot be read (a FIFO, not read on) leaves it
+        // not known, with why.
+        std::fs::remove_file(dir.path().join(".gitignore")).unwrap();
+        let fifo = std::ffi::CString::new(dir.path().join(".gitignore").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let doctor = local_config_at(dir.path(), now, true, none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doctor["ignored"], Value::Null, "{doctor}");
+        assert!(
+            doctor["ignore_error"]
+                .as_str()
+                .unwrap()
+                .contains("not a regular file"),
+            "{doctor}"
+        );
+        assert!(
+            doctor["warnings"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("cannot tell whether Git ignores dagq.local.toml"),
+            "{doctor}"
+        );
+        std::fs::remove_file(dir.path().join(".gitignore")).unwrap();
+        std::fs::write(
+            &local,
+            "[local]\nexpires_at = '2027-01-18T08:00:00Z'\n[review]\nx = 1\n",
+        )
+        .unwrap();
+        let rejected = local_config_at(dir.path(), now, true, none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejected["state"], "rejected");
+        assert_eq!(rejected["reason"], "local table not allowed: review");
+    }
 
     /// A watch through an inbox's relay: each look is one `watch_poll`
     /// with the cursor and the role, its output is any watch's (the events

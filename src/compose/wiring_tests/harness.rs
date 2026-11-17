@@ -200,10 +200,17 @@ pub(super) struct Wiring {
     total: Option<u64>,
     supervisor_file: Option<supervise::SupervisorFile>,
     operational_file: Option<supervise::repository_config::OperationalFile>,
+    service_wrap: Option<CallerWrap>,
     repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
 }
 
 impl Wiring {
+    /// Wrap the service the supervisor's resending caller sends through:
+    /// a fault here (a lost answer) is one the resending sees.
+    pub(super) fn with_service_wrap(mut self, wrap: CallerWrap) -> Self {
+        self.service_wrap = Some(wrap);
+        self
+    }
     pub(super) fn with_volume(mut self, bytes: u64) -> Self {
         self.total = Some(bytes);
         self
@@ -289,6 +296,7 @@ impl Wiring {
             total: None,
             supervisor_file: None,
             operational_file: None,
+            service_wrap: None,
             repository_startup_file: None,
         }
     }
@@ -946,6 +954,7 @@ impl Wiring {
                 planning: self.planning.get(),
                 supervisor_file: self.supervisor_file.clone(),
                 operational_file: self.operational_file.clone(),
+                service_wrap: self.service_wrap.clone(),
                 repository_startup_file: self.repository_startup_file.clone(),
                 stop: stop.clone(),
                 free: self.free.clone(),
@@ -1043,6 +1052,7 @@ struct Parts {
     planning: (Option<usize>, Duration),
     supervisor_file: Option<supervise::SupervisorFile>,
     operational_file: Option<supervise::repository_config::OperationalFile>,
+    service_wrap: Option<CallerWrap>,
     repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
     stop: Arc<AtomicBool>,
     free: Arc<AtomicU64>,
@@ -1062,8 +1072,12 @@ impl Parts {
         // Bounded by the end's deadline, behind the holding of the records
         // not taken, as the binary's.
         let end = Arc::new(EndDeadline::default());
+        let service = match &self.service_wrap {
+            Some(wrap) => wrap(self.service),
+            None => self.service,
+        };
         let service: Arc<dyn ServiceCaller> =
-            Arc::new(EndBound::new(self.service, clock.clone(), end.clone()));
+            Arc::new(EndBound::new(service, clock.clone(), end.clone()));
         let service: Arc<dyn ServiceCaller> = Arc::new(
             Resending::new(service, Resend::Hold, self.generators.clone())
                 .kept_in(Arc::new(InMemory::default())),

@@ -201,9 +201,17 @@ pub fn next_operational_rules(
         resume: flags.resume.unwrap_or(file.resume),
     }
 }
+/// One read of the main checkout's settings each pass: the operational
+/// rules to apply (an error keeps those in use) and the local layer's
+/// read from the same bytes, for the record of its changes
+/// ([`crate::domain::local_config::LocalLayerTracker`]); `layer` is `None`
+/// where nothing is recorded.
+pub struct OperationalRead {
+    pub rules: anyhow::Result<OperationalRules>,
+    pub layer: Option<crate::domain::local_config::LocalLayerRead>,
+}
 /// Local main-checkout reader; deployments retain their own rules boundary.
-pub type OperationalFile =
-    std::sync::Arc<dyn Fn() -> anyhow::Result<OperationalRules> + Send + Sync>;
+pub type OperationalFile = std::sync::Arc<dyn Fn() -> OperationalRead + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

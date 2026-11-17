@@ -27,6 +27,7 @@ related:
   - design-toolchain-profiles
   - adr-t3321-1
   - adr-t5108-1
+  - design-supervisor-lifecycle-local-config
 ---
 
 # Run environment
@@ -35,11 +36,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 読み込みの入口は`src/infrastructure/run_env.rs`の`load_run_env`で、ファイルが無ければ空。
 
 main checkoutでは、commitしない期限つきの運用設定を隣の`dagq.local.toml`から重ねる（[ADR-t5108-1](../../adr/2026-11-16-t5108-1-expiring-uncommitted-operational-config-layer.md)）。
-期限を必須とし、稼働中に読み直せる運用のknobだけをallowlistで許し、層に誤りや許さないkeyがあれば全体を使わない。
-着地の前の関門を変える設定は、この層では許さない。
-読み直すたびに効き、supervisorでは次のpassから変わる。
-期限切れ・拒否・削除でも次のpassからbaseへ戻り、起動のflagは優先する。
-commitしたtree・run worktree・deploymentのremote rulesには重ねない。
+期限・allowlist・効く時点と、記録と見え方は[期限つきの運用設定の層](local-config.md)が持つ。
 
 - 書式と誤りの入口は`run_env::parse_config`。
   `DAGQ_`で始まるkeyと知らないkeyは拒む。
@@ -150,7 +147,6 @@ serverの所有とguardの境界は[sccacheの地図](sccache.md)。
 `dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのはGitで`main_checkout_of`、Gitを起動しないqueue serviceでは束縛から`main_checkout_from_files`の2か所だけ（bareと`git init --separate-git-dir`などの構成の扱いはそれぞれのdoc comment）。
 `dagq.toml`を読むコマンドとaskの通知のrepositoryの名前はどれもこの結果を使う。
 期限つきの層もこのcheckoutだけで読み、Gitが追跡するファイルは使わない。
-期限とallowlistの境界・次のpassから効く約束は冒頭とADR-t5108-1が持つ。
 
 main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。
 main checkoutが無いときの各コマンドの扱いは`main_checkout_of`、通知で使う名前は`naming_checkout`のdoc commentが持つ。

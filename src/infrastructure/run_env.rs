@@ -94,6 +94,7 @@ use crate::{
         landing_branch::RepositoryConfig,
         landing_verification::{self, LandingVerification},
         light_slots::LightChanges,
+        local_config::{LocalLayerRead, LocalLayerState},
         local_gates::{GateConfig, LocalGate, LocalGates},
         provider_switch::ProviderFallback,
         queue_broker::RegistryHost,
@@ -3140,29 +3141,6 @@ fn parse_positive_number(text: &str) -> Result<f64> {
     Ok(value)
 }
 
-/// Read the local supervisor's operational settings as one snapshot each pass.
-/// An absent file/table resets to defaults; a read error is left to the loop,
-/// which retains the settings in use and warns once per distinct error.
-pub fn load_operational_rules(
-    root: &Path,
-    clock: &dyn crate::application::Clock,
-) -> Result<crate::application::supervise::repository_config::OperationalRules> {
-    let config = match read_config_at(
-        &root.join(CONFIG_FILE_NAME),
-        crate::application::unix_millis(clock.system_time()),
-    )? {
-        Some(text) => parse_config(&text)?,
-        None => Config::default(),
-    };
-    Ok(
-        crate::application::supervise::repository_config::OperationalRules {
-            stall: config.stall,
-            disk: config.disk,
-            resume: config.resume,
-        },
-    )
-}
-
 /// `[disk]` of the `dagq.toml` in `root` (ADR-0047 decision 44,
 /// ADR-t4473-1), `None` when there is no file; no table or no key is the
 /// default ([`DiskConfig`] names each key, its type and default).
@@ -3914,27 +3892,793 @@ fn read_config(path: &Path) -> Result<Option<String>> {
 }
 
 fn read_config_at(path: &Path, now: i64) -> Result<Option<String>> {
-    let base = read_config_file(path)?;
-    let Some(root) = path.parent() else {
-        return Ok(base);
-    };
-    let local_path = root.join(LOCAL_CONFIG_FILE_NAME);
-    if !local_path.exists() {
-        return Ok(base);
+    match path.parent() {
+        Some(root) => local_snapshot(root, now).text,
+        None => read_config_file(path),
     }
-    // Failure of any local check discards the entire layer. Preserve errors
-    // of the committed file: a local layer must not repair a bad base.
+}
+
+/// One read of the main checkout `root`'s settings at `now`: what the
+/// layer is ([`LocalLayerRead`]) and the configuration text in effect
+/// from the same bytes (the merged text while the layer is used, the
+/// committed file's otherwise, the committed file's error when it cannot
+/// be read: a local layer never repairs a bad base).
+struct LocalSnapshot {
+    read: LocalLayerRead,
+    text: Result<Option<String>>,
+}
+
+fn local_snapshot(root: &Path, now: i64) -> LocalSnapshot {
+    let base = read_config_file(&root.join(CONFIG_FILE_NAME));
+    let rejected = |reason: String, hash: Option<String>| LocalLayerRead {
+        state: LocalLayerState::rejected(reason),
+        hash,
+        expires_at: None,
+        keys: Vec::new(),
+        values: Default::default(),
+    };
+    // The file is read once, with the committed file's checks (a FIFO, a
+    // device or a file over the size is not read on), and hashed whether
+    // or not the layer is used, so an edit of a rejected layer is a change.
+    let local = match read_config_bytes(&root.join(LOCAL_CONFIG_FILE_NAME)) {
+        Ok(None) => {
+            return LocalSnapshot {
+                read: LocalLayerRead::absent(),
+                text: base,
+            };
+        }
+        Ok(Some(bytes)) => bytes,
+        Err(error) => {
+            return LocalSnapshot {
+                read: rejected(format!("{error:#}"), None),
+                text: base,
+            };
+        }
+    };
+    let hash = Some(crate::domain::replan_snapshot::sha256(&local));
+    let base = match base {
+        Ok(base) => base,
+        Err(error) => {
+            return LocalSnapshot {
+                read: rejected(
+                    format!("the committed dagq.toml cannot be read: {error:#}"),
+                    hash,
+                ),
+                text: Err(error),
+            };
+        }
+    };
+    let mut read = LocalLayerRead {
+        state: LocalLayerState::Effective,
+        hash,
+        expires_at: None,
+        keys: Vec::new(),
+        values: Default::default(),
+    };
     let merged = (|| -> Result<String> {
         let base_text = base.as_deref().unwrap_or("");
-        parse_config(base_text)?;
+        parse_config(base_text).context("the committed dagq.toml does not parse")?;
         ensure!(
             super::adapters::local_config_is_untracked(root)?,
             "local config is tracked or outside the main checkout"
         );
-        let local = read_config_file(&local_path)?.context("local config disappeared")?;
-        merge_local_config(base_text, &local, now)
+        let local = String::from_utf8(local).context("local config is not UTF-8")?;
+        merge_local_config(base_text, &local, now, &mut read)
     })();
-    Ok(merged.ok().map(Some).unwrap_or(base))
+    match merged {
+        Ok(text) => LocalSnapshot {
+            read,
+            text: Ok(Some(text)),
+        },
+        Err(error) => {
+            if read.state == LocalLayerState::Effective {
+                read.state = LocalLayerState::rejected(format!("{error:#}"));
+            }
+            read.keys.clear();
+            LocalSnapshot {
+                read,
+                text: Ok(base),
+            }
+        }
+    }
+}
+
+/// What a read of the main checkout `root`'s `dagq.local.toml` at `now`
+/// finds ([`LocalLayerRead`]): the same read [`read_config_at`] uses, for
+/// `status`, `doctor` and the audit's settings.
+pub fn inspect_local_config(root: &Path, now: i64) -> LocalLayerRead {
+    local_snapshot(root, now).read
+}
+
+/// The local supervisor's operational settings and the layer's read from
+/// one read of the files each pass, so the values applied and the record
+/// of the layer are of the same bytes. An absent file/table is the
+/// defaults; a read error is left to the loop, which retains the settings
+/// in use and warns once per distinct error.
+pub fn load_operational_snapshot(
+    root: &Path,
+    clock: &dyn crate::application::Clock,
+) -> (
+    Result<crate::application::supervise::repository_config::OperationalRules>,
+    LocalLayerRead,
+) {
+    let snapshot = local_snapshot(root, crate::application::unix_millis(clock.system_time()));
+    let rules = snapshot.text.and_then(|text| {
+        let config = match text {
+            Some(text) => parse_config(&text)?,
+            None => Config::default(),
+        };
+        Ok(
+            crate::application::supervise::repository_config::OperationalRules {
+                stall: config.stall,
+                disk: config.disk,
+                resume: config.resume,
+            },
+        )
+    });
+    (rules, snapshot.read)
+}
+
+/// Whether Git ignores the main checkout `root`'s `dagq.local.toml`, as
+/// `git check-ignore` run at the root judges a file there, read without
+/// Git (the queue service runs none). The sources in Git's order of
+/// precedence: the root `.gitignore` (not followed when a symlink, as Git
+/// does not follow one in the working tree), then `info/exclude` of the
+/// Git directory, then `core.excludesFile` (a relative path is of the
+/// root; unset, `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`).
+/// The first source with a matching pattern decides, by its last match (a
+/// `!` pattern unignores). Patterns follow gitignore and Git's wildmatch:
+/// `*`, `?`, `[...]` with ranges and `[:class:]` names (an unknown name or
+/// an unclosed `[` matches nothing), `**`, `\` escapes, an anchoring `/`,
+/// a trailing `/` for directories only, and the case folding of
+/// `core.ignoreCase`. The `core` settings are the last set of the user's
+/// configs (`$XDG_CONFIG_HOME/git/config` or `~/.config/git/config`, then
+/// `~/.gitconfig`) and the repository's, read as Git reads them
+/// ([`GitCore`]); Git's system config is not read. Each file is read as
+/// `dagq.toml` is ([`read_git_input`]: a regular file, opened without
+/// blocking, of at most [`MAX_CONFIG_BYTES`], or `/dev/null`): one that is
+/// not, a config Git refuses, or an include whose condition this does not
+/// evaluate, is the error (whether Git ignores the layer is then not
+/// known), which `doctor` shows. `doctor` warns of a layer this finds not
+/// ignored: a `git add -A` would commit it, and a tracked layer is never
+/// used.
+pub fn local_config_ignored(root: &Path) -> Result<bool> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    local_config_ignored_with(root, home.as_deref(), xdg.as_deref())
+}
+
+fn local_config_ignored_with(root: &Path, home: Option<&Path>, xdg: Option<&Path>) -> Result<bool> {
+    let dot = root.join(".git");
+    let git_dir = if fs::metadata(&dot).is_ok_and(|metadata| metadata.is_dir()) {
+        dot
+    } else {
+        let gitdir = read_git_input(&dot, true)?.and_then(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            Some(root.join(text.trim().strip_prefix("gitdir: ")?.trim()))
+        });
+        gitdir.unwrap_or(dot)
+    };
+    let xdg = xdg
+        .filter(|xdg| !xdg.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(|home| home.join(".config")));
+    // The user's configs, then the repository's: the last to set a key wins.
+    let mut configs = Vec::new();
+    if let Some(xdg) = &xdg {
+        configs.push(xdg.join("git/config"));
+    }
+    if let Some(home) = home {
+        configs.push(home.join(".gitconfig"));
+    }
+    configs.push(git_dir.join("config"));
+    let mut core = GitCore::default();
+    let place = GitPlace {
+        home,
+        git_dir: &git_dir,
+    };
+    for config in &configs {
+        core.read_file(config, &place, 0)?;
+    }
+    let excludes = match core.excludes_file.as_deref() {
+        // An empty value names no file, and no default either.
+        Some("") => None,
+        Some(file) => Some(match file.strip_prefix("~/") {
+            Some(rest) => home.map_or_else(|| PathBuf::from(file), |home| home.join(rest)),
+            None => root.join(file),
+        }),
+        None => xdg.map(|xdg| xdg.join("git/ignore")),
+    };
+    let sources = [
+        (root.join(".gitignore"), false),
+        (git_dir.join("info/exclude"), true),
+    ]
+    .into_iter()
+    .chain(excludes.map(|file| (file, true)));
+    for (source, follow) in sources {
+        let Some(text) = read_git_input(&source, follow)? else {
+            continue;
+        };
+        if let Some(ignored) =
+            last_ignore_match(&text, LOCAL_CONFIG_FILE_NAME.as_bytes(), core.ignore_case)
+        {
+            return Ok(ignored);
+        }
+    }
+    Ok(false)
+}
+
+/// A file the ignore check reads, by [`read_bounded`]; `/dev/null` (or a
+/// path that resolves to it, with `follow`) is an empty file, as Git
+/// reads it where a person names it to have no ignore file.
+fn read_git_input(path: &Path, follow: bool) -> Result<Option<Vec<u8>>> {
+    if follow && fs::canonicalize(path).is_ok_and(|real| real == Path::new("/dev/null")) {
+        return Ok(Some(Vec::new()));
+    }
+    read_bounded(path, follow)
+}
+
+/// What a Git config's includes are judged by: the home for `~/`, and
+/// the Git directory that `includeIf "gitdir:"` and `"onbranch:"` match.
+struct GitPlace<'a> {
+    home: Option<&'a Path>,
+    git_dir: &'a Path,
+}
+
+/// The `core` settings of Git's configs that decide what the ignore files
+/// say, the last to set each winning: `excludesFile` and `ignoreCase`.
+#[derive(Debug, Default, PartialEq)]
+struct GitCore {
+    excludes_file: Option<String>,
+    ignore_case: bool,
+}
+
+/// The section of a Git config line: `[core]`, `[include]`, an
+/// `[includeIf]` whose condition holds, or another.
+#[derive(Clone, Copy, PartialEq)]
+enum GitSection {
+    Core,
+    Include,
+    Other,
+}
+
+impl GitCore {
+    /// Takes the config file at `path` (none when absent), following its
+    /// includes at the point of each, up to Git's depth of 10.
+    fn read_file(&mut self, path: &Path, place: &GitPlace, depth: usize) -> Result<()> {
+        ensure!(
+            depth <= 10,
+            "{}: includes nested deeper than Git follows",
+            path.display()
+        );
+        let Some(bytes) = read_git_input(path, true)? else {
+            return Ok(());
+        };
+        self.read(&String::from_utf8_lossy(&bytes), path, place, depth)
+    }
+
+    /// Takes the settings of the Git config `text` of the file `path` as
+    /// Git reads it: a UTF-8 BOM skipped; the keys of `[core]`, a key
+    /// following its header on the line; a key without `=` true; each
+    /// value of any section by [`git_config_value`], a line Git refuses
+    /// being the error; `[include] path` and `[includeIf "..."] path`
+    /// (relative to `path`'s directory, `~/` of the home) read where they
+    /// stand, for the conditions `gitdir:`, `gitdir/i:` and `onbranch:`;
+    /// `hasconfig:` is not evaluated and is the error; another condition
+    /// never holds, as in Git. Booleans by [`git_config_bool`];
+    /// `excludesFile` without its `:(optional)` prefix.
+    fn read(&mut self, text: &str, path: &Path, place: &GitPlace, depth: usize) -> Result<()> {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let mut section = GitSection::Other;
+        let mut lines = text.lines().enumerate();
+        while let Some((number, line)) = lines.next() {
+            let bad = |why: &str| anyhow::anyhow!("{}:{}: {why}", path.display(), number + 1);
+            let mut line = line.trim_start();
+            if let Some(header) = line.strip_prefix('[') {
+                let (name, rest) = git_section(header).ok_or_else(|| bad("bad section header"))?;
+                section = match name {
+                    (name, None) if name.eq_ignore_ascii_case("core") => GitSection::Core,
+                    (name, None) if name.eq_ignore_ascii_case("include") => GitSection::Include,
+                    (name, Some(condition)) if name.eq_ignore_ascii_case("includeif") => {
+                        if git_include_holds(&condition, path, place)? {
+                            GitSection::Include
+                        } else {
+                            GitSection::Other
+                        }
+                    }
+                    _ => GitSection::Other,
+                };
+                line = rest.trim_start();
+            }
+            if line.is_empty() || line.starts_with(['#', ';']) {
+                continue;
+            }
+            let (key, value) = match line.split_once('=') {
+                Some((key, value)) => (
+                    key.trim(),
+                    Some(git_config_value(value, &mut lines).map_err(bad)?),
+                ),
+                None => (line.split([' ', '\t', '#', ';']).next().unwrap_or(""), None),
+            };
+            match section {
+                GitSection::Core if key.eq_ignore_ascii_case("excludesfile") => {
+                    let value = value.ok_or_else(|| bad("core.excludesFile without a value"))?;
+                    let value = value.strip_prefix(":(optional)").unwrap_or(&value);
+                    self.excludes_file = Some(value.to_owned());
+                }
+                GitSection::Core if key.eq_ignore_ascii_case("ignorecase") => {
+                    self.ignore_case = git_config_bool(value.as_deref())
+                        .ok_or_else(|| bad("core.ignoreCase is not a boolean"))?;
+                }
+                GitSection::Include if key.eq_ignore_ascii_case("path") => {
+                    let value = value.ok_or_else(|| bad("include.path without a value"))?;
+                    let file = match value.strip_prefix("~/") {
+                        Some(rest) => place.home.map(|home| home.join(rest)),
+                        None => Some(path.parent().unwrap_or(Path::new("/")).join(&value)),
+                    };
+                    if let Some(file) = file {
+                        self.read_file(&file, place, depth + 1)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The section of the Git config header `header` (the text after its
+/// `[`): its name and its quoted subsection (with `\` escapes), and the
+/// text after the `]`; `None` when it does not read.
+fn git_section(header: &str) -> Option<((&str, Option<String>), &str)> {
+    let end = header.find([' ', '\t', '"', ']'])?;
+    let name = &header[..end];
+    let rest = header[end..].trim_start_matches([' ', '\t']);
+    if let Some(rest) = rest.strip_prefix(']') {
+        return Some(((name, None), rest));
+    }
+    let mut chars = rest.strip_prefix('"')?.char_indices();
+    let mut subsection = String::new();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' => {
+                let rest = rest[1 + at + 1..].strip_prefix(']')?;
+                return Some(((name, Some(subsection)), rest));
+            }
+            '\\' => subsection.push(chars.next()?.1),
+            c => subsection.push(c),
+        }
+    }
+    None
+}
+
+/// Whether `[includeIf "condition"]` of the config `path` holds: `gitdir:`
+/// (`gitdir/i:` without case) matches the Git directory, as it is and as
+/// resolved, with Git's pattern (`~/` of the home, `./` of `path`'s
+/// directory, `**/` before a relative one, `**` after a trailing `/`);
+/// `onbranch:` the branch `HEAD` names. `hasconfig:` is the error: its
+/// answer needs remotes this check does not read.
+fn git_include_holds(condition: &str, path: &Path, place: &GitPlace) -> Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let starstar = |mut pattern: String| {
+        if pattern.ends_with('/') {
+            pattern.push_str("**");
+        }
+        pattern
+    };
+    let (gitdir, fold) = match (
+        condition.strip_prefix("gitdir:"),
+        condition.strip_prefix("gitdir/i:"),
+    ) {
+        (Some(pattern), _) => (Some(pattern), false),
+        (_, Some(pattern)) => (Some(pattern), true),
+        _ => (None, false),
+    };
+    if let Some(pattern) = gitdir {
+        let pattern = if let Some(rest) = pattern.strip_prefix("~/") {
+            let Some(home) = place.home else {
+                return Ok(false);
+            };
+            format!("{}/{rest}", home.display())
+        } else if let Some(rest) = pattern.strip_prefix("./") {
+            let dir = fs::canonicalize(path)
+                .ok()
+                .and_then(|real| real.parent().map(Path::to_path_buf))
+                .unwrap_or_default();
+            format!("{}/{rest}", dir.display())
+        } else if pattern.starts_with('/') {
+            pattern.to_owned()
+        } else {
+            format!("**/{pattern}")
+        };
+        let pattern = starstar(pattern);
+        let dirs = [
+            fs::canonicalize(place.git_dir).ok(),
+            Some(place.git_dir.to_path_buf()),
+        ];
+        return Ok(dirs.iter().flatten().any(|dir| {
+            gitignore_wildmatch(pattern.as_bytes(), dir.as_os_str().as_bytes(), true, fold)
+        }));
+    }
+    if let Some(pattern) = condition.strip_prefix("onbranch:") {
+        let head = read_git_input(&place.git_dir.join("HEAD"), true)?.unwrap_or_default();
+        let head = String::from_utf8_lossy(&head);
+        let Some(branch) = head.trim().strip_prefix("ref: refs/heads/") else {
+            return Ok(false);
+        };
+        let pattern = starstar(pattern.to_owned());
+        return Ok(gitignore_wildmatch(
+            pattern.as_bytes(),
+            branch.as_bytes(),
+            true,
+            false,
+        ));
+    }
+    ensure!(
+        !condition.starts_with("hasconfig:"),
+        "{}: includeIf \"{condition}\" is not a condition this check evaluates",
+        path.display()
+    );
+    Ok(false)
+}
+
+/// A Git config value whose text after the `=` is `text`, as Git reads
+/// it: outside quotes a `;` or `#` begins a comment and whitespace at
+/// either end goes (within it stays as written); `"` quotes; `\` escapes
+/// `"`, `\`, `n`, `t` and `b`, and at the end of a line joins the next of
+/// `more`. An unclosed quote or another escape is the error Git gives.
+fn git_config_value<'a>(
+    mut text: &'a str,
+    more: &mut impl Iterator<Item = (usize, &'a str)>,
+) -> std::result::Result<String, &'static str> {
+    let mut value = String::new();
+    let mut quoted = false;
+    // Where the value ends when what follows is only unquoted whitespace.
+    let mut trim = None;
+    loop {
+        let mut chars = text.chars();
+        let mut joined = false;
+        while let Some(c) = chars.next() {
+            match c {
+                ';' | '#' if !quoted => break,
+                ' ' | '\t' | '\r' if !quoted => {
+                    if !value.is_empty() {
+                        trim.get_or_insert(value.len());
+                        value.push(c);
+                    }
+                }
+                '"' => {
+                    trim = None;
+                    quoted = !quoted;
+                }
+                '\\' => {
+                    trim = None;
+                    match chars.next() {
+                        None => {
+                            joined = true;
+                            break;
+                        }
+                        Some('n') => value.push('\n'),
+                        Some('t') => value.push('\t'),
+                        Some('b') => value.push('\u{8}'),
+                        Some(c @ ('\\' | '"')) => value.push(c),
+                        Some(_) => return Err("bad config line: an unknown escape"),
+                    }
+                }
+                c => {
+                    trim = None;
+                    value.push(c);
+                }
+            }
+        }
+        match joined.then(|| more.next()).flatten() {
+            Some((_, line)) => text = line,
+            None => break,
+        }
+    }
+    if quoted {
+        return Err("bad config line: an unclosed quote");
+    }
+    if let Some(len) = trim {
+        value.truncate(len);
+    }
+    Ok(value)
+}
+
+/// A Git config boolean as Git reads it: no value, `true`, `yes` and `on`
+/// true; empty, `false`, `no` and `off` false (in any case); else an
+/// integer (decimal, `0x` hex or `0` octal, with a `k`, `m` or `g` unit)
+/// true unless zero; `None` when it is none of these.
+fn git_config_bool(value: Option<&str>) -> Option<bool> {
+    let Some(value) = value else {
+        return Some(true);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => Some(true),
+        "false" | "no" | "off" | "" => Some(false),
+        number => {
+            // A unit or a sign does not change whether it is zero.
+            let number = number.trim_start();
+            let digits = number.strip_suffix(['k', 'm', 'g']).unwrap_or(number);
+            let digits = digits.strip_prefix(['-', '+']).unwrap_or(digits);
+            let magnitude = if let Some(hex) = digits.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16).ok()?
+            } else if digits.len() > 1
+                && let Some(octal) = digits.strip_prefix('0')
+            {
+                u64::from_str_radix(octal, 8).ok()?
+            } else {
+                digits.parse::<u64>().ok()?
+            };
+            Some(magnitude != 0)
+        }
+    }
+}
+
+/// Whether the last pattern of the gitignore `text` that matches the file
+/// `path` at its directory ignores it (`Some(false)` for a `!` pattern),
+/// `None` when none matches. Lines as Git reads them: a UTF-8 BOM at the
+/// start skipped, a `\r` before the `\n` dropped, a line beginning with
+/// `#` a comment, a NUL ending the pattern (Git reads it as a C string),
+/// trailing spaces trimmed unless escaped. `fold`: the case folding of
+/// `core.ignoreCase`.
+fn last_ignore_match(text: &[u8], path: &[u8], fold: bool) -> Option<bool> {
+    let text = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
+    let mut decided = None;
+    for line in text.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let line = line.split(|byte| *byte == 0).next().unwrap_or(line);
+        let pattern = trim_trailing_spaces(line);
+        let (negated, pattern) = match pattern.strip_prefix(b"!") {
+            Some(rest) => (true, rest),
+            None => (false, pattern),
+        };
+        // A directory's pattern never matches a file.
+        if pattern.is_empty() || pattern.ends_with(b"/") {
+            continue;
+        }
+        let pattern = pattern.strip_prefix(b"/").unwrap_or(pattern);
+        if gitignore_wildmatch(pattern, path, true, fold) {
+            decided = Some(!negated);
+        }
+    }
+    decided
+}
+
+/// `line` without its trailing spaces, as Git trims a gitignore line: a
+/// space a `\` escapes stays, and so does all of a line ending in a lone
+/// `\`.
+fn trim_trailing_spaces(line: &[u8]) -> &[u8] {
+    let mut last_space = None;
+    let mut at = 0;
+    while at < line.len() {
+        match line[at] {
+            b' ' => {
+                last_space.get_or_insert(at);
+            }
+            b'\\' => {
+                at += 1;
+                if at == line.len() {
+                    return line;
+                }
+                last_space = None;
+            }
+            _ => last_space = None,
+        }
+        at += 1;
+    }
+    &line[..last_space.unwrap_or(line.len())]
+}
+
+/// Git's wildmatch with paths: `*` and `?` do not match `/`, `**` between
+/// slashes (or at either end) matches any number of directories, `[...]`
+/// a class ([`gitignore_class`]), `\` escapes the next byte (a trailing
+/// one matches nothing). `segment` says the pattern starts a path
+/// segment. Under `fold` a byte of the text and a literal one of the
+/// pattern compare in lowercase; an escaped byte and a class's own bytes
+/// are not folded, as in Git. It is matched without recursion, as the set
+/// of the text's positions the pattern so far reaches: each element of the
+/// pattern is one step over at most `text.len() + 1` positions, so a
+/// pattern of any length (a line of a `.gitignore` of up to
+/// [`MAX_CONFIG_BYTES`]) takes work of its length times the text's and no
+/// stack beyond this frame.
+fn gitignore_wildmatch(pattern: &[u8], text: &[u8], segment: bool, fold: bool) -> bool {
+    let lower = |c: u8| if fold { c.to_ascii_lowercase() } else { c };
+    let n = text.len();
+    // reached[at]: the pattern so far matches `text[..at]`.
+    let mut reached = vec![false; n + 1];
+    reached[0] = true;
+    let mut segment = segment;
+    let mut rest = pattern;
+    // The positions one byte on from `reached` where `matches` takes it.
+    let step = |reached: &[bool], matches: &dyn Fn(u8) -> bool| {
+        let mut next = vec![false; n + 1];
+        for at in 0..n {
+            next[at + 1] = reached[at] && matches(text[at]);
+        }
+        next
+    };
+    loop {
+        if !reached.contains(&true) {
+            return false;
+        }
+        let Some((&first, after)) = rest.split_first() else {
+            return reached[n];
+        };
+        match first {
+            b'*' => {
+                let stars = rest.iter().take_while(|c| **c == b'*').count();
+                let after = &rest[stars..];
+                if stars >= 2 && segment && (after.is_empty() || after[0] == b'/') {
+                    if after.is_empty() {
+                        return true;
+                    }
+                    // `**/`: no directory, or any number of them.
+                    let mut before = false;
+                    let mut next = vec![false; n + 1];
+                    for at in 0..=n {
+                        next[at] = reached[at] || (before && text[at - 1] == b'/');
+                        before |= reached[at];
+                    }
+                    reached = next;
+                    rest = &after[1..];
+                    segment = true;
+                } else {
+                    // A run of stars not between slashes is one `*`.
+                    let mut next = vec![false; n + 1];
+                    for at in 0..=n {
+                        next[at] = reached[at] || (at > 0 && next[at - 1] && text[at - 1] != b'/');
+                    }
+                    reached = next;
+                    rest = after;
+                    segment = false;
+                }
+            }
+            b'?' => {
+                reached = step(&reached, &|c| c != b'/');
+                rest = after;
+                segment = false;
+            }
+            b'[' => {
+                // The class's extent does not depend on the byte it takes.
+                let Some((_, past)) = gitignore_class(after, 0, fold) else {
+                    return false;
+                };
+                let class = &after[..after.len() - past.len()];
+                reached = step(&reached, &|c| {
+                    c != b'/' && gitignore_class(class, lower(c), fold).is_some_and(|(hit, _)| hit)
+                });
+                rest = past;
+                segment = false;
+            }
+            b'\\' => {
+                let Some((&escaped, past)) = after.split_first() else {
+                    return false;
+                };
+                reached = step(&reached, &|c| lower(c) == escaped);
+                rest = past;
+                segment = false;
+            }
+            c => {
+                reached = step(&reached, &|t| lower(t) == lower(c));
+                rest = after;
+                segment = c == b'/';
+            }
+        }
+    }
+}
+
+/// Git's `[...]` whose bytes after its `[` are `class`, for the text byte
+/// `c` (lowercased under `fold`): whether it matches, and the pattern after
+/// its `]`; `None` when it is unclosed or names an unknown `[:class:]`,
+/// which Git takes as no match of the whole pattern. As Git's wildmatch: a
+/// leading `!` or `^` negates, a `]` first is itself, `x-y` is a range
+/// (under `fold`, of `c`'s uppercase too) unless a range or a `[:class:]`
+/// is just before the `-` or a `]` just after it, `\` escapes,
+/// `[:name:]` is an ASCII class (under `fold`, `upper` takes lowercase
+/// too), and a `[:` without its `:]` before the next `]` is a `[`.
+fn gitignore_class(class: &[u8], c: u8, fold: bool) -> Option<(bool, &[u8])> {
+    let (negated, mut p) = match class.split_first() {
+        Some((b'!' | b'^', rest)) => (true, rest),
+        _ => (false, class),
+    };
+    let mut matched = false;
+    // The byte a following `-` makes a range from.
+    let mut prev = None;
+    let mut first = true;
+    loop {
+        let (&ch, rest) = p.split_first()?;
+        if ch == b']' && !first {
+            return Some((matched != negated, rest));
+        }
+        first = false;
+        p = rest;
+        match ch {
+            b'\\' => {
+                let (&escaped, rest) = p.split_first()?;
+                p = rest;
+                matched |= escaped == c;
+                prev = Some(escaped);
+            }
+            b'-' if prev.is_some() && p.first().is_some_and(|end| *end != b']') => {
+                let (mut end, mut rest) = (p[0], &p[1..]);
+                if end == b'\\' {
+                    (end, rest) = rest.split_first().map(|(end, rest)| (*end, rest))?;
+                }
+                p = rest;
+                let start = prev.take().unwrap_or_default();
+                let within = |c: u8| (start..=end).contains(&c);
+                matched |=
+                    within(c) || (fold && c.is_ascii_lowercase() && within(c.to_ascii_uppercase()));
+            }
+            b'[' if p.first() == Some(&b':') => {
+                let named = &p[1..];
+                let close = named.iter().position(|byte| *byte == b']')?;
+                if close == 0 || named[close - 1] != b':' {
+                    matched |= c == b'[';
+                    prev = Some(b'[');
+                    continue;
+                }
+                matched |= match &named[..close - 1] {
+                    b"alnum" => c.is_ascii_alphanumeric(),
+                    b"alpha" => c.is_ascii_alphabetic(),
+                    b"blank" => matches!(c, b' ' | b'\t'),
+                    b"cntrl" => c.is_ascii_control(),
+                    b"digit" => c.is_ascii_digit(),
+                    b"graph" => c.is_ascii_graphic(),
+                    b"lower" => c.is_ascii_lowercase(),
+                    b"print" => c.is_ascii_graphic() || c == b' ',
+                    b"punct" => c.is_ascii_punctuation(),
+                    b"space" => matches!(c, b' ' | b'\t' | b'\n' | b'\r'),
+                    b"upper" => c.is_ascii_uppercase() || (fold && c.is_ascii_lowercase()),
+                    b"xdigit" => c.is_ascii_hexdigit(),
+                    _ => return None,
+                };
+                p = &named[close + 1..];
+                prev = None;
+            }
+            _ => {
+                matched |= ch == c;
+                prev = Some(ch);
+            }
+        }
+    }
+}
+
+/// A value of a line as [`crate::domain::local_config::LocalKey`] shows
+/// it: a string's quotes normalized, other values without their comment.
+fn shown_value(text: &str) -> String {
+    let text = text.trim();
+    if text.starts_with(['\'', '"'])
+        && let Ok(value) = parse_string(text)
+    {
+        return format!("{value:?}");
+    }
+    value_without_comment(text).to_owned()
+}
+
+/// The text of a value without its comment: from a `#` outside a string,
+/// the strings (`'...'`, and `"..."` with its `\` escapes, in an array
+/// too) kept whole, so that a comment of any length is not part of what
+/// the layer's read and record keep of the value.
+fn value_without_comment(text: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (at, c) in text.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None if c == '#' => return text[..at].trim(),
+            None if matches!(c, '\'' | '"') => quote = Some(c),
+            None => {}
+        }
+    }
+    text.trim()
 }
 
 /// Merge individual (table, key) lines, then validate the complete result
@@ -3943,8 +4687,15 @@ fn read_config_at(path: &Path, now: i64) -> Result<Option<String>> {
 /// duplicate keys, invalid values and cross-table inconsistencies atomically.
 /// The required `[local] expires_at` metadata is an RFC 3339 instant, valid
 /// after this read and no later than LOCAL_CONFIG_MAX_SECS from it; it is
-/// not included in the merged configuration.
-fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
+/// not included in the merged configuration. `read` gets the expiry, the
+/// state `expired` when it passed, and the keys with their committed
+/// values.
+fn merge_local_config(
+    base: &str,
+    local: &str,
+    now: i64,
+    read: &mut LocalLayerRead,
+) -> Result<String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut entries = BTreeMap::new();
     let mut tables = BTreeSet::new();
@@ -3992,7 +4743,10 @@ fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
                 ensure!(!table.is_empty(), "local key outside table");
                 ensure!(
                     entries
-                        .insert((table.to_owned(), key), value.trim().to_owned())
+                        .insert(
+                            (table.to_owned(), key),
+                            value_without_comment(value).to_owned()
+                        )
                         .is_none(),
                     "duplicate local key"
                 );
@@ -4000,10 +4754,50 @@ fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
         }
     }
     let expiry = expiry.context("missing local.expires_at")?;
+    read.expires_at = Some(expiry);
+    if expiry <= now {
+        read.state = LocalLayerState::Expired;
+        bail!("local config expired");
+    }
     ensure!(
-        expiry > now && expiry.saturating_sub(now) <= LOCAL_CONFIG_MAX_SECS * 1000,
+        expiry.saturating_sub(now) <= LOCAL_CONFIG_MAX_SECS * 1000,
         "local expiry outside permitted interval"
     );
+    let values = config_value_comparer(base, &entries);
+    let local_entries = entries.clone();
+    let (merged, mut committed) = substitute(base, entries);
+    parse_config(&merged)?;
+    read.keys = local_entries
+        .into_iter()
+        .map(|((table, key), value)| {
+            let committed = committed
+                .remove(&(table.clone(), key.clone()))
+                .map(|text| value_without_comment(&text).to_owned());
+            let redundant = values.same(&table, &key, Some(&value), committed.as_deref());
+            crate::domain::local_config::LocalKey {
+                committed: committed.as_deref().map(shown_value),
+                committed_text: committed,
+                local: shown_value(&value),
+                local_text: value,
+                redundant,
+                table,
+                key,
+            }
+        })
+        .collect();
+    read.values = values;
+    Ok(merged)
+}
+
+/// `base` with each (table, key) of `entries` set to its value text: a
+/// key's line replaced where the table has one, else inserted after the
+/// table's header, else appended in a new table (parse_config rejects a
+/// repeated table). With the texts of the lines it replaced.
+fn substitute(
+    base: &str,
+    mut entries: std::collections::BTreeMap<(String, String), String>,
+) -> (String, std::collections::BTreeMap<(String, String), String>) {
+    let mut replaced = std::collections::BTreeMap::new();
     let mut merged = String::new();
     let mut current = "";
     for raw in base.strip_prefix('\u{feff}').unwrap_or(base).lines() {
@@ -4012,18 +4806,17 @@ fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
             current = strip_comment(header).strip_suffix(']').unwrap_or("").trim();
         } else if !line.is_empty()
             && !line.starts_with('#')
-            && let Some((key, _)) = line.split_once('=')
+            && let Some((key, base_value)) = line.split_once('=')
             && let Ok(key) = parse_key(key.trim())
             && let Some(value) = entries.remove(&(current.to_owned(), key.clone()))
         {
+            replaced.insert((current.to_owned(), key.clone()), base_value.to_owned());
             merged.push_str(&format!("{key} = {value}\n"));
             continue;
         }
         merged.push_str(raw);
         merged.push('\n');
     }
-    // Insert new keys into existing tables, rather than repeating headers
-    // (parse_config rejects repeated tables).
     for ((table, key), value) in entries {
         let header = format!("[{table}]");
         let lines: Vec<_> = merged.lines().collect();
@@ -4044,8 +4837,38 @@ fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
             merged.push_str(&format!("{header}\n{key} = {value}\n"));
         }
     }
-    parse_config(&merged)?;
-    Ok(merged)
+    (merged, replaced)
+}
+
+/// The [`crate::domain::local_config::ValueComparer`] of a read over the
+/// committed `base` with the layer's `entries`: two texts of a key are one
+/// value when the configuration in effect with each of them set for the
+/// key parses to the same configuration. That configuration is `base`
+/// with the layer's other keys over it, so a key is compared as the
+/// configuration the layer makes uses it (a `[disk] run_size` that the
+/// committed `estimate = 'recent'` ignores counts where the layer sets
+/// `estimate = 'fixed'`), and setting a key to its committed text is
+/// removing the layer's line for it. Each key's own parser decides
+/// (`'5%'` and `'5.0%'`, `'8GiB'` and `'8192MiB'`, `1` and `1.0` where
+/// the key reads a number). A text the parser refuses is compared as
+/// written.
+fn config_value_comparer(
+    base: &str,
+    entries: &std::collections::BTreeMap<(String, String), String>,
+) -> crate::domain::local_config::ValueComparer {
+    let base = base.to_owned();
+    let entries = entries.clone();
+    crate::domain::local_config::ValueComparer::new(move |table, key, a, b| {
+        let parsed = |text: &str| {
+            let mut entries = entries.clone();
+            entries.insert((table.to_owned(), key.to_owned()), text.trim().to_owned());
+            parse_config(&substitute(&base, entries).0).ok()
+        };
+        match (parsed(a), parsed(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => a.trim() == b.trim(),
+        }
+    })
 }
 
 /// The text of the `dagq.toml` at `path`; none when there is none. Only a
@@ -4055,16 +4878,61 @@ fn merge_local_config(base: &str, local: &str, now: i64) -> Result<String> {
 /// make the reader take memory without end. The file is opened without
 /// blocking, so that one swapped for a FIFO after the check does not hang.
 fn read_config_file(path: &Path) -> Result<Option<String>> {
-    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    read_config_bytes(path)?
+        .map(|bytes| {
+            String::from_utf8(bytes).with_context(|| format!("read {}: not UTF-8", path.display()))
+        })
+        .transpose()
+}
+
+/// The bytes [`read_config_file`] reads, with its checks (a regular file,
+/// opened without blocking, at most [`MAX_CONFIG_BYTES`]) but not its
+/// UTF-8 one: the local layer's hash is of these. A path under a file
+/// that is not a directory is no file, as a missing one. The layer's
+/// tracked check reads the `.git` file and the Git config with it.
+pub(super) fn read_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_bounded(path, true)
+}
+
+/// [`read_config_bytes`] of `path`; with `follow` false a symlink there is
+/// no file (it is neither followed nor read), as Git takes a symlinked
+/// `.gitignore` in the working tree.
+fn read_bounded(path: &Path, follow: bool) -> Result<Option<Vec<u8>>> {
+    read_regular(path, follow, Some(MAX_CONFIG_BYTES))
+}
+
+/// The bytes of Git's index at `path` for the layer's tracked check, with
+/// the checks of [`read_config_bytes`] but no limit to the size, which is
+/// the repository's.
+pub(super) fn read_index_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_regular(path, true, None)
+}
+
+/// The bytes of the regular file at `path` (followed through a symlink
+/// with `follow`, else a symlink is no file), opened without blocking so
+/// that one swapped for a FIFO after the check does not hang; none when
+/// absent; a device, a FIFO, a directory or a file over `limit` bytes is
+/// refused with why.
+fn read_regular(path: &Path, follow: bool, limit: Option<u64>) -> Result<Option<Vec<u8>>> {
+    use std::{io::ErrorKind, io::Read, os::unix::fs::OpenOptionsExt};
     let not_regular = |path: &Path| format!("read {}: not a regular file", path.display());
-    match fs::metadata(path) {
+    let metadata = if follow {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    };
+    match metadata {
+        Ok(metadata) if metadata.file_type().is_symlink() => return Ok(None),
         Ok(metadata) => ensure!(metadata.is_file(), not_regular(path)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(None);
+        }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     }
+    let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
     let file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | nofollow)
         .open(path)
         .with_context(|| format!("read {}", path.display()))?;
     let metadata = file
@@ -4072,17 +4940,17 @@ fn read_config_file(path: &Path) -> Result<Option<String>> {
         .with_context(|| format!("read {}", path.display()))?;
     ensure!(metadata.is_file(), not_regular(path));
     let mut bytes = Vec::new();
-    file.take(MAX_CONFIG_BYTES + 1)
+    file.take(limit.map_or(u64::MAX, |limit| limit + 1))
         .read_to_end(&mut bytes)
         .with_context(|| format!("read {}", path.display()))?;
-    ensure!(
-        bytes.len() as u64 <= MAX_CONFIG_BYTES,
-        "read {}: larger than the {MAX_CONFIG_BYTES} bytes dagq reads of it",
-        path.display()
-    );
-    String::from_utf8(bytes)
-        .map(Some)
-        .with_context(|| format!("read {}: not UTF-8", path.display()))
+    if let Some(limit) = limit {
+        ensure!(
+            bytes.len() as u64 <= limit,
+            "read {}: larger than the {limit} bytes dagq reads of it",
+            path.display()
+        );
+    }
+    Ok(Some(bytes))
 }
 
 /// `value` with `${DAGQ_QUEUE_DIR}` and `${DAGQ_RUN_DIR}` replaced. Any other
@@ -4658,7 +5526,8 @@ mod tests {
         ] {
             let local = format!("{LOCAL_VALID}[retention]\n{key} = 7\n");
             assert!(
-                merge_local_config(&original, &local, LOCAL_NOW).is_err(),
+                merge_local_config(&original, &local, LOCAL_NOW, &mut LocalLayerRead::absent())
+                    .is_err(),
                 "{key}"
             );
         }
@@ -4680,6 +5549,799 @@ mod tests {
             fs::write(dir.path().join(LOCAL_CONFIG_FILE_NAME), local).unwrap();
             assert_eq!(read_config_at(&path, LOCAL_NOW).unwrap().unwrap(), base);
         }
+    }
+
+    /// The inspection the supervisor records and `status`/`doctor` show:
+    /// each key with its committed value and the file's hash and expiry
+    /// while used, the expiry passed, a rejection with its reason, and no
+    /// file.
+    #[test]
+    fn local_layer_inspection_reports_keys_expiry_and_rejection() {
+        use crate::domain::local_config::LocalLayerState;
+        let dir = local_checkout();
+        assert_eq!(
+            inspect_local_config(dir.path(), LOCAL_NOW),
+            LocalLayerRead::absent()
+        );
+        let text = format!(
+            "{LOCAL_VALID}[disk]\nreserve = \"12%\" # trial\n[throughput_review]\nkpi_stats = true\n[retention]\ndays = 3\n"
+        );
+        fs::write(dir.path().join(LOCAL_CONFIG_FILE_NAME), &text).unwrap();
+        let read = inspect_local_config(dir.path(), LOCAL_NOW);
+        assert_eq!(read.state, LocalLayerState::Effective);
+        assert_eq!(
+            read.hash.as_deref(),
+            Some(crate::domain::replan_snapshot::sha256(text.as_bytes()).as_str())
+        );
+        assert_eq!(read.effective_hash(), read.hash.as_deref());
+        assert_eq!(read.expires_at, Some(LOCAL_NOW + 86_400_000));
+        let keys = read
+            .keys
+            .iter()
+            .map(|key| {
+                (
+                    format!("{}.{}", key.table, key.key),
+                    key.local.as_str(),
+                    key.committed.as_deref(),
+                    key.redundant(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                ("disk.reserve".to_owned(), "\"12%\"", Some("\"5%\""), false),
+                ("retention.days".to_owned(), "3", None, false),
+                (
+                    "throughput_review.kpi_stats".to_owned(),
+                    "true",
+                    Some("true"),
+                    true
+                ),
+            ]
+        );
+        let expired = inspect_local_config(dir.path(), LOCAL_NOW + 86_400_000);
+        assert_eq!(expired.state, LocalLayerState::Expired);
+        assert_eq!(expired.effective_hash(), None);
+        assert!(expired.keys.is_empty());
+        fs::write(
+            dir.path().join(LOCAL_CONFIG_FILE_NAME),
+            format!("{LOCAL_VALID}[repository]\npush = false\n"),
+        )
+        .unwrap();
+        let rejected = inspect_local_config(dir.path(), LOCAL_NOW);
+        assert_eq!(
+            rejected.state,
+            LocalLayerState::Rejected {
+                reason: "local table not allowed: repository".into()
+            }
+        );
+        assert!(rejected.hash.is_some());
+    }
+
+    /// The layer is read as the committed file is, a regular file of at
+    /// most [`MAX_CONFIG_BYTES`] opened without blocking, also when the
+    /// committed file cannot be read: a FIFO, `/dev/zero` and a larger
+    /// file are rejected without a hash and without being read on.
+    #[test]
+    fn local_layer_is_read_only_as_a_bounded_regular_file() {
+        let dir = local_checkout();
+        let local = dir.path().join(LOCAL_CONFIG_FILE_NAME);
+        let fifo = dir.path().join("fifo");
+        let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let large = dir.path().join("large");
+        fs::write(
+            &large,
+            vec![b'#'; usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        for base_readable in [true, false] {
+            if !base_readable {
+                fs::write(dir.path().join(CONFIG_FILE_NAME), [0xff, 0xfe]).unwrap();
+            }
+            for (target, why) in [
+                (Path::new("/dev/zero"), "not a regular file"),
+                (fifo.as_path(), "not a regular file"),
+                (large.as_path(), "larger than the"),
+            ] {
+                std::os::unix::fs::symlink(target, &local).unwrap();
+                let read = inspect_local_config(dir.path(), LOCAL_NOW);
+                let LocalLayerState::Rejected { reason } = &read.state else {
+                    panic!("{read:?}");
+                };
+                assert!(reason.contains(why), "{reason}");
+                assert_eq!(read.hash, None);
+                fs::remove_file(&local).unwrap();
+            }
+        }
+    }
+
+    /// A rejected layer is hashed whatever rejects it, so an edit of it
+    /// that keeps the reason is a new read.
+    #[test]
+    fn a_rejected_layer_is_hashed_so_an_edit_is_seen() {
+        let dir = local_checkout();
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[disk\n").unwrap();
+        let local = dir.path().join(LOCAL_CONFIG_FILE_NAME);
+        let mut hashes = Vec::new();
+        for text in ["[disk]\nreserve = '12%'\n", "[disk]\nreserve = '13%'\n"] {
+            let text = format!("{LOCAL_VALID}{text}");
+            fs::write(&local, &text).unwrap();
+            let read = inspect_local_config(dir.path(), LOCAL_NOW);
+            let LocalLayerState::Rejected { reason } = &read.state else {
+                panic!("{read:?}");
+            };
+            assert!(
+                reason.contains("the committed dagq.toml does not parse"),
+                "{reason}"
+            );
+            assert_eq!(
+                read.hash.as_deref(),
+                Some(crate::domain::replan_snapshot::sha256(text.as_bytes()).as_str())
+            );
+            hashes.push((reason.clone(), read.hash));
+        }
+        assert_eq!(hashes[0].0, hashes[1].0);
+        assert_ne!(hashes[0].1, hashes[1].1);
+    }
+
+    /// `redundant` and the comparison of committed values agree with the
+    /// parser: for each allowed key, with the companion keys its table
+    /// needs, the committed spelling in `dagq.toml` and the layer's in
+    /// `dagq.local.toml` are one value exactly when `parse_config` reads the
+    /// two whole files, written out by hand here, to the same value. Each
+    /// type the allowed tables read (integer, string, percentage, size,
+    /// string array, a KPI target's number) has a pair the parser reads as
+    /// the same and a pair it reads apart; the read's comparer, which a
+    /// committed value's change is judged with, gives the same answer.
+    #[test]
+    fn local_layer_values_compare_as_the_parser_takes_them() {
+        type Value = fn(&Config) -> String;
+        let stall: Value = |config| format!("{:?}", config.stall.idle_without_receipt_secs);
+        let reserve: Value = |config| format!("{:?}", config.disk.reserve);
+        let run_size: Value = |config| format!("{:?}", config.disk.run_size);
+        let light: Value = |config| {
+            format!(
+                "{:?}",
+                config
+                    .supervisor
+                    .light_changes()
+                    .values()
+                    .iter()
+                    .map(|change| change.as_str())
+                    .collect::<Vec<_>>()
+            )
+        };
+        let target: Value = |config| format!("{:?}", config.kpi.as_ref().map(|kpi| &kpi.targets));
+        let tasks = "[tasks]\nchanges = [\"feature\", \"docs\", \"config\"]\n";
+        let fixed = "estimate = 'fixed'\n";
+        let fix = "change = \"fix\"\n";
+        let phase = "kpi.targets.\"phase.work\"";
+        // (table, companion lines, key, committed, layer, read, same)
+        let cases: Vec<(&str, &str, &str, &str, &str, Value, bool)> = vec![
+            (
+                "stall",
+                "",
+                "idle_without_receipt_secs",
+                "1000",
+                "1_000",
+                stall,
+                true,
+            ),
+            (
+                "stall",
+                "",
+                "idle_without_receipt_secs",
+                "1_000",
+                "1000 # same",
+                stall,
+                true,
+            ),
+            (
+                "stall",
+                "",
+                "idle_without_receipt_secs",
+                "1000",
+                "1001",
+                stall,
+                false,
+            ),
+            ("disk", "", "reserve", "'5%'", "\"5%\"", reserve, true),
+            ("disk", "", "reserve", "'5%'", "'5.0%'", reserve, true),
+            ("disk", "", "reserve", "'5%'", "'6%'", reserve, false),
+            (
+                "disk",
+                fixed,
+                "run_size",
+                "'8GiB'",
+                "'8192MiB'",
+                run_size,
+                true,
+            ),
+            (
+                "disk", fixed, "run_size", "'8GiB'", "'9GiB'", run_size, false,
+            ),
+            (
+                "supervisor",
+                "",
+                "light_changes",
+                "[\"docs\"]",
+                "['docs']",
+                light,
+                true,
+            ),
+            (
+                "supervisor",
+                "",
+                "light_changes",
+                "[\"docs\"]",
+                "[ \"docs\" , ]",
+                light,
+                true,
+            ),
+            (
+                "supervisor",
+                "",
+                "light_changes",
+                "[\"docs\"]",
+                "[\"docs\", \"config\"]",
+                light,
+                false,
+            ),
+            (phase, fix, "max", "1", "1.0", target, true),
+            (phase, fix, "max", "1", "2", target, false),
+        ];
+        let dir = local_checkout();
+        for (table, companions, key, committed, local, value, same) in cases {
+            let file = |text: &str| format!("{tasks}[{table}]\n{companions}{key} = {text}\n");
+            // The parser's own reading of each whole file is the baseline.
+            let parsed_committed = value(&parse_config(&file(committed)).unwrap());
+            let parsed_local = value(&parse_config(&file(local)).unwrap());
+            assert_eq!(
+                parsed_committed == parsed_local,
+                same,
+                "{committed} {local}"
+            );
+            fs::write(dir.path().join(CONFIG_FILE_NAME), file(committed)).unwrap();
+            fs::write(
+                dir.path().join(LOCAL_CONFIG_FILE_NAME),
+                format!("{LOCAL_VALID}[{table}]\n{key} = {local}\n"),
+            )
+            .unwrap();
+            let read = inspect_local_config(dir.path(), LOCAL_NOW);
+            assert_eq!(read.state, LocalLayerState::Effective, "{local}: {read:?}");
+            let shown = read.keys.iter().find(|shown| shown.key == key).unwrap();
+            assert_eq!(shown.redundant(), same, "{committed} {local}: {shown:?}");
+            assert_eq!(
+                read.values.same(table, key, Some(committed), Some(local)),
+                same,
+                "{committed} {local}"
+            );
+            // An unquoted value is shown as written, without its comment.
+            if !local.starts_with(['\'', '"']) {
+                assert_eq!(
+                    shown.local,
+                    local.split('#').next().unwrap().trim(),
+                    "{shown:?}"
+                );
+            }
+        }
+    }
+
+    /// A key is compared in the configuration the layer makes, not in the
+    /// committed one alone: where the committed `estimate = 'recent'`
+    /// ignores `run_size` and the layer sets `estimate = 'fixed'`, the
+    /// layer's `run_size` counts. The baseline is `parse_config` of whole
+    /// files written out by hand: the layer's line is redundant exactly when
+    /// the merged file and the merged file without the line read the same,
+    /// and a landing's change of the committed size is a change the tracker
+    /// records once.
+    #[test]
+    fn a_key_is_compared_in_the_configuration_the_layer_makes() {
+        use crate::domain::local_config::{LocalLayerChange, LocalLayerTracker};
+        let committed = |size: &str| format!("[disk]\nestimate = 'recent'\nrun_size = {size}\n");
+        let merged = |size: &str| format!("[disk]\nestimate = 'fixed'\nrun_size = {size}\n");
+        // The committed configuration reads the two sizes the same; the
+        // layer's reads them apart.
+        assert_eq!(
+            parse_config(&committed("'8GiB'")).unwrap(),
+            parse_config(&committed("'9GiB'")).unwrap()
+        );
+        assert_ne!(
+            parse_config(&merged("'8GiB'")).unwrap(),
+            parse_config(&merged("'9GiB'")).unwrap()
+        );
+        let dir = local_checkout();
+        fs::write(dir.path().join(CONFIG_FILE_NAME), committed("'8GiB'")).unwrap();
+        let local = dir.path().join(LOCAL_CONFIG_FILE_NAME);
+        for size in ["'9GiB'", "'8192MiB'"] {
+            // Without the layer's run_size line, the committed '8GiB' is used.
+            let redundant =
+                parse_config(&merged(size)).unwrap() == parse_config(&merged("'8GiB'")).unwrap();
+            fs::write(
+                &local,
+                format!("{LOCAL_VALID}[disk]\nestimate = 'fixed'\nrun_size = {size}\n"),
+            )
+            .unwrap();
+            let read = inspect_local_config(dir.path(), LOCAL_NOW);
+            assert_eq!(read.state, LocalLayerState::Effective, "{read:?}");
+            let key = |name: &str| {
+                read.keys
+                    .iter()
+                    .find(|key| key.key == name)
+                    .unwrap()
+                    .clone()
+            };
+            assert_eq!(key("run_size").redundant(), redundant, "{size}");
+            assert!(!key("estimate").redundant());
+            assert!(
+                !read
+                    .values
+                    .same("disk", "run_size", Some("'8GiB'"), Some("'9GiB'"))
+            );
+        }
+        let mut tracker = LocalLayerTracker::default();
+        let first = tracker.observe(inspect_local_config(dir.path(), LOCAL_NOW), LOCAL_NOW);
+        assert_eq!(first.unwrap().change, LocalLayerChange::Effective);
+        fs::write(dir.path().join(CONFIG_FILE_NAME), committed("'9GiB'")).unwrap();
+        let landed = tracker
+            .observe(inspect_local_config(dir.path(), LOCAL_NOW), LOCAL_NOW)
+            .unwrap();
+        assert_eq!(landed.change, LocalLayerChange::CommittedChanged);
+        assert_eq!(landed.committed_changes.len(), 1, "{landed:?}");
+        assert_eq!(landed.committed_changes[0].key, "run_size");
+        assert!(
+            tracker
+                .observe(inspect_local_config(dir.path(), LOCAL_NOW), LOCAL_NOW)
+                .is_none()
+        );
+    }
+
+    /// The read keeps a value without its comment, however long, a `#` in
+    /// a string kept (the parser's reading of the same line is the
+    /// baseline), and a rejection's reason cut to [`REASON_CHARS`].
+    #[test]
+    fn the_read_keeps_values_without_comments_and_bounds_its_reason() {
+        use crate::domain::local_config::REASON_CHARS;
+        let dir = local_checkout();
+        let comment = "#".repeat(1_100 * 1024);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[ci_watch]\nworkflow = 'CI'\nscheduled_workflows = ['a#b'] # committed\n[stall]\nidle_without_receipt_secs = 100 # c\n",
+        )
+        .unwrap();
+        let local = dir.path().join(LOCAL_CONFIG_FILE_NAME);
+        fs::write(
+            &local,
+            format!(
+                "{LOCAL_VALID}[stall]\nidle_without_receipt_secs = 200 {comment}\n[ci_watch]\nscheduled_workflows = ['a#b', \"c#d\"] # x\n"
+            ),
+        )
+        .unwrap();
+        let read = inspect_local_config(dir.path(), LOCAL_NOW);
+        assert_eq!(read.state, LocalLayerState::Effective, "{:?}", read.state);
+        let key = |name: &str| read.keys.iter().find(|key| key.key == name).unwrap();
+        assert_eq!(key("idle_without_receipt_secs").local_text, "200");
+        assert_eq!(
+            key("idle_without_receipt_secs").committed_text.as_deref(),
+            Some("100")
+        );
+        assert_eq!(key("scheduled_workflows").local_text, "['a#b', \"c#d\"]");
+        assert_eq!(
+            key("scheduled_workflows").committed_text.as_deref(),
+            Some("['a#b']")
+        );
+        let parsed = parse_config(&format!(
+            "[ci_watch]\nworkflow = 'CI'\nscheduled_workflows = {}\n",
+            key("scheduled_workflows").local_text
+        ))
+        .unwrap();
+        assert_eq!(
+            format!("{:?}", parsed.ci_watch),
+            format!(
+                "{:?}",
+                parse_config(
+                    "[ci_watch]\nworkflow = 'CI'\nscheduled_workflows = ['a#b', \"c#d\"] # x\n"
+                )
+                .unwrap()
+                .ci_watch
+            )
+        );
+        // A basic string's escaped quote does not end it.
+        assert_eq!(value_without_comment(r##""c\"#d" # x"##), r##""c\"#d""##);
+        fs::write(
+            &local,
+            format!(
+                "{LOCAL_VALID}[{}]\nx = 1\n",
+                "\u{1}".repeat(2 * 1024 * 1024)
+            ),
+        )
+        .unwrap();
+        let LocalLayerState::Rejected { reason } =
+            inspect_local_config(dir.path(), LOCAL_NOW).state
+        else {
+            panic!("a disallowed table is rejected");
+        };
+        assert!(
+            reason.starts_with("local table not allowed: "),
+            "{reason:.80}"
+        );
+        assert_eq!(reason.chars().count(), REASON_CHARS + 1);
+        assert!(reason.ends_with('…'));
+    }
+
+    /// A layer value long enough that its record passes
+    /// [`crate::domain::local_config::MAX_RECORD_BYTES`] (an underscore
+    /// spelling of 200 the parser takes) is cut in the record the
+    /// supervisor fits, and `status` still shows the committed value that a
+    /// landing then changes, from the record read back, as a supervisor's
+    /// event and `status`' read of it carry it.
+    #[test]
+    fn a_fitted_record_of_a_long_value_still_shows_a_committed_change() {
+        use crate::domain::local_config::{LocalLayerRecord, LocalLayerTracker, MAX_RECORD_BYTES};
+        let dir = local_checkout();
+        let base = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(&base, "[stall]\nidle_without_receipt_secs = 100\n").unwrap();
+        let long = format!("{}200", "0_".repeat(50_000));
+        let line = format!("[stall]\nidle_without_receipt_secs = {long}\n");
+        assert_eq!(
+            parse_config(&line).unwrap().stall.idle_without_receipt_secs,
+            200
+        );
+        fs::write(
+            dir.path().join(LOCAL_CONFIG_FILE_NAME),
+            format!("{LOCAL_VALID}{line}"),
+        )
+        .unwrap();
+        let mut tracker = LocalLayerTracker::default();
+        let mut record = tracker
+            .observe(inspect_local_config(dir.path(), LOCAL_NOW), LOCAL_NOW)
+            .unwrap();
+        let size = |record: &LocalLayerRecord| serde_json::to_vec(record).unwrap().len();
+        assert!(size(&record) > MAX_RECORD_BYTES);
+        record.fit();
+        assert!(size(&record) <= MAX_RECORD_BYTES);
+        let back = LocalLayerRecord::of(&serde_json::to_value(&record).unwrap()).unwrap();
+        fs::write(&base, "[stall]\nidle_without_receipt_secs = 150\n").unwrap();
+        let report = inspect_local_config(dir.path(), LOCAL_NOW)
+            .report(Some(&back), LOCAL_NOW)
+            .unwrap();
+        assert_eq!(
+            report["keys"][0]["committed_changed"],
+            serde_json::json!({"from": "100", "to": "150"})
+        );
+        fs::write(&base, "[stall]\nidle_without_receipt_secs = 1_00\n").unwrap();
+        let respelled = inspect_local_config(dir.path(), LOCAL_NOW)
+            .report(Some(&back), LOCAL_NOW)
+            .unwrap();
+        assert_eq!(
+            respelled["keys"][0]["committed_changed"],
+            serde_json::Value::Null
+        );
+    }
+
+    /// The rules applied and the layer recorded are of the same read: the
+    /// stall value applied is the one the read's key gives, for each
+    /// version of the file.
+    #[test]
+    fn the_operational_rules_and_the_layer_come_from_one_read() {
+        struct At(i64);
+        impl crate::application::Clock for At {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.0 as u64)
+            }
+            fn monotonic(&self) -> std::time::Instant {
+                std::time::Instant::now()
+            }
+        }
+        let dir = local_checkout();
+        for secs in [200, 300] {
+            fs::write(
+                dir.path().join(LOCAL_CONFIG_FILE_NAME),
+                format!("{LOCAL_VALID}[stall]\nidle_without_receipt_secs = {secs}\n"),
+            )
+            .unwrap();
+            let (rules, layer) = load_operational_snapshot(dir.path(), &At(LOCAL_NOW));
+            assert_eq!(rules.unwrap().stall.idle_without_receipt_secs, secs);
+            assert_eq!(layer.keys[0].local_text, secs.to_string());
+        }
+        let (rules, layer) = load_operational_snapshot(dir.path(), &At(LOCAL_NOW + 86_400_000));
+        assert_eq!(layer.state, LocalLayerState::Expired);
+        assert_ne!(rules.unwrap().stall.idle_without_receipt_secs, 300);
+    }
+
+    /// `doctor`'s check that the layer is ignored judges as Git does: the
+    /// gitignore patterns (`**`, classes with ranges and `[:name:]`,
+    /// escapes, anchoring, directories only, the case folding of
+    /// `core.ignoreCase`), the last match of a source deciding, and the root
+    /// `.gitignore` before `info/exclude` before `core.excludesFile`. Each
+    /// expectation is what `git check-ignore` (2.54) answers for the same
+    /// `.gitignore`, with `core.ignoreCase` false and true.
+    #[test]
+    fn local_layer_is_ignored_as_git_judges_it() {
+        let dir = local_checkout();
+        let home = tempfile::tempdir().unwrap();
+        let ignored = || local_config_ignored_with(dir.path(), Some(home.path()), None).unwrap();
+        assert!(!ignored());
+        // (patterns, ignored, ignored under core.ignoreCase)
+        for (patterns, expected, folded) in [
+            ("dagq.local.toml\n", true, true),
+            ("/dagq.local.toml\n", true, true),
+            ("**/dagq.local.toml\n", true, true),
+            ("*.local.toml\n", true, true),
+            ("dagq.local.tom?\n", true, true),
+            ("dagq.[kl]ocal.toml\n", true, true),
+            ("dagq.[!l]ocal.toml\n", false, false),
+            ("dagq.[^l]ocal.toml\n", false, false),
+            ("dagq.[]l]ocal.toml\n", true, true),
+            ("dagq.[!]x]ocal.toml\n", true, true),
+            ("dagq.[k-m]ocal.toml\n", true, true),
+            ("dagq.[K-M]ocal.toml\n", false, true),
+            ("dagq.[L]ocal.toml\n", false, false),
+            ("dagq.[\\k-m]ocal.toml\n", true, true),
+            ("dagq.[a-]ocal.toml\n", false, false),
+            ("dagq.[a-c-m]ocal.toml\n", false, false),
+            ("dagq.[[:lower:]]ocal.toml\n", true, true),
+            ("dagq.[[:upper:]]ocal.toml\n", false, true),
+            ("dagq.[[:alpha:][:digit:]]ocal.toml\n", true, true),
+            ("dagq[[:punct:]]local.toml\n", true, true),
+            ("dagq.[[:punct:]]local.toml\n", false, false),
+            ("dagq.[[:lower:]-z]ocal.toml\n", true, true),
+            ("dagq.[[:lower]ocal.toml\n", true, true),
+            ("dagq.[[:]ocal.toml\n", false, false),
+            ("dagq.[[:bogus:]]ocal.toml\n", false, false),
+            ("dagq.local.toml[\n", false, false),
+            ("*.toml\n!dagq.[[:lower:]]ocal.toml\n", false, false),
+            ("*\n!dagq.[[:bogus:]]ocal.toml\n", true, true),
+            ("DAGQ.LOCAL.TOML\n", false, true),
+            ("*.TOML\n", false, true),
+            ("\\DAGQ.local.toml\n", false, false),
+            ("\u{feff}dagq.local.toml\n", true, true),
+            ("dagq.local.toml\r\n", true, true),
+            ("dagq.local.toml\0junk\n", true, true),
+            ("dagq.local.toml   \n", true, true),
+            ("dagq.local.toml\\\\ \n", false, false),
+            ("\\!dagq.local.toml\n", false, false),
+            ("dagq.local.toml/\n", false, false),
+            ("sub/dagq.local.toml\n", false, false),
+            ("sub/**/dagq.local.toml\n", false, false),
+            ("dagq.toml\n", false, false),
+            ("dagq.local.toml\n!dagq.local.toml\n", false, false),
+            ("!dagq.local.toml\n*.toml\n", true, true),
+        ] {
+            fs::write(dir.path().join(".gitignore"), patterns).unwrap();
+            fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+            assert_eq!(ignored(), expected, "{patterns:?}");
+            fs::write(
+                dir.path().join(".git/config"),
+                "[core]\nbare = false\n\tignorecase = true\n",
+            )
+            .unwrap();
+            assert_eq!(ignored(), folded, "{patterns:?} under ignoreCase");
+        }
+        // The repository's ignoreCase is over the user's; a key without a
+        // value is true.
+        fs::write(dir.path().join(".gitignore"), "DAGQ.local.toml\n").unwrap();
+        fs::write(home.path().join(".gitconfig"), "[core]\n\tignorecase\n").unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        assert!(ignored());
+        fs::write(
+            dir.path().join(".git/config"),
+            "[core]\n\tignoreCase = false\n",
+        )
+        .unwrap();
+        assert!(!ignored());
+        fs::remove_file(home.path().join(".gitconfig")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        // A symlinked .gitignore is not followed, as Git does not.
+        fs::write(home.path().join("linked"), "dagq.local.toml\n").unwrap();
+        fs::remove_file(dir.path().join(".gitignore")).unwrap();
+        std::os::unix::fs::symlink(home.path().join("linked"), dir.path().join(".gitignore"))
+            .unwrap();
+        assert!(!ignored());
+        fs::remove_file(dir.path().join(".gitignore")).unwrap();
+        // A match in .gitignore decides before info/exclude, either way.
+        fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        fs::write(dir.path().join(".git/info/exclude"), "dagq.local.toml\n").unwrap();
+        fs::write(dir.path().join(".gitignore"), "!dagq.local.toml\n").unwrap();
+        assert!(!ignored());
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        assert!(ignored());
+        // core.excludesFile, of the user's config, then of the repository;
+        // a key may follow its header, a comment ends a value, and a
+        // relative path is of the root.
+        fs::write(dir.path().join(".git/info/exclude"), "").unwrap();
+        fs::write(home.path().join("global-ignore"), "dagq.local.toml\n").unwrap();
+        fs::write(
+            home.path().join(".gitconfig"),
+            "[core] excludesFile = ~/global-ignore ; the user's\n",
+        )
+        .unwrap();
+        assert!(ignored());
+        fs::write(dir.path().join(".git/info/exclude"), "!dagq.local.toml\n").unwrap();
+        assert!(!ignored());
+        fs::write(dir.path().join(".git/info/exclude"), "").unwrap();
+        fs::write(
+            dir.path().join(".git/config"),
+            "[core]\n\tbare = false\n\texcludesfile = \"/nonexistent/ignore\"\n",
+        )
+        .unwrap();
+        assert!(!ignored());
+        fs::write(dir.path().join("relative-ignore"), "dagq.local.toml\n").unwrap();
+        fs::write(
+            dir.path().join(".git/config"),
+            "[core]\n\texcludesFile = relative-ignore\n",
+        )
+        .unwrap();
+        assert!(ignored());
+        // The default excludes file is under the XDG config directory.
+        fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        fs::remove_file(home.path().join(".gitconfig")).unwrap();
+        fs::create_dir_all(home.path().join(".config/git")).unwrap();
+        fs::write(home.path().join(".config/git/ignore"), "dagq.local.toml\n").unwrap();
+        assert!(ignored());
+    }
+
+    /// The ignore check reads Git's configs as Git does: a BOM, a value's
+    /// comment, quotes, whitespace and `\` line joins, `:(optional)`,
+    /// booleans, `/dev/null` as no ignore file, `[include]` and
+    /// `[includeIf]` with `gitdir:`, `gitdir/i:` and `onbranch:` (another
+    /// condition never holds), and a config Git refuses or a `hasconfig:`
+    /// include as the error. Each expectation is what `git check-ignore`
+    /// (2.54) answers for the same files, an error where Git fails.
+    #[test]
+    fn the_ignore_check_reads_git_configs_as_git_does() {
+        let dir = local_checkout();
+        let home = tempfile::tempdir().unwrap();
+        let ignored = || local_config_ignored_with(dir.path(), Some(home.path()), None);
+        let user = home.path().join(".gitconfig");
+        let ig = home.path().join("ig");
+        fs::write(&ig, "dagq.local.toml\n").unwrap();
+        fs::write(home.path().join("my\tig"), "dagq.local.toml\n").unwrap();
+        fs::write(home.path().join("inc"), "[core]\n\texcludesFile = ~/ig\n").unwrap();
+        fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let home_dir = home.path().display().to_string();
+        let repo = dir.path().display().to_string();
+        let name = dir.path().file_name().unwrap().to_str().unwrap().to_owned();
+        let include_if = |condition: &str| format!("[includeIf \"{condition}\"]\n\tpath = ~/inc\n");
+        for (config, expected) in [
+            (
+                "[core]\n\texcludesFile = /dev/null\n".to_owned(),
+                Some(false),
+            ),
+            (
+                format!("[core]\n\texcludesFile = :(optional){home_dir}/ig\n"),
+                Some(true),
+            ),
+            (
+                format!("[core]\n\texcludesFile = {home_dir}/i\\\ng\n"),
+                Some(true),
+            ),
+            (
+                format!("[core]\n\texcludesFile = {home_dir}/my\tig\n"),
+                Some(true),
+            ),
+            (
+                format!("[core]\n\texcludesFile = {home_dir}/ig  ; c\n"),
+                Some(true),
+            ),
+            (
+                format!("[core]\n\texcludesFile = \"{home_dir}/ig\" # c\n"),
+                Some(true),
+            ),
+            ("[include]\n\tpath = ~/inc\n".to_owned(), Some(true)),
+            ("[include]\n\tpath = inc\n".to_owned(), Some(true)),
+            (include_if(&format!("gitdir:{repo}/")), Some(true)),
+            (include_if(&format!("gitdir:{name}/")), Some(true)),
+            (include_if("gitdir:/nowhere/"), Some(false)),
+            (
+                include_if(&format!("gitdir/i:{}/", repo.to_uppercase())),
+                Some(true),
+            ),
+            (
+                include_if(&format!("gitdir:{}/", repo.to_uppercase())),
+                Some(false),
+            ),
+            (include_if("onbranch:main"), Some(true)),
+            (include_if("onbranch:dev"), Some(false)),
+            (include_if("bogus:x"), Some(false)),
+            (include_if("hasconfig:remote.*.url:https://x/**"), None),
+            (format!("[core]\n\texcludesFile = \"{home_dir}/ig\n"), None),
+            (format!("[core]\n\texcludesFile = {home_dir}/i\\qg\n"), None),
+            ("[core]\n\texcludesFile\n".to_owned(), None),
+            ("[other]\n\tx = \"unterminated\n".to_owned(), None),
+        ] {
+            fs::write(&user, &config).unwrap();
+            assert_eq!(ignored().ok(), expected, "{config:?}: {:?}", ignored());
+        }
+        // ignoreCase of the user's config, for a .gitignore in another case.
+        fs::write(dir.path().join(".gitignore"), "DAGQ.LOCAL.TOML\n").unwrap();
+        for (config, expected) in [
+            ("\u{feff}[core]\n\tignorecase = true\n", Some(true)),
+            ("[core]\n\tignorecase = 1k\n", Some(true)),
+            ("[core]\n\tignorecase = 0x0\n", Some(false)),
+            ("[core]\n\tignorecase = \"tr\"ue\n", Some(true)),
+            ("[core]\n\tignorecase = maybe\n", None),
+        ] {
+            fs::write(&user, config).unwrap();
+            assert_eq!(ignored().ok(), expected, "{config:?}: {:?}", ignored());
+        }
+        // An include nested past Git's depth is the error.
+        fs::write(&user, "[include]\n\tpath = ~/.gitconfig\n").unwrap();
+        assert!(format!("{:#}", ignored().unwrap_err()).contains("deeper"));
+    }
+
+    /// A `.gitignore` line of any length is matched without recursion and
+    /// in work bounded by its length: 100 000 `**/` before a name that
+    /// does not match, a run of 100 000 stars, a 300 000-byte literal, and
+    /// 100 000 `**/` before the file's name, which matches. Each answer is
+    /// what `git check-ignore` (2.54) gives for the same line with 1 000
+    /// repetitions.
+    #[test]
+    fn a_long_gitignore_line_is_matched_without_recursion() {
+        let dir = local_checkout();
+        let home = tempfile::tempdir().unwrap();
+        let ignored = || local_config_ignored_with(dir.path(), Some(home.path()), None).unwrap();
+        for (line, expected) in [
+            (format!("{}never", "**/".repeat(100_000)), false),
+            (format!("{}.toml", "*".repeat(100_000)), true),
+            ("*a".repeat(100_000), false),
+            ("x".repeat(300_000), false),
+            (format!("{}dagq.local.toml", "**/".repeat(100_000)), true),
+        ] {
+            fs::write(dir.path().join(".gitignore"), format!("{line}\n")).unwrap();
+            assert_eq!(ignored(), expected, "{:.12}…", line);
+        }
+    }
+
+    /// The ignore check reads each of its files as `dagq.toml` is read: a
+    /// `.gitignore` that is a FIFO, an `info/exclude` that is a symlink to
+    /// `/dev/zero` or larger than [`MAX_CONFIG_BYTES`], a user's config
+    /// that is a FIFO and a `.git` that is one are not read on but are the
+    /// check's error with why, at once (the FIFO has no writer, so a read
+    /// would block); a missing file is none.
+    #[test]
+    fn the_ignore_check_reads_its_files_bounded_and_says_why_it_cannot() {
+        let dir = local_checkout();
+        let home = tempfile::tempdir().unwrap();
+        let ignored = || local_config_ignored_with(dir.path(), Some(home.path()), None);
+        let fifo = |path: &Path| {
+            let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        };
+        let refused = |why: &str, file: &str| {
+            let error = format!("{:#}", ignored().unwrap_err());
+            assert!(error.contains(why) && error.contains(file), "{error}");
+        };
+        assert!(!ignored().unwrap());
+        let gitignore = dir.path().join(".gitignore");
+        fifo(&gitignore);
+        refused("not a regular file", ".gitignore");
+        fs::remove_file(&gitignore).unwrap();
+
+        fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        let exclude = dir.path().join(".git/info/exclude");
+        std::os::unix::fs::symlink("/dev/zero", &exclude).unwrap();
+        refused("not a regular file", "exclude");
+        fs::remove_file(&exclude).unwrap();
+        let large = vec![b'#'; usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1];
+        fs::write(&exclude, &large).unwrap();
+        refused("larger than the", "exclude");
+        fs::remove_file(&exclude).unwrap();
+
+        fifo(&home.path().join(".gitconfig"));
+        refused("not a regular file", ".gitconfig");
+        fs::remove_file(home.path().join(".gitconfig")).unwrap();
+
+        let admin = dir.path().join("admin");
+        fs::rename(dir.path().join(".git"), &admin).unwrap();
+        fifo(&dir.path().join(".git"));
+        refused("not a regular file", ".git");
+        fs::remove_file(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git"), "gitdir: admin\n").unwrap();
+        fs::write(admin.join("info/exclude"), "dagq.local.toml\n").unwrap();
+        assert!(ignored().unwrap());
     }
 
     #[test]

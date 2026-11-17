@@ -1,0 +1,9 @@
+# The registry's boundary task 5109 gave (the format is in the header of
+# scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "local-config-layer-in-status-and-doctor"
+kind = "プロセス"
+test = "local_config::status_for_the_inbox_and_doctor_show_the_main_checkouts_local_layer"
+reason = "queue service の process が束縛された repository の main checkout の dagq.local.toml と dagq.toml を Git を起動せずに disk から読み、queue の最新の記録と合わせて status --role inbox と doctor の local_config に出すことは、実の CLI と service の process、実の Git repository の作業ファイルと index を通してしか確かめられない。既存の id は main checkout の作業ファイルを status と doctor が読む境界を代表しない。表示の中身と値の比べの判断は domain::local_config と infrastructure::run_env の unit test"
+task = 5109

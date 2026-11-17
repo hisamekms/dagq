@@ -79,14 +79,15 @@ fn operational_file(
 ) -> crate::application::supervise::repository_config::OperationalFile {
     std::sync::Arc::new(move || {
         use crate::application::supervise::repository_config::{
-            OperationalRules, next_operational_rules,
+            OperationalRead, OperationalRules, next_operational_rules,
         };
-        let read = crate::infrastructure::run_env::load_operational_rules(&checkout, &*clock)?;
-        Ok(next_operational_rules(
-            OperationalRules::default(),
-            flags,
-            Some(read),
-        ))
+        let (rules, layer) =
+            crate::infrastructure::run_env::load_operational_snapshot(&checkout, &*clock);
+        OperationalRead {
+            rules: rules
+                .map(|read| next_operational_rules(OperationalRules::default(), flags, Some(read))),
+            layer: Some(layer),
+        }
     })
 }
 

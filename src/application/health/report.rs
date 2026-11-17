@@ -736,6 +736,52 @@ pub fn doctor(
     })?)
 }
 
+/// `status`' and `doctor`'s `local_config`: the main checkout's
+/// `dagq.local.toml` as `read` finds it now (`now` in Unix milliseconds),
+/// compared with the newest `supervisor_local_config_changed` (`last`), in
+/// the shape [`crate::domain::local_config::LocalLayerRead::report`]
+/// gives; absent while there is no file. `ignored` is `doctor`'s check
+/// that Git ignores the file, `Err` with why when it is not known (an
+/// ignore file that cannot be read): `doctor` adds it as `ignored` and,
+/// when not ignored, a warning, the first of `warnings`; when not known,
+/// `ignored` is null, `ignore_error` the reason, and a warning says so,
+/// first.
+pub fn local_config(
+    read: &crate::domain::local_config::LocalLayerRead,
+    last: Option<&RunEvent>,
+    now: i64,
+    ignored: Option<std::result::Result<bool, String>>,
+) -> Option<Value> {
+    // The record is read as its type (a payload that does not read is no
+    // record): the comparison is a decision on another context's event.
+    let last =
+        last.and_then(|event| crate::domain::local_config::LocalLayerRecord::of(&event.payload));
+    let mut report = read.report(last.as_ref(), now)?;
+    let warning = match ignored {
+        None => None,
+        Some(Ok(ignored)) => {
+            report["ignored"] = json!(ignored);
+            (!ignored).then(|| {
+                "dagq.local.toml is not ignored by .gitignore: committing it disables the layer"
+                    .to_owned()
+            })
+        }
+        Some(Err(reason)) => {
+            report["ignored"] = Value::Null;
+            report["ignore_error"] = json!(reason);
+            Some(format!(
+                "cannot tell whether Git ignores dagq.local.toml: {reason}"
+            ))
+        }
+    };
+    if let Some(warning) = warning
+        && let Some(warnings) = report["warnings"].as_array_mut()
+    {
+        warnings.insert(0, json!(warning));
+    }
+    Some(report)
+}
+
 /// The sections `status` adds for `role` beyond [`status`]'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusSections {

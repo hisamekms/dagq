@@ -15,11 +15,15 @@ use super::*;
 impl Supervisor<'_> {
     /// Local files are reread before any resource measurement or claim. The
     /// compose reader resolves flags; failed reads preserve all three values.
-    fn reread_operational_rules(&mut self) {
+    /// The same read's local layer is then recorded when it changed
+    /// ([`Self::record_local_layer`]).
+    fn reread_operational_rules(&mut self) -> Result<()> {
         let Some(read) = &self.operational_file else {
-            return;
+            return Ok(());
         };
-        let loaded = match read() {
+        let crate::application::supervise::repository_config::OperationalRead { rules, layer } =
+            read();
+        let loaded = match rules {
             Ok(rules) => {
                 self.operational_error = None;
                 Some(rules)
@@ -45,6 +49,53 @@ impl Supervisor<'_> {
         self.stall = rules.stall;
         self.resume.config = rules.resume;
         self.host.set_repository_disk(rules.disk);
+        match layer {
+            Some(layer) => self.record_local_layer(layer),
+            None => Ok(()),
+        }
+    }
+
+    /// Record `supervisor_local_config_changed`
+    /// ([`crate::domain::local_config::LocalLayerRecord`]) when the local
+    /// layer's read differs from the pass before, with the `[stall]`,
+    /// `[disk]` and `[resume]` applied from the same read, fitted to one
+    /// request ([`crate::domain::local_config::LocalLayerRecord::fit`]). A record the
+    /// service did not take is kept and sent again under its identity
+    /// ([`crate::application::supervisor_service::resend`]): it is recorded
+    /// as far as this goes, and the change is not recorded again. Any other
+    /// failure keeps the read before and fails the pass.
+    fn record_local_layer(
+        &mut self,
+        layer: crate::domain::local_config::LocalLayerRead,
+    ) -> Result<()> {
+        let now = crate::application::unix_millis(self.generators.clock.system_time());
+        let before = self.local_tracker.clone();
+        let Some(mut record) = self.local_tracker.observe(layer, now) else {
+            return Ok(());
+        };
+        record.supervisor = Some(self.registration.token().to_string());
+        record.in_use = Some(json!({
+            "stall": self.stall,
+            "disk": self.host.disk_reader().config,
+            "resume": self.resume.config,
+        }));
+        // One event whatever the file holds: a request past the service's
+        // limit would be refused, not sent again, and fail the pass.
+        record.fit();
+        match self.queue.record_queue_event(
+            EventKind::SupervisorLocalConfigChanged,
+            serde_json::to_value(&record)?,
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) if crate::application::supervisor_service::resend::kept(&error) => {
+                warn!("{error:#}");
+                Ok(())
+            }
+            Err(error) => {
+                self.local_tracker = before;
+                Err(error)
+            }
+        }
     }
 
     /// Apply startup-only tables exactly once from the first good snapshot.
@@ -435,7 +486,7 @@ impl Supervisor<'_> {
             // `runtime_planners` takes effect without a restart (task 698,
             // task 941).
             let startup_missing = self.initialize_repository_rules()?;
-            self.reread_operational_rules();
+            self.reread_operational_rules()?;
             self.claim
                 .reread_limits(&*self.queue, self.registration.token())?;
             self.claim.repository_config_missing |= startup_missing;

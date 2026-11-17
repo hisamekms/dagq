@@ -507,6 +507,11 @@ event_kinds! {
     SupervisorHandedOff => "supervisor_handed_off",
     SupervisorHeartbeatFailed => "supervisor_heartbeat_failed",
     SupervisorHeartbeatRetried => "supervisor_heartbeat_retried",
+    /// A supervisor's read of the main checkout's `dagq.local.toml`
+    /// changed from its read before: the layer began, changed, expired, was
+    /// rejected or removed, or a committed value it overrides changed. The
+    /// payload's fields are in [`crate::domain::local_config`].
+    SupervisorLocalConfigChanged => "supervisor_local_config_changed",
     SupervisorAlive => "supervisor_alive",
     SupervisorStarted => "supervisor_started",
     SupervisorStopped => "supervisor_stopped",
@@ -774,6 +779,9 @@ impl EventKind {
                 // and why one stopped, which ends its supervisor.
                 | SupervisorHeartbeatRetried
                 | SupervisorHeartbeatFailed
+                // A change of the main checkout's uncommitted layer
+                // (ADR-t5108-1 decision 7).
+                | SupervisorLocalConfigChanged
                 | RunEnvChanged
                 // The sccache server the supervisor started, or failed to,
                 // outside any sandbox (ADR-t1215-1).
@@ -2196,6 +2204,10 @@ mod tests {
             (
                 EventKind::SupervisorHeartbeatRetried,
                 "supervisor_heartbeat_retried",
+            ),
+            (
+                EventKind::SupervisorLocalConfigChanged,
+                "supervisor_local_config_changed",
             ),
             (EventKind::SupervisorAlive, "supervisor_alive"),
             (EventKind::SupervisorStarted, "supervisor_started"),

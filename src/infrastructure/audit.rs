@@ -269,9 +269,10 @@ pub(super) fn administration(
         ),
         AdministrationFact::Lifecycle { operation, error } => {
             let config = bound_settings(tx)?.map(|bytes| super::queue_service::sha256_hex(&bytes));
+            let local = bound_local_hash(tx)?;
             (
                 (Sender::QueueService, "lifecycle"),
-                admin::service_lifecycle(*operation, *error, config.as_deref()),
+                admin::service_lifecycle(*operation, *error, config.as_deref(), local.as_deref()),
             )
         }
     };
@@ -376,6 +377,33 @@ pub(super) fn observe_settings(
 pub fn settings_snapshot(
     root: &std::path::Path,
 ) -> Result<crate::domain::audit::administration::SettingsSnapshot> {
+    settings_snapshot_at(root, now_millis())
+}
+
+/// The wall clock the audit's records of the settings read the local
+/// layer's expiry at; a unit test gives its thread a fixed instant instead
+/// (`tests::layer_clock_at`).
+fn now_millis() -> i64 {
+    #[cfg(test)]
+    if let Some(now) = TEST_LAYER_NOW.with(std::cell::Cell::get) {
+        return now;
+    }
+    crate::application::unix_millis(std::time::SystemTime::now())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The instant (Unix milliseconds) a unit test reads the local layer's
+    /// expiry at on its thread, instead of the wall clock.
+    static TEST_LAYER_NOW: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`settings_snapshot`] with the local layer read at `now` (Unix
+/// milliseconds).
+fn settings_snapshot_at(
+    root: &std::path::Path,
+    now: i64,
+) -> Result<crate::domain::audit::administration::SettingsSnapshot> {
     use crate::domain::audit::administration::{AGENTS_DIR, POLICY_KEY, SETTINGS_FILE};
     use crate::domain::replan_snapshot::sha256;
     fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
@@ -408,7 +436,28 @@ pub fn settings_snapshot(
         snapshot.insert(relative.to_string_lossy().into_owned(), sha256(&bytes));
     }
     snapshot.insert(POLICY_KEY.into(), audit::policy_version());
+    if let Some(hash) = local_settings_hash(root, now) {
+        snapshot.insert(
+            crate::domain::audit::administration::LOCAL_SETTINGS_FILE.into(),
+            hash,
+        );
+    }
     Ok(snapshot)
+}
+
+/// The hash of the main checkout `root`'s `dagq.local.toml` while it is
+/// used over its `dagq.toml` now (ADR-t5108-1): the same read the
+/// supervisor's settings use ([`super::run_env::inspect_local_config`]).
+fn local_settings_hash(root: &std::path::Path, now: i64) -> Option<String> {
+    super::run_env::inspect_local_config(root, now)
+        .effective_hash()
+        .map(str::to_owned)
+}
+
+/// [`local_settings_hash`] of the bound repository's main checkout,
+/// resolved as [`bound_settings`] resolves it.
+fn bound_local_hash(tx: &impl SqlRead) -> Result<Option<String>> {
+    Ok(bound_checkout(tx)?.and_then(|checkout| local_settings_hash(&checkout, now_millis())))
 }
 
 /// The bytes of the `dagq.toml` of the bound repository's main checkout,
@@ -417,16 +466,7 @@ pub fn settings_snapshot(
 /// or no main checkout (a bare repository, a separate Git directory),
 /// which reads no other directory's in its place; empty with no file.
 fn bound_settings(tx: &impl SqlRead) -> Result<Option<Vec<u8>>> {
-    let binding: Option<String> = tx
-        .query_row(
-            "SELECT git_common_dir FROM queue_repository LIMIT 1",
-            &[],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(checkout) = binding.and_then(|binding| {
-        super::adapters::main_checkout_from_files(std::path::Path::new(&binding))
-    }) else {
+    let Some(checkout) = bound_checkout(tx)? else {
         return Ok(None);
     };
     let path = checkout.join("dagq.toml");
@@ -435,6 +475,20 @@ fn bound_settings(tx: &impl SqlRead) -> Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(Vec::new())),
         Err(e) => Err(e).with_context(|| format!("read the settings {}", path.display())),
     }
+}
+
+/// The bound repository's main checkout as [`bound_settings`] reads it.
+fn bound_checkout(tx: &impl SqlRead) -> Result<Option<std::path::PathBuf>> {
+    let binding: Option<String> = tx
+        .query_row(
+            "SELECT git_common_dir FROM queue_repository LIMIT 1",
+            &[],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(binding.and_then(|binding| {
+        super::adapters::main_checkout_from_files(std::path::Path::new(&binding))
+    }))
 }
 
 pub(super) use crate::application::audit::count_refusal_failure;
@@ -759,7 +813,14 @@ fn binding_change(facts: &crate::domain::audit::LandingFacts, path: Option<&str>
     value
 }
 
-fn startup_input(at: String, config: &[u8]) -> SenderInput {
+fn startup_input(at: String, config: &[u8], local: Option<&str>) -> SenderInput {
+    let mut after = json!({
+        "operation": "audit_started", "dagq_version": crate::VERSION,
+        "config_hash": super::queue_service::sha256_hex(config),
+    });
+    if let Some(local) = local {
+        after["local_config_hash"] = json!(local);
+    }
     SenderInput {
         sender_seq: 1,
         at,
@@ -774,10 +835,7 @@ fn startup_input(at: String, config: &[u8]) -> SenderInput {
             reason: None,
         },
         change: Some(Change {
-            after: Some(json!({
-                "operation": "audit_started", "dagq_version": crate::VERSION,
-                "config_hash": super::queue_service::sha256_hex(config),
-            })),
+            after: Some(after),
             ..Change::default()
         }),
         correlation: Correlation::default(),
@@ -790,7 +848,8 @@ fn startup_input(at: String, config: &[u8]) -> SenderInput {
 /// Runs before the first fenced state write, inside that transaction. An
 /// empty chain gets one start record, without reading or replaying events.
 /// The hash covers the dagq.toml bytes of the bound repository's main checkout
-/// (empty if absent, or with no main checkout to read it from).
+/// (empty if absent, or with no main checkout to read it from), and
+/// `local_config_hash` the dagq.local.toml used over it, if any.
 /// Old schemas remain usable by migration and compatibility inspection.
 pub(super) fn ensure_started(tx: &impl SqlWrite) -> Result<()> {
     let exists: bool = tx.query_row(
@@ -808,6 +867,7 @@ pub(super) fn ensure_started(tx: &impl SqlWrite) -> Result<()> {
         return Ok(());
     }
     let config = bound_settings(tx)?.unwrap_or_default();
+    let local = bound_local_hash(tx)?;
     let at = crate::application::timestamp(std::time::SystemTime::now());
     let caller = Caller {
         sender: Sender::QueueService,
@@ -821,7 +881,7 @@ pub(super) fn ensure_started(tx: &impl SqlWrite) -> Result<()> {
     };
     audit::append(
         &mut SqliteAudit(tx),
-        startup_input(at.clone(), &config),
+        startup_input(at.clone(), &config, local.as_deref()),
         caller,
         at,
     )?;
@@ -921,7 +981,7 @@ mod tests {
     fn input(n: u64) -> SenderInput {
         SenderInput {
             sender_seq: n,
-            ..startup_input("2026-11-13T00:00:00Z".into(), b"config")
+            ..startup_input("2026-11-13T00:00:00Z".into(), b"config", None)
         }
     }
     fn fixture() -> (tempfile::TempDir, SqliteQueue) {
@@ -1740,6 +1800,123 @@ mod tests {
         assert_eq!(snapshot["authorization_policy"], audit::policy_version());
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(settings_snapshot(empty.path()).unwrap().len(), 1);
+    }
+
+    /// While the main checkout's dagq.local.toml is used, the settings'
+    /// snapshot holds its hash beside the dagq.toml's; expired, it does not.
+    #[test]
+    fn the_settings_snapshot_hashes_a_used_local_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        std::fs::write(dir.path().join("dagq.toml"), "[disk]\nreserve = '5%'\n").unwrap();
+        let local = "[local]\nexpires_at = '2027-01-16T08:00:00Z'\n[disk]\nreserve = '12%'\n";
+        std::fs::write(dir.path().join("dagq.local.toml"), local).unwrap();
+        let now = 1_800_000_000_000;
+        let snapshot = settings_snapshot_at(dir.path(), now).unwrap();
+        assert_eq!(
+            snapshot["dagq.local.toml"],
+            crate::domain::replan_snapshot::sha256(local.as_bytes())
+        );
+        assert!(snapshot.contains_key("dagq.toml"));
+        let expired = settings_snapshot_at(dir.path(), now + 86_400_000).unwrap();
+        assert!(!expired.contains_key("dagq.local.toml"));
+    }
+
+    /// While it lives, the local layer's expiry is read at `now` (Unix
+    /// milliseconds) on this thread, as the audit's paths read it.
+    pub(super) fn layer_clock_at(now: i64) -> impl Drop {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_LAYER_NOW.with(|at| at.set(None));
+            }
+        }
+        TEST_LAYER_NOW.with(|at| at.set(Some(now)));
+        Reset
+    }
+
+    /// The audit's start and a lifecycle record of the bound repository take
+    /// the hash of its main checkout's dagq.local.toml while the layer is
+    /// used, through the entry each production write goes by: a queue's
+    /// first write transaction (the start) and `audit_administration` (`up`).
+    /// The expiry is read at a fixed instant given as a value; past it, the
+    /// next record has none. The expected hash is computed with another
+    /// SHA-256 implementation.
+    #[test]
+    fn the_start_and_lifecycle_records_hash_a_used_local_layer() {
+        use crate::domain::audit::administration::{AdministrationFact, LifecycleOperation};
+        let now = 1_800_000_000_000;
+        let _clock = layer_clock_at(now);
+        let bind = |q: &SqliteQueue, repo: &std::path::Path| {
+            q.conn
+                .execute(
+                    "INSERT INTO queue_repository (singleton,git_common_dir) VALUES (1,?1)",
+                    [repo.join(".git").to_str().unwrap()],
+                )
+                .unwrap();
+        };
+        let start_of = |q: &SqliteQueue| {
+            of(q, AuditAction::ServiceLifecycle)
+                .into_iter()
+                .find(|r| r.sender_id == "queue_service:audit-start")
+                .unwrap()
+                .change
+                .unwrap()
+                .after
+                .unwrap()
+        };
+        let ups = |q: &SqliteQueue| {
+            of(q, AuditAction::ServiceLifecycle)
+                .into_iter()
+                .filter(|r| r.sender_id == "queue_service:lifecycle")
+                .map(|r| r.change.unwrap().after.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let up = |q: &SqliteQueue| {
+            q.audit_administration(&AdministrationFact::Lifecycle {
+                operation: LifecycleOperation::Up,
+                error: None,
+            })
+            .unwrap();
+        };
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        std::fs::write(repo.path().join(".git/config"), "[core]\nbare = false\n").unwrap();
+        std::fs::write(repo.path().join("dagq.toml"), "[disk]\nreserve = '5%'\n").unwrap();
+        // Without a layer, the start holds no local hash.
+        let (_first_dir, first) = fixture();
+        bind(&first, repo.path());
+        first.write_tx("start").unwrap().commit().unwrap();
+        let after = start_of(&first);
+        assert!(after["config_hash"].is_string(), "{after}");
+        assert_eq!(after.get("local_config_hash"), None, "{after}");
+        // 2027-01-16T08:00:00Z, a day after `now`.
+        let local = "[local]\nexpires_at = '2027-01-16T08:00:00Z'\n[disk]\nreserve = '12%'\n";
+        std::fs::write(repo.path().join("dagq.local.toml"), local).unwrap();
+        let expected = ring::digest::digest(&ring::digest::SHA256, local.as_bytes())
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        // A queue whose chain starts now: its start holds the layer's hash.
+        let (_second_dir, second) = fixture();
+        bind(&second, repo.path());
+        second.write_tx("start").unwrap().commit().unwrap();
+        let after = start_of(&second);
+        assert_eq!(after["local_config_hash"], expected.as_str(), "{after}");
+        // `up` through the administration's entry holds it too.
+        up(&first);
+        let after = &ups(&first)[0];
+        assert_eq!(after["operation"], "up");
+        assert_eq!(after["local_config_hash"], expected.as_str(), "{after}");
+        assert!(after["config_hash"].is_string(), "{after}");
+        // Past its expiry, the next `up` holds none.
+        drop(_clock);
+        let _later = layer_clock_at(now + 86_400_000);
+        up(&first);
+        let after = &ups(&first)[1];
+        assert_eq!(after.get("local_config_hash"), None, "{after}");
     }
 
     #[test]

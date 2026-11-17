@@ -110,6 +110,7 @@ mod lifecycle_replace;
 mod lifecycle_service;
 mod lifecycle_up;
 mod live_alerts;
+mod local_config;
 mod location;
 mod main_checkout;
 mod node_samples;

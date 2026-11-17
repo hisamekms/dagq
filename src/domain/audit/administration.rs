@@ -11,13 +11,15 @@
 //! - [`schema_migrated`]: the queue's schema version before and after a
 //!   migration and the versions it applied.
 //! - [`service_lifecycle`]: `up` or `down` (who is the authenticated
-//!   principal of the record), with the hash of `dagq.toml` it ran with.
+//!   principal of the record), with the hash of `dagq.toml` it ran with
+//!   (and of the `dagq.local.toml` used over it).
 //! - [`settings_changed`]: the settings no command changes, so the
 //!   supervisor observes them every pass ([`SettingsSnapshot`]) and the
 //!   record is `observed`: the hash of each observed path before and
 //!   after, and the paths that changed. The observed paths are
-//!   [`SETTINGS_FILE`], every file under [`AGENTS_DIR`] and the compiled
-//!   authorization policy ([`POLICY_KEY`]).
+//!   [`SETTINGS_FILE`], every file under [`AGENTS_DIR`], the compiled
+//!   authorization policy ([`POLICY_KEY`]) and, while it is used,
+//!   [`LOCAL_SETTINGS_FILE`].
 //! - [`verify_due`]: a change of the DB that went around the CLI (and so
 //!   around the audit service) is found afterwards by the supervisor's
 //!   periodic check of the chain, every [`CHAIN_VERIFY_PERIOD`];
@@ -85,6 +87,10 @@ pub fn check_applies(seen: Option<i64>, newest: Option<i64>) -> bool {
 
 /// The repository's settings file the supervisor observes.
 pub const SETTINGS_FILE: &str = "dagq.toml";
+/// The uncommitted layer over [`SETTINGS_FILE`] (ADR-t5108-1), in a
+/// [`SettingsSnapshot`] only while it is used, so its hash names the
+/// values in effect.
+pub const LOCAL_SETTINGS_FILE: &str = "dagq.local.toml";
 /// The directory of the review agents' definitions the supervisor
 /// observes, every file under it.
 pub const AGENTS_DIR: &str = ".dagq/agents";
@@ -323,11 +329,13 @@ impl LifecycleFailure {
 /// record. `error` is a fixed failure code, never a child's stderr or an
 /// error chain. Uses settings whose `dagq.toml` hashes to `config_hash`
 /// (`None` when the bound repository has no main checkout to read it
-/// from).
+/// from), and, while the main checkout's `dagq.local.toml` is used over it
+/// (ADR-t5108-1), that file's hash as `local_config_hash`.
 pub fn service_lifecycle(
     operation: LifecycleOperation,
     error: Option<LifecycleFailure>,
     config_hash: Option<&str>,
+    local_config_hash: Option<&str>,
 ) -> SenderInput {
     let mut record = input(
         AuditAction::ServiceLifecycle,
@@ -341,6 +349,14 @@ pub fn service_lifecycle(
             digest: None,
         },
     );
+    if let Some(local) = local_config_hash
+        && let Some(after) = record
+            .change
+            .as_mut()
+            .and_then(|change| change.after.as_mut())
+    {
+        after["local_config_hash"] = json!(local);
+    }
     if let Some(error) = error {
         record.outcome = Outcome {
             status: OutcomeStatus::Failed,
@@ -542,12 +558,13 @@ mod tests {
             migrated.after,
             Some(json!({"schema_version": 16, "applied": [15, 16]}))
         );
-        let up = service_lifecycle(LifecycleOperation::Up, None, Some("h"));
+        let up = service_lifecycle(LifecycleOperation::Up, None, Some("h"), None);
         assert_eq!(up.action, AuditAction::ServiceLifecycle);
         assert_eq!(up.outcome.status, OutcomeStatus::Succeeded);
         let failed = service_lifecycle(
             LifecycleOperation::Down,
             Some(LifecycleFailure::OperationFailed),
+            None,
             None,
         );
         assert_eq!(failed.outcome.status, OutcomeStatus::Failed);
@@ -555,6 +572,12 @@ mod tests {
         assert_eq!(
             up.change.unwrap().after,
             Some(json!({"operation": "up", "config_hash": "h"}))
+        );
+        // A used dagq.local.toml's hash joins the dagq.toml's.
+        let layered = service_lifecycle(LifecycleOperation::Up, None, Some("h"), Some("l"));
+        assert_eq!(
+            layered.change.unwrap().after,
+            Some(json!({"operation": "up", "config_hash": "h", "local_config_hash": "l"}))
         );
     }
 }

@@ -1391,6 +1391,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         stall: settings.stall,
         operational_file: ports.operational_file.clone(),
         operational_error: None,
+        local_tracker: Default::default(),
         repository_startup_file: ports.repository_startup_file.clone(),
         wrapper_setting_warned: false,
         agent_eval: None,
@@ -1701,6 +1702,8 @@ struct Supervisor<'a> {
     stall: StallConfig,
     operational_file: Option<super::repository_config::OperationalFile>,
     operational_error: Option<String>,
+    /// The last read of the local layer, which the next is compared with.
+    local_tracker: crate::domain::local_config::LocalLayerTracker,
     repository_startup_file: Option<super::repository_config::RepositoryStartupFile>,
     /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
     /// was warned of (ADR-t1433-3 decision 2).
