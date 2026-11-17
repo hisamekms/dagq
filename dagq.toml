@@ -6,7 +6,8 @@
 # 依存 crate の compile の結果を sccache で run 間に共有する（ADR-0049 の決定 6・7）。
 # target は run ごとの worktree の target/ のまま。CARGO_TARGET_DIR を run ごとの値にすると
 # sccache の鍵に入って当たらなくなり、共有すると test と coverage の関門が誤るので置かない。
-# CARGO_INCREMENTAL も変えない（切っても run 間の hit は増えず、worker の繰り返しの build が遅くなる）。
+# worker の build の CARGO_INCREMENTAL は変えず、着地の検証だけを [landing_verification] の設定で
+# incremental なしにする（ADR-t5177-1）。
 # sccache は人が `mise use -g sccache` で入れ、~/.local/bin/sccache に mise の shim への link を置く。
 # 見つからなければ up・claim・integrate が止まり、inbox に install tool が出る（決定 8・9）。
 RUSTC_WRAPPER = "sccache"
@@ -174,6 +175,12 @@ warn_before_hours = 12
 # [landing_verification] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1926 を含んでから足した。
 replaces = ["cargo llvm-cov nextest", "cargo llvm-cov --locked --fail-under-lines 80"]
 command = "sh scripts/landing-it.sh"
+# 着地の検証の前に run の incremental を消し、検証を incremental なしで流す（ADR-t5177-1）。
+# 人の決定（request 347、2026-11-17）で、Spike 4919 を測らずに本番で on にし、着地の印の前後で測る。
+# 着地の検証の時間が +25% 超か、着地の検証が落ちた後の worker の手直しの最初の build が 1.5 倍超なら off に戻す。
+# 測定結果と採否は後続の測定 task が docs/plans/landing-non-incremental-measurement.md に書く。
+# この key を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 5177 を含んでから足した。
+non_incremental = true
 
 [fresh_session]
 # worker の差し戻し・needs_session の resume・triage の resume で、直前の turn の peak_context（token 数）がこの値を超えていたら、
