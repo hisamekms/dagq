@@ -14,6 +14,8 @@ related:
 
 # taskとgoalとfindingの属性の記録
 
+[実験の観測](agent-experiment-evidence.md)。
+
 群と役割の割当参照の境界は[Agent比較実験](agent-experiments.md)（実装前の地図）を読む。
 
 `stats`・`kpi`・`report`が状態の表から読むtaskとgoalの属性を、計測の層がEventStoreだけから作れるよう、状態の変更と同じtransactionで新しい値をeventに書く（[計測](measurement.md)の「SSOTとビュー」、ADR-t1662-2）。

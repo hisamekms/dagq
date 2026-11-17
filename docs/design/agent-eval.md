@@ -33,10 +33,10 @@ related:
 
 # agentのeval
 
+[実験の観測](agent-experiment-evidence.md)。
+
 reviewのagentが正しく判定しているかを、規則コードごとの陽性・陰性のケースと閾値で測る仕組み。
 workerもjobもLLMのCLIを直接打たない。
-
-> 欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、定義を切らない例外は[ADR-t1869-1](../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。
 
