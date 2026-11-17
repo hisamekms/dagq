@@ -60,12 +60,12 @@ runtime_planners = 2
 # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
 # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
 parallel = 3
-# 着地の順番を待つだけの run が空けた枠で claim してよい軽い change（ADR-t1591-1、goal 104。振る舞いは
-# docs/design/supervisor-lifecycle/claim-hold.md の「着地待ちが空けた軽い枠」、値は下の [tasks] changes の中のもの）。
-# 着地は直列なので slot が着地待ちで埋まり、作業中の worker が 0 で claim が止まった（2026-10-03 23:36 JST）。
-# docs と config は直近 7 日の着地で作業が短く verify も無いので軽くする（docs n=32 作業中央 4 分 / p90 12・verify 0、
-# config n=11 作業中央 3 分 / p90 6・verify 0）。measure は verify 0 でも作業 p90 140 分なので入れない。
-# 軽い枠で claim されるのは --paths を宣言した task だけ（規則は docs/development/task-registration.md の「change」）。
+# repository が軽いと分類する change（値は下の [tasks] changes の中のもの。意味は src/domain/light_slots.rs の LightChanges）。
+# claim の枠は開かず、claim の可否は change によらず worker の slot の空きで決まる（ADR-t5107-1、
+# docs/design/supervisor-lifecycle/claim-hold.md の「workerのslotと着地の列」）。--paths の宣言が無い task は軽く分類しない。
+# 値は軽い枠の導入時（ADR-t1591-1）に、その時点の直近 7 日の着地で作業が短く verify も無い docs と config を選んだもの
+# （docs n=32 作業中央 4 分 / p90 12・verify 0、config n=11 作業中央 3 分 / p90 6・verify 0）。
+# measure は verify 0 でも作業 p90 140 分だったので含めなかった。
 # light_changes を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1591 を含んでから足した。
 light_changes = ["docs", "config"]
 # slot を持てる Spike の数（goal 96、ADR-t1487-2。振る舞いは docs/design/supervisor-lifecycle/claim-hold.md の
