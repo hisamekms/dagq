@@ -1489,8 +1489,12 @@ enum Command {
         id: i64,
     },
     /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks, the open planning requests (not for a planner) and the event cursor, without changing anything.
-    /// `claim_hold` is the hold on the whole queue's claims in place now (its reason, `since`,
-    /// value, threshold, message and, for the disk, its need's breakdown), null while none is.
+    /// `claim_hold` is the hold on the whole queue's claims in place now, null while none is.
+    /// Its reason and `since` come from the `claim_held` record. While a live supervisor holds
+    /// claims for disk space, `value`, `threshold`, `disk` (the need's breakdown), `message` and
+    /// `disk_status` come from that supervisor's latest pass, not a copy of `claim_held`.
+    /// Otherwise, or when no live disk reading is available, they remain as recorded in
+    /// `claim_held`.
     /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
     /// (it may repeat one). A run's `progress.phase` is the phase it last recorded
     /// (`run_phase_changed`) and `since` when; a run with no phase recorded has a null phase and
