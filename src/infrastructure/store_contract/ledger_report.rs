@@ -509,6 +509,7 @@ pub(crate) fn ledger_report_past_a_target_s_ends_with<S: ContractStore, F: Fn() 
 /// [`ledger_report_past_a_target_s_ends`] of
 /// [`super::ledger_queue_lives::cycles_log`] with 30 and `large` closes and
 /// reopenings of the task before the range, and no other unit.
+#[cfg(test)]
 pub(crate) fn ledger_report_past_a_task_s_cycles<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
     large: usize,

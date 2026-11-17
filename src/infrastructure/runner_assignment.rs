@@ -1,10 +1,11 @@
-//! SQLite composition of selection, claim, run transitions and fenced runner
-//! leases. One write entry owns all of them, including authentication recheck.
-//! Postgres composition is supplied separately; no local supervisor calls here.
+//! Shared SQLite and Postgres composition of selection, claim, run transitions
+//! and fenced runner leases. One write entry owns all of them, including
+//! authentication recheck.
+//! Both adapters use this transaction boundary; no local supervisor calls here.
 use super::{
     runner_leases, runtime_store,
-    sql_exec::{SqlRead, TransactionEntries, sql_params},
-    sqlite::SqliteQueue,
+    sql_exec::{CommitTransaction, SqlRead, TransactionEntries, sql_params},
+    store_queue::StoreQueue,
     task_store,
 };
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// `claim` comes from the service backend's main-head and rules ports,
     /// outside the transaction, never from runner params. Rechecking the token
     /// here closes revocation races. A failed claim/grant/report drops this one transaction without any partial write.
@@ -73,7 +74,9 @@ impl SqliteQueue {
                 )?;
                 let run = match outcome {
                     ClaimOutcome::Claimed { run } => Some(*run),
-                    ClaimOutcome::NoReadyTask => returned_candidate(&tx, &runner, &held, now)?,
+                    ClaimOutcome::NoReadyTask => {
+                        Self::returned_candidate(&tx, &runner, &held, now)?
+                    }
                 };
                 let Some(run) = run else {
                     // No work: do not commit incidental investigation refreshes.
@@ -170,62 +173,62 @@ impl SqliteQueue {
         tx.commit()?;
         Ok(result)
     }
-}
 
-fn returned_candidate(
-    tx: &impl super::sql_exec::SqlWrite,
-    runner: &crate::domain::runner_registration::Runner,
-    held: &crate::domain::claim_order::ClaimHolds,
-    now: i64,
-) -> Result<Option<TaskRun>> {
-    let ids: Vec<String> = tx.query_map(
+    fn returned_candidate(
+        tx: &impl super::sql_exec::SqlWrite,
+        runner: &crate::domain::runner_registration::Runner,
+        held: &crate::domain::claim_order::ClaimHolds,
+        now: i64,
+    ) -> Result<Option<TaskRun>> {
+        let ids: Vec<String> = tx.query_map(
         "SELECT l.run_id FROM runner_leases l JOIN task_runs r ON r.id=l.run_id \
          WHERE (l.state <> 'held' OR l.expires_at_ms <= ?1) AND r.status IN ('claimed','starting','running') \
          AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=r.task_id AND h.released_at IS NULL) \
          ORDER BY r.created_at, r.id", sql_params![now], |r| r.get(0))?;
-    let investigations = if held.investigations.max.is_some() {
-        // Reuse the same live investigation projection as fresh claims.
-        super::investigations::refresh(tx, now / 1000)?
-    } else {
-        Default::default()
-    };
-    for id in ids {
-        let run =
-            runtime_store::stored_run(tx, &RunId::new(id.clone())?)?.context("run is missing")?;
-        let task: Task = super::store_rows::read_task(tx, run.task_id())?;
-        if !decision::eligible(runner, task.owner().person().map(|o| o.identity())) {
-            continue;
-        }
-        if task.wait_for_build() || held.classes.contains(&task.execution_class()) {
-            continue;
-        }
+        let investigations = if held.investigations.max.is_some() {
+            // Reuse the same live investigation projection as fresh claims.
+            super::investigations::refresh(tx, now / 1000)?
+        } else {
+            Default::default()
+        };
+        for id in ids {
+            let run = runtime_store::stored_run(tx, &RunId::new(id.clone())?)?
+                .context("run is missing")?;
+            let task: Task = super::store_rows::read_task(tx, run.task_id())?;
+            if !decision::eligible(runner, task.owner().person().map(|o| o.identity())) {
+                continue;
+            }
+            if task.wait_for_build() || held.classes.contains(&task.execution_class()) {
+                continue;
+            }
 
-        if investigations
-            .limit(
-                task.id(),
-                task.execution_class(),
-                task.goal_id(),
-                held.investigations,
-                now / 1000,
-            )
-            .is_some()
-        {
-            continue;
+            if investigations
+                .limit(
+                    task.id(),
+                    task.execution_class(),
+                    task.goal_id(),
+                    held.investigations,
+                    now / 1000,
+                )
+                .is_some()
+            {
+                continue;
+            }
+            // A reported head must remain reachable from a verified successor ref.
+            // The hand-over adapter creates that ref before a new generation grants.
+            let current = runner_leases::lease(tx, &id)?.context("lease is missing")?;
+            if !decision::reassignable(&current, &runner_leases::records(tx, &id)?, now) {
+                continue;
+            }
+            return Ok(Some(run));
         }
-        // A reported head must remain reachable from a verified successor ref.
-        // The hand-over adapter creates that ref before a new generation grants.
-        let current = runner_leases::lease(tx, &id)?.context("lease is missing")?;
-        if !decision::reassignable(&current, &runner_leases::records(tx, &id)?, now) {
-            continue;
-        }
-        return Ok(Some(run));
+        Ok(None)
     }
-    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::sql_exec::SqlWrite;
+    use super::super::{sql_exec::SqlWrite, sqlite::SqliteQueue};
     use super::*;
     use crate::{
         application::{RunnerLeaseStore, TaskStore},

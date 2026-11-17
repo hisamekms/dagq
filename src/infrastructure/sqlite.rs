@@ -3294,6 +3294,22 @@ mod store_contract_tests {
         contract(|open| store_contract::runner_leases(&open));
     }
     #[test]
+    fn assignment_heartbeat() {
+        contract(|open| store_contract::assignment_heartbeat(&open));
+    }
+    #[test]
+    fn assignment_stale_report() {
+        contract(|open| store_contract::assignment_stale_report(&open));
+    }
+    #[test]
+    fn assignment_expired_takeover() {
+        contract(|open| store_contract::assignment_expired_takeover(&open));
+    }
+    #[test]
+    fn assignment_invalid_token() {
+        contract(|open| store_contract::assignment_invalid_token(&open));
+    }
+    #[test]
     fn image_digests() {
         contract(|open| store_contract::image_digests(&open));
     }

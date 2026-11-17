@@ -763,6 +763,7 @@ pub(crate) fn ends_log(settled: usize) -> Log {
 /// [`ends_log`] of no unit but [`REOPENED_TASK`]'s `cycles` snapshots,
 /// closes and reopenings, spread as [`log`] spreads its units: the periods
 /// the task ended before the range alone grow.
+#[cfg(test)]
 pub(crate) fn cycles_log(cycles: usize) -> Log {
     let units = (0..cycles)
         .map(|n| {

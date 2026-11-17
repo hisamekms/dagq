@@ -2,7 +2,8 @@
 //! Postgres CI example (ADR-t3986-1 decision 10). No application decisions.
 //! Each factory opens the same migrated, otherwise unused database. Cases
 //! run sequentially: business writes roll back except the fenced-write case,
-//! which removes its row; leader cases release their last holder.
+//! which removes its row; leader cases release their last holder. Runner
+//! assignment cases retain their private runners, tasks and runs.
 mod cases;
 mod delegates;
 mod goal_landing_marks;
@@ -18,6 +19,7 @@ pub use ledger_queue_lives::*;
 pub(crate) mod ledger_range;
 pub(crate) mod ledger_report;
 mod related;
+mod runner_assignment;
 mod runner_leases;
 mod search;
 mod search_writes;
@@ -46,6 +48,7 @@ pub use ledger_report::{
     ledger_report_past_a_target_s_ends, ledger_report_past_the_queue_and_the_clocks_of,
 };
 pub use related::related_cases;
+pub use runner_assignment::*;
 pub use runner_leases::*;
 pub use search::{search_cases, short_non_ascii};
 pub use search_writes::{postgres_search_writes, source_search_writes};
@@ -190,6 +193,7 @@ pub(crate) fn fixed_history_units() -> usize {
 /// Size only the selected rollback case, never the committing prefix or
 /// its writes-alone replay. Restore the fixture size on errors and panics,
 /// too, and keep parallel test threads independent.
+#[cfg(test)]
 fn at_case_size<T>(small: bool, apart: &[&str], name: &str, run: impl FnOnce() -> T) -> T {
     if !small || !apart.contains(&name) {
         return run();
@@ -312,6 +316,22 @@ fn cases_sized<S: ContractStore, F: Fn() -> Result<S>, const SMALL: bool>()
             Case::Fixed(runner_credentials::<S, F>),
         ),
         ("runner leases", Case::Fixed(runner_leases::<S, F>)),
+        (
+            "assignment heartbeat",
+            Case::Fixed(assignment_heartbeat::<S, F>),
+        ),
+        (
+            "assignment stale report",
+            Case::Fixed(assignment_stale_report::<S, F>),
+        ),
+        (
+            "assignment expired takeover",
+            Case::Fixed(assignment_expired_takeover::<S, F>),
+        ),
+        (
+            "assignment invalid token",
+            Case::Fixed(assignment_invalid_token::<S, F>),
+        ),
         ("image digests", Case::Fixed(image_digests::<S, F>)),
         (
             "ledger open written with its rows",
@@ -614,10 +634,11 @@ fn cases_sized<S: ContractStore, F: Fn() -> Result<S>, const SMALL: bool>()
 /// Whether a case checks what it reads (`Run`) or makes its writes alone
 /// (`WritesAlone`): the same writes in the same transactions and commits,
 /// the write leader taken over as the same holders, and none of the reads
-/// that only its checks use. A case of [`writes_alone`] runs so.
+/// that only its checks use. The SQLite interference tests also run cases with writes alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Checks {
     Run,
+    #[cfg(test)]
     WritesAlone,
 }
 
@@ -631,6 +652,7 @@ impl Checks {
     pub(crate) fn read<T>(self, read: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
         match self {
             Self::Run => read().map(Some),
+            #[cfg(test)]
             Self::WritesAlone => Ok(None),
         }
     }
@@ -641,6 +663,7 @@ impl Checks {
 /// writers take the write leader over and commit, moving its generation,
 /// the counters of the ids and the search's index), each with the same
 /// case of its writes alone ([`Checks::WritesAlone`]).
+#[cfg(test)]
 pub(crate) fn writes_alone<S: ContractStore, F: Fn() -> Result<S>>() -> Vec<(&'static str, Case<F>)>
 {
     vec![
@@ -689,6 +712,7 @@ pub(crate) fn writes_alone<S: ContractStore, F: Fn() -> Result<S>>() -> Vec<(&'s
 /// `small` selects the rollback-only fixture sizes of [`cases_sized`];
 /// false uses [`run`]'s original counts. Committing cases and their replay
 /// are unchanged at either size.
+#[cfg(test)]
 pub(crate) fn run_apart<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
     apart: &[&str],
@@ -714,6 +738,7 @@ pub(crate) fn run_apart<S: ContractStore, F: Fn() -> Result<S>>(
 /// [`run_apart`] of named `cases`, each run by `run`, and of the cases of
 /// `alone`, run in place of the cases of their names in the test of a case
 /// of `apart`.
+#[cfg(test)]
 fn sequence_apart<T>(
     cases: &[(&str, T)],
     apart: &[&str],
@@ -984,7 +1009,7 @@ mod tests {
                 })
                 .collect()
         }
-        const EXPECTED: [(&str, Fixture, Fixture); 75] = [
+        const EXPECTED: [(&str, Fixture, Fixture); 79] = [
             ("leader lifecycle", Fixed, Fixed),
             ("leader singleton", Fixed, Fixed),
             ("stale writer", Fixed, Fixed),
@@ -1009,6 +1034,10 @@ mod tests {
             ("delegates change undone", Fixed, Fixed),
             ("runner credentials", Fixed, Fixed),
             ("runner leases", Fixed, Fixed),
+            ("assignment heartbeat", Fixed, Fixed),
+            ("assignment stale report", Fixed, Fixed),
+            ("assignment expired takeover", Fixed, Fixed),
+            ("assignment invalid token", Fixed, Fixed),
             ("image digests", Fixed, Fixed),
             ("ledger open written with its rows", Fixed, Fixed),
             (
@@ -1203,9 +1232,9 @@ mod tests {
         let sqlite_volume = cases::<SqliteQueue, SqliteOpen>();
         let postgres = cases::<Postgres, PostgresOpen>();
         let sqlite_small = cases_sized::<SqliteQueue, SqliteOpen, true>();
-        assert_eq!(sqlite_volume.len(), 75);
-        assert_eq!(postgres.len(), 75);
-        assert_eq!(sqlite_small.len(), 75);
+        assert_eq!(sqlite_volume.len(), 79);
+        assert_eq!(postgres.len(), 79);
+        assert_eq!(sqlite_small.len(), 79);
         assert_eq!(snapshot(sqlite_volume), full, "SQLite volume");
         assert_eq!(snapshot(postgres), full, "Postgres run");
         assert_eq!(snapshot(sqlite_small), small, "SQLite small interference");
