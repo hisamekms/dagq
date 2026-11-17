@@ -176,7 +176,7 @@ S・I・Fのtaskの次の5種を手戻りの候補にする。
 
 ### 層
 
-- `dagq kpi --area runtime`と`--change`（feature・fix・measure・docs）で分けて、(c)の実装の待ちと(d)が全体の変化と同じ向きかを見る。Spikeが実装の待ちを延ばしたかは、`--area runtime`の実装の待ちで読む（docs・configは軽い枠で別に流れる）。
+- `dagq kpi --area runtime`と`--change`（feature・fix・measure・docs）で分けて、(c)の実装の待ちと(d)が全体の変化と同じ向きかを見る。Spikeが実装の待ちを延ばしたかは、`--area runtime`の実装の待ちで読む。[ADR-t5107-1](../adr/2026-11-17-t5107-1-worker-slots-exclude-the-landing-lane.md)の着地より前の窓では、docs・configは着地待ちが空けた軽い枠でも流れるという前提で読む。着地後の窓には軽い枠が無く、changeによらずworkerのslotの空きでclaimされるため、その前後で分けて読む。
 - Spikeのtaskは`change`と独立なので、(c)のspikeはchangeで分けない。
 
 ### 交絡

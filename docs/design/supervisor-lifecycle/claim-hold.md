@@ -240,7 +240,8 @@ Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了
   読み直した新しい上限は進行中の控えにも効き、控えを無効にする値は無い。
 - 数えないrunを除くと重ならなくなったtaskは、上限を待たずにclaimする（`left_out`）。
 - 落とし穴: 控えの状態はsupervisorが持ち、起動して最初の判定でtaskごとの最新の記録から組み立て直す（`deferrals_in_place`）ので、supervisorが入れ替わっても上限は最初の`claim_deferred`から数える。
-  hotspotの控えが期限切れのまま順の記録（上限か軽い枠）を受けたtaskは、その記録が期限切れの始まりを持つ（`claim_defer::HOT_EXPIRED_SINCE`）。
+  hotspotの控えが期限切れのまま順の記録を受けたtaskは、その記録が期限切れの始まりを持つ（`claim_defer::HOT_EXPIRED_SINCE`）。
+  過去の軽い枠の記録も同じ扱いで読む。
 
 ## workerを動かせないtask
 
