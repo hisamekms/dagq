@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="dagq">
+    <testcase name="unit::t1" time="1.000"/>
+    <testcase name="unit::t2" time="2.000"/>
+    <testcase name="unit::t3" time="3.000"/>
+    <testcase name="unit::t4" time="4.000"/>
+    <testcase name="unit::t5" time="5.000"/>
+    <testcase name="unit::t6" time="6.000"/>
+    <testcase name="unit::t7" time="7.000"/>
+    <testcase name="unit::t8" time="8.000"/>
+    <testcase name="unit::t9" time="9.000"/>
+    <testcase name="unit::t10" time="10.000"/>
+    <testcase name="unit::t11" time="11.000"/>
+  </testsuite>
+  <testsuite name="dagq::bin/dagq">
+    <testcase name="unit::t12" time="12.000"/>
+    <testcase name="unit::t13" time="13.000"/>
+    <testcase name="unit::t14" time="14.000"/>
+    <testcase name="unit::t15" time="15.000"/>
+    <testcase name="unit::t16" time="16.000"/>
+    <testcase name="unit::t17" time="17.000"/>
+    <testcase name="unit::t18" time="18.000"/>
+    <testcase name="unit::t19" time="19.000"/>
+    <testcase name="unit::t20" time="20.000"/>
+    <testcase name="unit::t21" time="21.000"/>
+    <testcase name="unit::t22" time="22.000"/>
+  </testsuite>
+  <testsuite name="dagq::it">
+    <testcase name="unit::t999" time="999.000"/>
+  </testsuite>
+  <testsuite name="dagq-extra">
+    <testcase name="unit::t999" time="999.000"/>
+  </testsuite>
+</testsuites>

@@ -80,12 +80,14 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 - mainへのpushの`ci.yml`がworkflow全体で落ちたら、`ci-failure.yml`がlabel `ci-failure`のissueを開くか追記し、次に通ったら閉じる。jobの`continue-on-error`の失敗だけでは開かない。
 - `stress.yml`は1日1回、mainで直近に足した・変えたtestを多い周回と高い並列度で繰り返し、落ちたtestごとにlabel `flaky-test`のissueを開くか追記する。workerの手元の[stress](local-checks.md)が止めきれない稀な不安定さを着地の後に見つけるためで、hostの負荷もqueueのslotも使わない（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)決定2）。
 - issueから直すtaskを登録するのはplanner。ただし`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorの見張りが同じmainの失敗を`ci_failure`のfindingにして修正taskを作るので、plannerとinboxは`ci-failure`のissueからtaskを登録しない（見張りが止まっている間も。[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8、[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。issueは人に届く知らせとして残る。
-- `it-budget.yml`は毎晩と手動でmainの`dagq::it`だけをCIのrunnerで流し、JUnitから本数とtestごとの秒の和を求め、`.config/it-budget.toml`の予算を超えれば落ちる（比べるのは`scripts/check-it-budget.sh`、本数・秒・予算・超えた分・秒の上位のmoduleはjobのsummaryと成果物`it-budget`）。予算は今の値を超えないための天井で、着地の検証にも`ci.yml`の関門にも足さず、超えても着地は止まらない。
+- `it-budget.yml`は毎晩と手動でmainの`dagq::it`を専用のjobでCIのrunnerで流し、JUnitから本数とtestごとの秒の和を求め、`.config/it-budget.toml`の予算を超えれば落ちる（比べるのは`scripts/check-it-budget.sh`、本数・秒・予算・超えた分・秒の上位のmoduleはjobのsummaryと成果物`it-budget`）。予算は今の値を超えないための天井で、着地の検証にも`ci.yml`の関門にも足さず、超えても着地は止まらない。
   - testごとの秒にも天井を置き、時間の関門と同じ許可の一覧に無いtestの超過を全名と秒で報告する。helperやproductionの待ちで既存のtestが延び、差分だけを見る時間の関門が見ないものをここで見つける。
   - 超過の経路: `dagq.toml`の`[ci_watch]`の`scheduled_workflows`がこのworkflowを宣言しているので、mainの定時と手動の実行の失敗をCIの見張りが`ci_failure`と別の種類のfindingにし、runtimeのplannerが直すtaskを作る（[ADR-t3807-1](../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)、[CI watch](../design/supervisor-lifecycle/ci-watch.md)の「定時のworkflow」）。
   - 秒はCIのrunnerの秒で、本番の関門とは並列度が違い同じtestの秒が違う。
   - 秒だけの超過も本数の超過と同じく超過で、findingを受けたplannerが直すtaskを作る。plannerは成果物の秒の上位のmoduleと過去の夜の秒を読み、遅くなったtestやmoduleを特定できればそれを直すtaskにする。特定できずCIのrunnerの揺れと判断したときだけ、直近の夜の5回の秒の最大に約1割の余裕を付けた値へ`secs`を置き直すtaskにする（`decided`と`basis`も直す）。
   - 本数の値はITを減らして天井を下げるときだけ変え、秒の値を下げるのもITを減らした後に行う（目標は[ITの分類](../plans/it-reduction.md)の「予算と目標」）。
+- `--lib`の予算も`it-budget.yml`の専用の夜のjobで毎晩mainを流して見る。本数・testごとの秒の合計・秒の上位20本の和を`.config/lib-budget.toml`の天井と比べ、どれかを超えればjobを落とす。上位20本の全名と秒はjobのsummaryと成果物`lib-budget`に残る。既存のCIの失敗の見張りがfindingにして修正taskを作る。着地の検証と`ci.yml`の関門にはせず、着地は止めない（[ADR-t4948-1](../adr/2026-11-16-t4948-1-time-gate-for-added-or-changed-lib-tests-and-the-lib-budget.md)決定6）。
+  - 超えたら、まず遅くなったtestと増えた本数を見て直す。天井を上げて通すだけにせず、予算を変えるtaskで測定成果物と理由を残す。CIのrunnerでの秒と本番の着地の検証の秒を混ぜず、testを縮めた後は夜の測定から天井を下げる。初期値はITと並んで流れたCIの測定なので、`--lib`だけの夜のjobが5回終わったら値を見直す。
 - integration testのfixtureのtemplate（`tests/common/template.rs`）は`CARGO_TARGET_TMPDIR`（`target`の`tmp`）に作られる。CIで`target/`をcacheするjobは、cacheの復元の直後と保存の前にそのdirを消す（cacheの後始末がファイルだけを消して中身の無いtemplateを残し、testを落とすため）。jobを足すときも同じstepを置く。
 
 ## 判断と境界のtest

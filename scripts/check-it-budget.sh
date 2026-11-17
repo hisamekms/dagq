@@ -1,54 +1,39 @@
 #!/bin/sh
-# The budget of the integration tests (dagq::it, the binary of tests/it):
-# the number of its tests, their summed seconds and each test's seconds
-# recorded by one cargo nextest JUnit file, against .config/it-budget.toml. The
-# nightly workflow .github/workflows/it-budget.yml runs it on main; the rule
-# and how an over-budget night becomes a fix is in docs/development/
-# testing.md, section "CI". It is not a gate of the landing nor of ci.yml.
+# Compare selected nextest JUnit suites with a nightly budget. Defaults to
+# dagq::it and .config/it-budget.toml; --suite dagq --suite dagq::bin/dagq
+# selects the lib/bin unit suites for .config/lib-budget.toml. Nightly only:
+# this is not a landing or ci.yml gate. Rules: testing.md, section "CI".
 #
-# Usage: sh scripts/check-it-budget.sh [--budget FILE] [--allow FILE] [--report FILE] [JUNIT]
-#        sh scripts/check-it-budget.sh --self-test
-#   --budget FILE  the budget (default: .config/it-budget.toml of the git
-#                  work tree of the cwd, or of the script's repository when
-#                  the cwd is in none)
-#   --allow FILE   read this allow file alone instead of the repository's
-#                  .config/it-slow-allow.toml and .config/it-slow-allow.d/*.toml
-#   --report FILE  also write the report (Markdown) to FILE
-#   JUNIT          the JUnit file of a cargo nextest run (a profile with
-#                  [profile.<name>.junit], e.g. NEXTEST_PROFILE=ci). Without
-#                  it, only the budget file is checked.
-#   --self-test    check the script on the fixtures under
-#                  scripts/check-it-budget-fixtures/ and exit
+# Usage: sh scripts/check-it-budget.sh [--budget FILE] [--suite NAME ...]
+#        [--allow FILE] [--report FILE] [JUNIT] | --self-test
+# --budget defaults to the cwd repository's .config/it-budget.toml (or the
+# script's repository outside git). --suite is repeatable, exact suite names;
+# absent, selects dagq::it. --report also writes the Markdown report to FILE.
+# Without JUNIT, validates only the budget. --self-test runs the fixtures.
+# --allow reads one allow file instead of the cwd repository's union of
+# .config/it-slow-allow.toml and .config/it-slow-allow.d/*.toml. Allow lists
+# are read only with test_secs; their format matches check-it-test-time.sh.
 #
-# The budget file has one key per line, `key = value`, with # comments:
-#   count   = <the most dagq::it tests a run may have, an integer>
-#   secs    = <the largest sum of the dagq::it tests' seconds, a number>
-#   test_secs = <the most seconds of one test without an allow-list item>
-#   decided = "<YYYY-MM-DD, the day the values were set>"
-#   basis   = "<what the values were set from>"
-# All five keys, each once, and no other key. A file that breaks this,
-# including an older budget without test_secs, is malformed (exit 1).
+# Budget: one key = value per line, with # comments. Required, once each:
+# count = nonnegative integer, secs = nonnegative number, decided = quoted
+# YYYY-MM-DD, basis = nonempty quoted string. Optional test_secs is a
+# nonnegative per-test ceiling (allow-listed full test names are exempt).
+# Optional top_n (positive integer) and top_secs (nonnegative number) must
+# appear together: compare the sum of the slowest N testcases. No other keys.
+# Omitting these optional ceilings preserves the four-key budget format.
 #
-# The JUnit: every <testcase> inside the <testsuite name="dagq::it"> counts
-# once, with the seconds of its time attribute (nextest writes one testcase
-# per test, the time of the attempt it reports; #[ignore]d tests and tests
-# not built for the platform are not in the file). The module of a test is
-# the first segment of its name, the file or directory under tests/it. The
-# report names the count, the seconds, the budget, what is over it and the
-# 10 modules with the most seconds, plus every test over test_secs without
-# an allow-list item, with its full name and seconds. Allow-list format and
-# full-name matching are the same as check-it-test-time.sh: module::test
-# (including nested modules), never the function name alone. Allowed tests
-# still count towards the total count and seconds.
+# Each testcase in the selected suites counts once, with its time attribute
+# (the attempt nextest reports; ignored/unbuilt tests are absent). All tests,
+# including allowed ones, count in totals and top N. Report: totals, ceilings,
+# excess, top 10 modules, unlisted tests over test_secs, and the top N full
+# names (suite + test) and seconds when top_n is present. Module is the first
+# segment of the test name. Duplicate names in different suites count apart.
 #
-# Exit status: 0 when the run is within the budget (or, without JUNIT, the
-# budget file is well-formed), 1 when the count or the seconds is over the
-# budget, an unlisted test exceeds test_secs, or the budget is malformed;
-# 2 on a usage error, an unreadable or malformed allow list, a missing
-# budget file, a report that cannot be written, or a JUnit that is missing,
-# unreadable, cut off (no </testsuites>) or without a dagq::it testsuite with
-# a test in it. A value equal to the budget is not over it (the seconds in
-# whole milliseconds). Only sh, a POSIX awk and git are needed.
+# Exit 0: within budget, or budget-only validation passed. Exit 1: malformed
+# budget or any ceiling exceeded. Equality passes, seconds rounded to whole
+# milliseconds. Exit 2: usage, missing budget, unreadable/malformed allow
+# list, unwritable report, missing/unreadable/cut-off JUnit (no </testsuites>)
+# or no testcase in any selected suite. Requires sh, POSIX awk and git.
 set -eu
 
 me=check-it-budget
@@ -56,11 +41,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 script=$here/$(basename "$0")
 
 usage() {
-  echo "usage: sh scripts/check-it-budget.sh [--budget FILE] [--allow FILE] [--report FILE] [JUNIT] | --self-test" >&2
+  echo "usage: sh scripts/check-it-budget.sh [--budget FILE] [--suite NAME ...] [--allow FILE] [--report FILE] [JUNIT] | --self-test" >&2
   exit 2
 }
 
-# Prints "count secs test_secs decided basis" checked, or the problems on stderr and
+# Prints "count secs test_secs decided basis top_n top_secs" checked, or the problems on stderr and
 # exits 1.
 read_budget() {
   awk -v me="$me" -v file="$1" '
@@ -80,6 +65,10 @@ read_budget() {
         if (val !~ /^[0-9]+(\.[0-9]+)?$/) bad("secs is not a number: " val); else secs = val
       } else if (key == "test_secs") {
         if (val !~ /^[0-9]+(\.[0-9]+)?$/) bad("test_secs is not a number: " val); else test_secs = val
+      } else if (key == "top_n") {
+        if (val !~ /^[0-9]+$/ || val + 0 == 0) bad("top_n is not a positive integer: " val); else top_n = val
+      } else if (key == "top_secs") {
+        if (val !~ /^[0-9]+(\.[0-9]+)?$/) bad("top_secs is not a number: " val); else top_secs = val
       } else if (key == "decided") {
         if (val !~ /^"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"$/) bad("decided is not a quoted YYYY-MM-DD: " val)
         else decided = substr(val, 2, 10)
@@ -88,18 +77,22 @@ read_budget() {
       } else bad("unknown key " key)
     }
     END {
-      n = split("count secs test_secs decided basis", keys, " ")
+      n = split("count secs decided basis", keys, " ")
       for (i = 1; i <= n; i++) if (!(keys[i] in seen)) { print me ": " file ": no " keys[i] > "/dev/stderr"; err = 1 }
+      if (("top_n" in seen) != ("top_secs" in seen)) { bad("top_n and top_secs must appear together") }
       if (err) exit 1
-      printf "%s\t%s\t%s\t%s\t%s\n", count, secs, test_secs, decided, basis
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", count, secs, test_secs, decided, basis, top_n, top_secs
     }' "$1"
 }
 
-# Prints "test<TAB>secs" per dagq::it test, or exits 2 with the reason.
+# Prints "test<TAB>secs<TAB>suite" per selected testcase, or exits 2 with the reason.
 read_junit() {
-  awk -v me="$me" -v file="$1" '
+  awk -v me="$me" -v file="$1" -v suites="$suites" '
+    BEGIN { nsel = split(suites, selected, " "); for (i = 1; i <= nsel; i++) wanted[selected[i]] = 1 }
     /<testsuite[ >]/ {
-      insuite = ($0 ~ /<testsuite [^>]*name="dagq::it"/)
+      suite = ""
+      if (match($0, / name="[^"]*"/)) suite = substr($0, RSTART + 7, RLENGTH - 8)
+      insuite = (suite in wanted)
       if (insuite) found = 1
       if ($0 ~ /<testsuite [^>]*\/>/) insuite = 0
     }
@@ -107,7 +100,7 @@ read_junit() {
       if (match($0, / name="[^"]*"/) == 0) { print me ": " file ":" NR ": a testcase without a name" > "/dev/stderr"; bad = 1; next }
       name = substr($0, RSTART + 7, RLENGTH - 8)
       if (match($0, / time="[0-9.]+"/) == 0) { print me ": " file ":" NR ": " name " has no time" > "/dev/stderr"; bad = 1; next }
-      printf "%s\t%s\n", name, substr($0, RSTART + 7, RLENGTH - 8)
+      printf "%s\t%s\t%s\n", name, substr($0, RSTART + 7, RLENGTH - 8), suite
       n++
     }
     /<\/testsuite>/ { insuite = 0 }
@@ -115,7 +108,7 @@ read_junit() {
     END {
       if (bad) exit 2
       if (!closed) { print me ": " file ": no </testsuites> (cut off)" > "/dev/stderr"; exit 2 }
-      if (!found || n == 0) { print me ": " file ": no dagq::it testsuite with a test in it" > "/dev/stderr"; exit 2 }
+      if (!found || n == 0) { print me ": " file ": no " suites " testsuite with a test in it" > "/dev/stderr"; exit 2 }
     }' "$1"
 }
 
@@ -212,10 +205,37 @@ self_test() {
   fi
   case_ allowed_test_over 0 "Within the budget." --budget "$b" "$fixtures/allowed-test.xml"
   case_ test_within 0 "Within the budget." --budget "$b" "$fixtures/within-test.xml"
-  case_ missing_test_secs 1 "no test_secs" --budget "$fixtures/budget-no-test-secs.toml"
+  case_ four_key_budget 0 "budget ok" --budget "$fixtures/budget-no-test-secs.toml"
   case_ bad_test_secs 1 "test_secs is not a number" --budget "$fixtures/budget-bad-test-secs.toml"
   case_ bad_allow 2 "has no reason" --budget "$b" --allow "$fixtures/allow-malformed.toml" "$fixtures/allowed-test.xml"
   case_ missing_allow 2 "cannot read the allow list" --budget "$b" --allow "$tmp/missing.toml" "$fixtures/allowed-test.xml"
+  case_ four_key_budget_with_junit 0 "Within the budget." --budget "$fixtures/budget-no-test-secs.toml" "$fixtures/over-test.xml"
+  case_ lib_equal 0 '| top 20 seconds | 250.000 | 250.000 | 0.000 |' --suite dagq --suite dagq::bin/dagq --budget "$fixtures/lib.toml" --report "$tmp/lib.md" "$fixtures/lib.xml"
+  # The top 20 must be descending, include the bin suite, and omit the two
+  # fastest tests. Expected values are fixed fixture arithmetic, not a
+  # second invocation of the implementation to compute a baseline.
+  if ! awk '
+    /^The 20 tests/ { top = 1; next }
+    top && /^The 10 modules/ { top = 0 }
+    top && /^\| `/ {
+      n++
+      if (n == 1 && $0 != "| `dagq::bin/dagq unit::t22` | 22.000 |") bad = 1
+      if (n == 20 && $0 != "| `dagq unit::t3` | 3.000 |") bad = 1
+      if ($0 ~ /unit::t[12]`/) bad = 1
+    }
+    END { exit (bad || n != 20) }
+  ' "$tmp/lib.md"; then
+    echo "$me --self-test: lib_top_report: wrong top 20" >&2; fail=1
+  fi
+  case_ lib_count_over 1 '| tests | 22 | 21 | 1 |' --suite dagq --suite dagq::bin/dagq --budget "$fixtures/lib-over-count.toml" "$fixtures/lib.xml"
+  case_ lib_secs_over 1 '| seconds | 253.000 | 252.000 | 1.000 |' --suite dagq --suite dagq::bin/dagq --budget "$fixtures/lib-over-secs.toml" "$fixtures/lib.xml"
+  case_ lib_top_over 1 '| top 20 seconds | 250.000 | 249.000 | 1.000 |' --suite dagq --suite dagq::bin/dagq --budget "$fixtures/lib-over-top.toml" "$fixtures/lib.xml"
+  case_ lib_within 0 'Within the budget.' --suite dagq --budget "$fixtures/lib.toml" "$fixtures/lib.xml"
+  case_ selected_suite_missing 2 'no unknown testsuite' --suite unknown --budget "$fixtures/lib.toml" "$fixtures/lib.xml"
+  case_ missing_top_secs 1 'must appear together' --budget "$fixtures/missing-top-secs.toml"
+  case_ missing_top_n 1 'must appear together' --budget "$fixtures/missing-top-n.toml"
+  case_ bad_top_n 1 'not a positive integer' --budget "$fixtures/bad-top-n.toml"
+  case_ bad_top_secs 1 'not a number' --budget "$fixtures/bad-top-secs.toml"
   # The default union must be read from the cwd repository, even when this
   # script is copied out of it by a review program.
   repo=$tmp/repo
@@ -239,12 +259,13 @@ self_test() {
   echo "$me --self-test: ok"
 }
 
-budget="" report="" junit="" allow=""
+budget="" report="" junit="" allow="" suites=""
 root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$here/.." && pwd)
 while [ $# -gt 0 ]; do
   case $1 in
     --self-test) [ $# -eq 1 ] || usage; self_test; exit 0 ;;
     --budget) [ $# -ge 2 ] || usage; budget=$2; shift 2 ;;
+    --suite) [ $# -ge 2 ] && [ -n "$2" ] || usage; suites="${suites:+$suites }$2"; shift 2 ;;
     --allow) [ $# -ge 2 ] || usage; allow=$2; shift 2 ;;
     --report) [ $# -ge 2 ] || usage; report=$2; shift 2 ;;
     -*) usage ;;
@@ -256,6 +277,7 @@ if [ -z "$budget" ]; then
   budget=$root/.config/it-budget.toml
   shown=.config/it-budget.toml
 fi
+suites=${suites:-dagq::it}
 shown=${shown:-$budget}
 if [ ! -f "$budget" ]; then
   echo "$me: no budget file $budget" >&2
@@ -271,30 +293,36 @@ if [ ! -r "$junit" ] || [ ! -f "$junit" ]; then
   exit 2
 fi
 tests=$(read_junit "$junit") || exit 2
-if [ -n "$allow" ]; then
-  set -- "$allow"
-else
-  set -- "$root/.config/it-slow-allow.toml"
-  for f in "$root"/.config/it-slow-allow.d/*.toml; do
-    [ -e "$f" ] || continue
-    set -- "$@" "$f"
-  done
+# A lib budget has no per-test ceiling and needs no IT allow list.
+has_test_secs=$(printf '%s\n' "$b" | awk -F'\t' '{ print ($3 != "") }')
+allowed=""
+if [ "$has_test_secs" = 1 ]; then
+  if [ -n "$allow" ]; then
+    set -- "$allow"
+  else
+    set -- "$root/.config/it-slow-allow.toml"
+    for f in "$root"/.config/it-slow-allow.d/*.toml; do
+      [ -e "$f" ] || continue
+      set -- "$@" "$f"
+    done
+  fi
+  allowed=$(read_allow "$@") || exit 2
 fi
-allowed=$(read_allow "$@") || exit 2
 
 # The values go through the environment: -v would read the backslashes of
 # the basis as escapes.
-out=$(printf '%s\n' "$tests" | IT_ALLOW="$allowed" IT_BUDGET="$b" IT_BUDGET_FILE="$shown" awk -F'\t' '
+out=$(printf '%s\n' "$tests" | IT_SUITES="$suites" IT_ALLOW="$allowed" IT_BUDGET="$b" IT_BUDGET_FILE="$shown" awk -F'\t' '
   BEGIN {
-    split(ENVIRON["IT_BUDGET"], v, "\t"); bc = v[1] + 0; bs = v[2] + 0; bt = v[3] + 0; decided = v[4]; basis = v[5]
+    split(ENVIRON["IT_BUDGET"], v, "\t"); bc = v[1] + 0; bs = v[2] + 0; bt = v[3] + 0; decided = v[4]; basis = v[5]; tn = v[6] + 0; ts = v[7] + 0; per_test = (v[3] != "")
     na = split(ENVIRON["IT_ALLOW"], names, "\n")
     for (i = 1; i <= na; i++) allowed[names[i]] = 1
     file = ENVIRON["IT_BUDGET_FILE"]
   }
   {
     n++; s += $2
-    if (int($2 * 1000 + 0.5) > int(bt * 1000 + 0.5) && !($1 in allowed)) {
-      slow[++ns] = $1; seconds[ns] = $2
+    full[n] = $3 " " $1; times[n] = $2
+    if (per_test && int($2 * 1000 + 0.5) > int(bt * 1000 + 0.5) && !($1 in allowed)) {
+      slow[++ns] = $3 " " $1; seconds[ns] = $2
     }
     m = $1; sub(/::.*/, "", m)
     mn[m]++; ms[m] += $2
@@ -303,27 +331,43 @@ out=$(printf '%s\n' "$tests" | IT_ALLOW="$allowed" IT_BUDGET="$b" IT_BUDGET_FILE
     # The seconds are compared in whole milliseconds, as JUnit gives them, so
     # a float sum equal to the budget is not over it.
     oc = n - bc; os = (int(s * 1000 + 0.5) - int(bs * 1000 + 0.5)) / 1000
-    print "## dagq::it budget"
+    top = 0
+    for (k = 1; k <= tn && k <= n; k++) {
+      best = 0
+      for (i = 1; i <= n; i++) if (!(i in picked) && (!best || times[i] > times[best] || (times[i] == times[best] && full[i] < full[best]))) best = i
+      picked[best] = 1; rank[k] = best; top += times[best]
+    }
+    ot = (int(top * 1000 + 0.5) - int(ts * 1000 + 0.5)) / 1000
+    over = (oc > 0 || os > 0 || ns > 0 || (tn > 0 && ot > 0))
+    print "## " ENVIRON["IT_SUITES"] " budget"
     print ""
     print "| | measured | budget | over |"
     print "| --- | ---: | ---: | ---: |"
     printf "| tests | %d | %d | %d |\n", n, bc, (oc > 0 ? oc : 0)
     printf "| seconds | %.3f | %.3f | %.3f |\n", s, bs, (os > 0 ? os : 0)
+    if (tn > 0) printf "| top %d seconds | %.3f | %.3f | %.3f |\n", tn, top, ts, (ot > 0 ? ot : 0)
     print ""
     printf "The budget: %s, decided %s (%s).\n", file, decided, basis
     print ""
-    if (oc > 0 || os > 0 || ns > 0) print "**Over the budget.**"; else print "Within the budget."
+    if (over) print "**Over the budget.**"; else print "Within the budget."
     print ""
-    printf "Per-test ceiling: %.3fs (allow-listed tests exempt).\n", bt
+    if (per_test) printf "Per-test ceiling: %.3fs (allow-listed tests exempt).\n", bt
     if (ns > 0) {
       print ""
       print "Tests over the per-test ceiling without an allow-list item:"
       print ""
       print "| test | seconds | ceiling |"
       print "| --- | ---: | ---: |"
-      for (i = 1; i <= ns; i++) printf "| `dagq::it %s` | %.3f | %.3f |\n", slow[i], seconds[i], bt
+      for (i = 1; i <= ns; i++) printf "| `%s` | %.3f | %.3f |\n", slow[i], seconds[i], bt
     }
     print ""
+    if (tn > 0) {
+      printf "The %d tests with the most seconds:\n\n", tn
+      print "| test | seconds |"
+      print "| --- | ---: |"
+      for (k = 1; k <= tn && k <= n; k++) printf "| `%s` | %.3f |\n", full[rank[k]], times[rank[k]]
+      print ""
+    }
     print "The 10 modules with the most seconds:"
     print ""
     print "| module | tests | seconds |"
@@ -335,7 +379,7 @@ out=$(printf '%s\n' "$tests" | IT_ALLOW="$allowed" IT_BUDGET="$b" IT_BUDGET_FILE
       done[best] = 1
       printf "| `%s` | %d | %.3f |\n", best, mn[best], ms[best]
     }
-    if (oc > 0 || os > 0 || ns > 0) exit 1
+    if (over) exit 1
   }') || st=$?
 st=${st:-0}
 printf '%s\n' "$out"

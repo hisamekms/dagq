@@ -1,0 +1,27 @@
+# --lib（JUnit の dagq と dagq::bin/dagq）の本数・test ごとの秒の和・
+# 秒の上位 20 本の和の天井。毎晩 main で .github/workflows/it-budget.yml が
+# ubuntu-24.04 で流し、scripts/check-it-budget.sh が比べる。着地と ci.yml の
+# 関門にはしない。超過と値の直し方は docs/development/testing.md の「CI」。
+#
+# 出どころ: ci.yml の linux job（ubuntu-24.04、cargo nextest run --locked、
+# NEXTEST_PROFILE=ci）の成果物 nextest-junit-linux の junit.xml。
+# main の直近 5 commit の CI（全て 2026-11-13）を集計した。
+# testsuite の name が dagq と dagq::bin/dagq の testcase だけを数え、
+# 本数は testcase 数、秒は time の和、上位 20 本は time の大きい 20 本の和。
+# commit     run          本数   秒の合計  上位20本の秒
+# 308fc68f9  43433270774  5614   4536.2    2487.7
+# f7666ffca  43451010729  5618   4585.4    2532.0
+# 5f304d07c  43469925367  5627   4773.8    2586.9
+# dd191831a  43479410758  5639   4582.5    2516.5
+# 5befd0775  43514982812  5641   4807.7    2591.1
+# それぞれ最大に約 2 割の余裕（5641 × 1.2 ≒ 6770、4807.7 × 1.2 ≒ 5770、
+# 2591.1 × 1.2 ≒ 3110）。linux job は IT と並んで流れた秒なので、夜の
+# --lib だけの job の秒とは違いうる。夜の job の 5 回の後に値を見直す。
+# 2026-11-07 の CI（run 42348420569）は 4595 本・1026.4 秒だった。
+# IT の unit への移し替えと遅い lib test の追加で、1 週間で本数も秒も大きく増えた。
+count = 6770
+secs = 5770
+top_n = 20
+top_secs = 3110
+decided = "2026-11-14"
+basis = "ci.yml linux ubuntu-24.04, cargo nextest run --locked, NEXTEST_PROFILE=ci; nextest-junit-linux/junit.xml; main 2026-11-13: 308fc68f9/43433270774=5614/4536.2/2487.7, f7666ffca/43451010729=5618/4585.4/2532.0, 5f304d07c/43469925367=5627/4773.8/2586.9, dd191831a/43479410758=5639/4582.5/2516.5, 5befd0775/43514982812=5641/4807.7/2591.1 (testcase count/time sum/top 20 time sum, suites dagq and dagq::bin/dagq); maxima x1.2 rounded; IT ran alongside lib, unlike nightly; 2026-11-07 run 42348420569=4595/1026.4, grew with IT moved to unit and slow lib tests"

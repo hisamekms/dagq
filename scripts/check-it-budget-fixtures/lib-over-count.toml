@@ -1,0 +1,6 @@
+count = 21
+secs = 253
+top_n = 20
+top_secs = 250
+decided = "2026-11-14"
+basis = "fixture: seconds 1 through 22, top 20 exclude 1 and 2"
