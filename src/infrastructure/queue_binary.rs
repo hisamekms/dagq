@@ -249,14 +249,18 @@ mod tests {
     fn only_the_named_binary_or_the_granted_one_starts_the_service() {
         let fixed = binary("/home/u/.local/bin/dagq");
         assert!(judge(&fixed, None, &fixed.path).is_ok());
-        // A development build, or a run's runner copy, at another path.
+        // Both service start and service serve use this path judgment.
         let dev = Path::new("/src/dagq/target/debug/dagq");
-        let error = format!("{:#}", judge(&fixed, None, dev).unwrap_err());
-        assert!(error.contains("is not the queue's binary"), "{error}");
-        assert!(
-            error.contains("Run `/home/u/.local/bin/dagq up`"),
-            "{error}"
-        );
+        for other in [dev, Path::new("/q/runs/run-1/runner")] {
+            let error = format!("{:#}", judge(&fixed, None, other).unwrap_err());
+            assert!(error.contains("is not the queue's binary"), "{error}");
+            assert!(error.contains(&other.display().to_string()), "{error}");
+            assert!(
+                error.contains("Run `/home/u/.local/bin/dagq up`"),
+                "{error}"
+            );
+            assert!(error.contains("nothing was started"), "{error}");
+        }
         // The build `install` migrates with before it is in place.
         let next = Path::new("/q/update/target/release/dagq");
         assert!(judge(&fixed, Some(next), next).is_ok());

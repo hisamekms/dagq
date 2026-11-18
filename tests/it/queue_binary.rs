@@ -2,8 +2,8 @@
 //! schema (ADR-t3102-2 decisions 1 to 3): a development build and a run's
 //! `runner` copy refuse `service start`, `service serve` and `up` before
 //! anything changes, and `install` lets the build it puts in place
-//! migrate. Each test makes its own throwaway queue and the two binaries:
-//! the queue's (a copy of the test's `dagq` that `init` names) and another.
+//! migrate. Tests use throwaway queues and immutable hard links of the
+//! executed binary template when a distinct executable path is needed.
 
 use crate::common;
 use common::lifecycle::*;
@@ -61,89 +61,55 @@ fn old_queue(db: &Path, version: usize) {
     .unwrap();
 }
 
-/// The queue's binary alone starts its service, which alone migrates it
-/// (ADR-t3102-2 decisions 1 to 3): a development build and a run's runner
-/// copy refuse `service start` and `service serve` naming the queue's
-/// binary, and start nothing; with no service, `migrate`, `doctor` and
-/// `init` of the queue fail as unreachable and `migrate --check` leaves the
-/// schema to the replacement start, all opening no DB; with the queue's
-/// binary's service, they are its use cases.
+/// The process/SQLite boundary: another binary cannot start the service,
+/// and the named binary's service applies a client's migration request.
+/// Binary selection is covered by queue_binary's pure `judge` tests;
+/// absent-service commands by compose::host's tests, and the unanswered
+/// schema's shape by domain::queue_service's tests. The running service's
+/// schema 23 / opens=false check and matching doctor schema are covered by
+/// `cli_version::migrate_is_explicit_and_older_binaries_keep_working_within_the_floor`.
+/// This case also checks that init through the running service succeeds
+/// without changing the binary record.
 #[test]
 fn only_the_queues_binary_migrates_the_queue() {
     let (dir, _owner) = common::cleanup::owned_temp_dir();
-    let fixed = copy_of_dagq(&dir.path().join("bin").join("dagq"));
+    let fixed = copy_of_dagq(&dir.path().join("bin/dagq"));
     let development = Path::new(env!("CARGO_BIN_EXE_dagq"));
-    let db = dir.path().join("queue").join("queue.db");
+    let db = dir.path().join("queue/queue.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
     let _service = StopService(db.clone());
-
-    // `init` names the binary that created the queue.
+    // The real init path names its creator before this same queue is
+    // placed at the schema the service will migrate.
     let output = run(&fixed, &db, &["init"]);
     assert!(output.status.success(), "{}", error_of(&output));
     assert_eq!(
         queue_binary::read(&db).unwrap(),
         Some(QueueBinary::new(&fixed))
     );
-
-    // Schema 23, which this binary migrates with breaking and compatible
-    // migrations.
     old_queue(&db, 23);
-    let runner = copy_of_dagq(&dir.path().join("runs/run-1/runner"));
-    for binary in [development, runner.as_path()] {
-        // Not the queue's binary: no service of it starts, by hand or as
-        // `service serve`.
-        for args in [&["service", "start"][..], &["service", "serve"]] {
-            let error = error_of(&run(binary, &db, args));
-            assert!(error.contains("is not the queue's binary"), "{error}");
-            assert!(error.contains(&fixed.display().to_string()), "{error}");
-            stopped(&db);
-        }
-        // With no service, nothing is migrated, read or initialized here:
-        // the DB is not opened instead.
-        for args in [&["migrate"][..], &["doctor"], &["init"]] {
-            let error = error_of(&run(binary, &db, args));
-            assert!(error.contains("unreachable"), "{args:?}: {error}");
-        }
-        // Nor is it checked: the check leaves the schema to the
-        // replacement start of its build's service.
-        let output = run(binary, &db, &["migrate", "--check"]);
-        assert!(output.status.success(), "{}", error_of(&output));
-        let check: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(check["unanswered"], true, "{check}");
-        let reason = check["reason"].as_str().unwrap();
-        assert!(
-            reason.contains(dagq::domain::queue_service::SCHEMA_UNANSWERED),
-            "{reason}"
-        );
-        assert!(reason.contains("unreachable"), "{reason}");
-        assert_eq!(user_version(&db), 23);
-        assert_eq!(queue_binary::read(&db).unwrap().unwrap().path, fixed);
-    }
 
-    // The queue's binary's service answers the others' requests. It starts
-    // on a queue its build would migrate, and its start is recorded by
-    // none, as the queue does not open as it is.
+    let error = error_of(&run(development, &db, &["service", "start"]));
+    assert!(error.contains("is not the queue's binary"), "{error}");
+    assert!(error.contains(&fixed.display().to_string()), "{error}");
+    stopped(&db);
+    assert_eq!(user_version(&db), 23);
+
     let error = error_of(&run(&fixed, &db, &["service", "start"]));
     assert!(error.contains("run `dagq migrate`"), "{error}");
     assert_eq!(
         service::probe(db.parent().unwrap()).state,
         dagq::domain::queue_service::ServiceState::Running
     );
-    let check: serde_json::Value =
-        serde_json::from_slice(&run(&runner, &db, &["migrate", "--check"]).stdout).unwrap();
-    assert_eq!(check["schema_version"], 23, "{check}");
-    assert_eq!(check["opens"], false, "{check}");
-    let doctor: serde_json::Value =
-        serde_json::from_slice(&run(development, &db, &["doctor"]).stdout).unwrap();
-    assert_eq!(doctor["schema"], check, "{doctor}");
     let output = run(development, &db, &["migrate"]);
     assert!(output.status.success(), "{}", error_of(&output));
     assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
-    // Its service applied them, not the command's process.
     let log = fs::read_to_string(service::log_path(db.parent().unwrap())).unwrap();
     assert!(log.contains("at a migrate's request"), "{log}");
-    let output = run(development, &db, &["init"]);
-    assert!(output.status.success(), "{}", error_of(&output));
+    // Exercise the same init entry the CLI uses for an existing queue,
+    // through this already running service, without another process.
+    let client = service::Client::host(&db, None, |_| None);
+    let initialized = dagq::compose::init_through(&client).unwrap();
+    assert_eq!(initialized["schema_version"], SqliteQueue::SCHEMA_VERSION);
     assert_eq!(queue_binary::read(&db).unwrap().unwrap().path, fixed);
 }
 

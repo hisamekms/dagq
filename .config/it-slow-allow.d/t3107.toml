@@ -4,10 +4,10 @@ name = "cli_areas::a_report_through_the_service_reads_the_areas_with_the_client_
 reason = "境界（Git・プロセス）: queue service を起動し、hostのCLIのクライアントが main checkout の Git で着地した commit の file を読み、Git を走らせない service が report を作る配線の代表。checkout・areas・Git の失敗の既定の判断は application::report と application::areas の unit test"
 task = 3107
 
-# 5.757s in the worker's stress (median of 5, load average ~10)
+# The per-run measurement and UTC rounds are recorded in the receipt.
 [[test]]
 name = "queue_binary::only_the_queues_binary_migrates_the_queue"
-reason = "境界（SQLite・プロセス）: 固定の binary の写しと開発中の binary・run の runner の写しを別のプロセスで走らせ、queue の binary でない binary は service start・service serve を断られ、service が無ければ migrate・doctor・init は unreachable で終わり migrate --check は schema を答えず、queue の binary の service が動いていれば migrate はその service が実の SQLite の schema を上げるユースケースとして通る経路"
+reason = "境界（SQLite・プロセス）: queue の binary でない binary の service start を一度断り、queue の binary の service に送った migrate が実の SQLite の schema を上げる代表 1 case。binary の選択は infrastructure::queue_binary の judge の unit test、service 不在時の command の応答は compose::host の配線の test、schema の未回答形式は domain::queue_service の unit test。検査済み template の hard link を使っても、同じ queue を作る init と、実の service の起動・migration が残る"
 task = 3107
 
 # 5.97s to 7.29s (stress 5, median 6.71s, load average ~17)

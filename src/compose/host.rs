@@ -2158,6 +2158,38 @@ where
 mod tests {
     use super::*;
 
+    /// No process or SQLite is needed to exercise the command wiring:
+    /// the absent socket refuses writes/reads, while a check defers schema.
+    #[test]
+    fn absent_service_leaves_init_doctor_and_migrate_unreachable_and_check_unanswered() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        // A DB fallback would fail on this deliberately invalid SQLite file.
+        let contents = b"the client must not open this as SQLite";
+        std::fs::write(&db, contents).unwrap();
+        let client = service::Client::host(&db, None, |key| {
+            (key == crate::application::queue_service::REPLACEMENT_WAIT_ENV).then(|| "0".into())
+        });
+        for answer in [
+            init_through(&client),
+            client.call(UseCase::Doctor, json!({"full": false})),
+            migrate_through(&client, false, None),
+        ] {
+            let error = answer.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<service::ClientFailure>().unwrap().code,
+                "unreachable"
+            );
+        }
+        let check = migrate_through(&client, true, None).unwrap();
+        assert_eq!(check["unanswered"], true);
+        assert!(check.get("schema_version").is_none());
+        let reason = check["reason"].as_str().unwrap();
+        assert!(reason.contains("unreachable"), "{reason}");
+        assert!(reason.contains(crate::domain::queue_service::SCHEMA_UNANSWERED));
+        assert_eq!(std::fs::read(&db).unwrap(), contents);
+    }
+
     #[test]
     fn a_completed_migration_defers_backfill_only_when_its_writer_is_not_leader() {
         assert_eq!(migration_backfill(Ok(json!({"filled": 3}))).unwrap(), 3);
