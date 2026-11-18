@@ -1,0 +1,5 @@
+count = 1
+secs = 100
+test_secs = 30
+decided = "2026-11-18"
+basis = "fixed thirty-second ceiling fixtures"

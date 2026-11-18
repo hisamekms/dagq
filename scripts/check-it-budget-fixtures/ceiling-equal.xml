@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<testsuites>
+    <testsuite name="dagq::it">
+        <testcase name="ceiling::unlisted" time="30.000"/>
+    </testsuite>
+</testsuites>

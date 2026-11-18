@@ -1,0 +1,4 @@
+[[test]]
+name = "ceiling::slow_only"
+reason = "Process boundary fixture"
+task = 3

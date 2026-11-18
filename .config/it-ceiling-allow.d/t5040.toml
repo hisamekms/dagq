@@ -1,0 +1,18 @@
+# IT budget run 44221004693, 2026-11-18 UTC, it-budget JUnit.
+# 30.252s
+[[test]]
+name = "cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back"
+reason = "境界（プロセス・ファイル）: 実の supervisor の PID を保つ exec handoff と binary の rename、rollback を install の往復で確かめる代表。in-process では exec 後の PID と登録を確かめられない"
+task = 5040
+
+# 110.988s
+[[test]]
+name = "cli_version::auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back"
+reason = "境界（プロセス・Git）: 実の Git の着地を supervisor が見つけ、build/install/exec を経て動く binary を替え、壊れた build から元に戻す代表。process をまたぐ自動更新と rollback を守る"
+task = 5040
+
+# 38.775s
+[[test]]
+name = "supervisor_service_ledger::what_builds_the_ledger_crosses_the_services_limits_in_parts"
+reason = "境界（プロセス・socket）: queue service の要求 1 MiB と答え 16 MiB を越える台帳と event を、実の socket 越しに分けて書き読む代表。境界を越える量を必要とし、分け方の判断は large.rs の unit test が持つ"
+task = 5040

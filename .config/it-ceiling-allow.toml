@@ -1,0 +1,3 @@
+# Nightly per-test ceiling exemptions, independent of the five-second gate.
+# Format and reason requirements: scripts/check-it-budget.sh header.
+# Add new items to .config/it-ceiling-allow.d/t<task ID>.toml.

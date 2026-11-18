@@ -11,8 +11,11 @@
 # absent, selects dagq::it. --report also writes the Markdown report to FILE.
 # Without JUNIT, validates only the budget. --self-test runs the fixtures.
 # --allow reads one allow file instead of the cwd repository's union of
-# .config/it-slow-allow.toml and .config/it-slow-allow.d/*.toml. Allow lists
+# .config/it-ceiling-allow.toml and .config/it-ceiling-allow.d/*.toml. Allow lists
 # are read only with test_secs; their format matches check-it-test-time.sh.
+# This ceiling list is independent of the five-second it-slow-allow lists.
+# New items go in .config/it-ceiling-allow.d/t<task ID>.toml, with the full
+# name, reason (ADR-t1707-1 decision 2) and registering task.
 #
 # Budget: one key = value per line, with # comments. Required, once each:
 # count = nonnegative integer, secs = nonnegative number, decided = quoted
@@ -239,10 +242,10 @@ self_test() {
   # The default union must be read from the cwd repository, even when this
   # script is copied out of it by a review program.
   repo=$tmp/repo
-  mkdir -p "$repo/.config/it-slow-allow.d"
+  mkdir -p "$repo/.config/it-ceiling-allow.d"
   git -C "$repo" init -q
-  cp "$fixtures/allow.toml" "$repo/.config/it-slow-allow.toml"
-  cp "$fixtures/allow-task.toml" "$repo/.config/it-slow-allow.d/t2.toml"
+  cp "$fixtures/allow.toml" "$repo/.config/it-ceiling-allow.toml"
+  cp "$fixtures/allow-task.toml" "$repo/.config/it-ceiling-allow.d/t2.toml"
   got=0
   (cd "$repo" && sh "$script" --budget "$b" "$fixtures/allowed-union.xml") >"$tmp/out" 2>&1 || got=$?
   if [ "$got" -ne 0 ] || ! grep -qF "Within the budget." "$tmp/out"; then
@@ -250,6 +253,26 @@ self_test() {
   else
     echo "$me --self-test: default_allow_union: ok"
   fi
+  # Exercise default discovery with independent, fixed 30-second fixtures.
+  # A five-second exemption alone must never grant a nightly exemption.
+  mkdir -p "$repo/.config/it-slow-allow.d"
+  cp "$fixtures/slow-only-allow.toml" "$repo/.config/it-slow-allow.toml"
+  cp "$fixtures/allow.toml" "$repo/.config/it-slow-allow.d/t3.toml"
+  cp "$fixtures/ceiling-allow.toml" "$repo/.config/it-ceiling-allow.d/t3.toml"
+  default_case() {
+    c=$1 want=$2 needle=$3 junit=$4
+    got=0
+    (cd "$repo" && sh "$script" --budget "$fixtures/budget-ceiling.toml" "$junit") >"$tmp/out" 2>&1 || got=$?
+    if [ "$got" -ne "$want" ] || ! grep -qF "$needle" "$tmp/out"; then
+      echo "$me --self-test: $c: failed (exit $got, want $want)" >&2
+      cat "$tmp/out" >&2; fail=1
+    else
+      echo "$me --self-test: $c: exit $got: ok"
+    fi
+  }
+  default_case slow_gate_only_over_ceiling 1 '| `dagq::it ceiling::slow_only` | 30.001 | 30.000 |' "$fixtures/slow-only.xml"
+  default_case ceiling_allowed_over 0 'Within the budget.' "$fixtures/ceiling-allowed.xml"
+  default_case ceiling_equal 0 'Within the budget.' "$fixtures/ceiling-equal.xml"
   cat "$fixtures/allow.toml" "$fixtures/allow-task.toml" >"$tmp/union.toml"
   case_ allowed_still_counts_in_totals 1 '| seconds | 5.000 | 4.500 | 0.500 |' --budget "$fixtures/budget-equal.toml" --allow "$tmp/union.toml" "$fixtures/allowed-union.xml"
   case_ allow_override_is_one_file 1 'dagq::it slow_mod::allowed_in_task_file' --budget "$b" "$fixtures/allowed-union.xml"
@@ -300,8 +323,8 @@ if [ "$has_test_secs" = 1 ]; then
   if [ -n "$allow" ]; then
     set -- "$allow"
   else
-    set -- "$root/.config/it-slow-allow.toml"
-    for f in "$root"/.config/it-slow-allow.d/*.toml; do
+    set -- "$root/.config/it-ceiling-allow.toml"
+    for f in "$root"/.config/it-ceiling-allow.d/*.toml; do
       [ -e "$f" ] || continue
       set -- "$@" "$f"
     done

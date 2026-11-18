@@ -1,0 +1,4 @@
+[[test]]
+name = "ceiling::allowed"
+reason = "Process boundary fixture"
+task = 3

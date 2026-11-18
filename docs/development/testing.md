@@ -82,7 +82,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 - `stress.yml`は1日1回、mainで直近に足した・変えたtestを多い周回と高い並列度で繰り返し、落ちたtestごとにlabel `flaky-test`のissueを開くか追記する。workerの手元の[stress](local-checks.md)が止めきれない稀な不安定さを着地の後に見つけるためで、hostの負荷もqueueのslotも使わない（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)決定2）。
 - issueから直すtaskを登録するのはplanner。ただし`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorの見張りが同じmainの失敗を`ci_failure`のfindingにして修正taskを作るので、plannerとinboxは`ci-failure`のissueからtaskを登録しない（見張りが止まっている間も。[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8、[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。issueは人に届く知らせとして残る。
 - `it-budget.yml`は毎晩と手動でmainの`dagq::it`を専用のjobでCIのrunnerで流し、JUnitから本数とtestごとの秒の和を求め、`.config/it-budget.toml`の予算を超えれば落ちる（比べるのは`scripts/check-it-budget.sh`、本数・秒・予算・超えた分・秒の上位のmoduleはjobのsummaryと成果物`it-budget`）。この夜の予算はCIのrunnerで今の値を超えないための天井で、ITを減らすたびに下の「ITの段の時間の予算と待ちの口」の予算の方へ下げる。予算そのものは本番の着地ログのITの段の秒で比べる。夜の天井は着地の検証にも`ci.yml`の関門にも足さず、超えても着地は止まらない。
-  - 全てのITのtestごとの秒に30秒の天井を置き、時間の関門と同じ許可の一覧に無いtestの超過を全名と秒で報告する。helperやproductionの待ちで既存のtestが延び、差分だけを見る時間の関門が見ないものをここで見つける。
+  - 全てのITのtestごとの秒に30秒の天井を置き、30秒の天井専用の許可の一覧（`.config/it-ceiling-allow.toml`と`.config/it-ceiling-allow.d/*.toml`）に無いtestの超過を全名と秒で報告する。新しい許可の項目は足すtaskのファイル`.config/it-ceiling-allow.d/t<task ID>.toml`に理由つきで書き、5秒の時間の関門の一覧とは別に扱う。helperやproductionの待ちで既存のtestが延び、差分だけを見る時間の関門が見ないものをここで見つける。
   - 超過の経路: `dagq.toml`の`[ci_watch]`の`scheduled_workflows`がこのworkflowを宣言しているので、mainの定時と手動の実行の失敗をCIの見張りが`ci_failure`と別の種類のfindingにし、runtimeのplannerが直すtaskを作る（[ADR-t3807-1](../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)、[CI watch](../design/supervisor-lifecycle/ci-watch.md)の「定時のworkflow」）。
   - 秒はCIのrunnerの秒で、本番の関門とは並列度が違い同じtestの秒が違う。
   - 秒だけの超過も本数の超過と同じく超過で、findingを受けたplannerが直すtaskを作る。plannerは成果物の秒の上位のmoduleと過去の夜の秒を読み、遅くなったtestやmoduleを特定できればそれを直すtaskにする。特定できずCIのrunnerの揺れと判断したときだけ、直近の夜の5回の秒の最大に約1割の余裕を付けた値へ`secs`を置き直すtaskにする（`decided`と`basis`も直す）。
@@ -139,7 +139,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 - ITに残すのはin-processで確かめられないprocess・socket・実のGit・launchd・ファイルの置き場などの境界だけで、判断はunit test、supervisorの配線は上の配線のtestの層に置く。境界の登録簿とmoduleのラチェットは保ち、減らしたtestの中身の行き先を対応づける。
 - 予算は着地の検証のITの段を全部流しても壁時計10分（600秒）以内、`NEXTEST_TEST_THREADS=6`でCPU合計60分（3600秒）以内。unitの段の5分と合わせて15分にし、検証の3600秒の上限に余裕を残す。予算で着地を止める段は足さない。
 - 比べる秒は本番の着地ログのITの段のSummary秒と1本ごとの秒の和（待ちを含み、OSのCPU使用時間ではない）。CIのrunnerの夜の天井とは区別し、除外や中断がある記録だけで全件の予算達成としない。
-- 1本の目標はp50 1秒・p99 10秒。足した・変えたITの5秒の時間の関門は保ち、全てのITに30秒の天井を置く。超えてよいのは上の時間の関門の許可の一覧に理由つきで載るものだけで、理由の条件も同じ。30秒と等しければ超過でない。helperやproductionの待ちだけによる既存のITの延びは、夜のtestごとの天井が拾う。
+- 1本の目標はp50 1秒・p99 10秒。足した・変えたITの5秒の時間の関門は保ち、全てのITに30秒の天井を置く。超えてよいのは上の「CI」の天井専用の許可の一覧に理由つきで載るものだけで、理由の条件は5秒の時間の関門と同じ。30秒と等しければ超過でない。helperやproductionの待ちだけによる既存のITの延びは、夜のtestごとの天井が拾う。
 - 本数の目標は置かない。ITはUTの1〜2割が目安だが関門にしない。選択は対応表のままで、広いsrcの項目はCIへ任せ、共通のtransportと要求ごとの処理をfileで分けて表の当たりを狭める。
 - productionの待ちを縮める前に、配線のtestの層へ移して口を足さずに済むかを考える。ITが当たる入れ替え・pollの間隔・停止の猶予・socketの時間切れはfixtureから縮められるenvの口を持ち、名前・既定・意味を定義のそばのdoc commentに書く。形の入口は`src/application/queue_service.rs`の`REPLACEMENT_WAIT_ENV`と`replacement_wait_from`。
 - 値から待ちを決める副作用の無い関数をunit testが口なし→既定・口あり→その値・不正な値→既定で確かめる。productionは口を渡さず既定のままにし、`tests/it`のbinaryの読み込み時にfixtureが短い値を渡す。実の待ちそのものを確かめるITだけが自分の呼び出しのcommand/envに長い値を渡す。in-processでも渡す環境の値を使い、testがprocess全体の状態を変えない。productionの待ちの既定・event・payload・ask・文面の意味を変えない。
