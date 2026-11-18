@@ -1289,6 +1289,34 @@ mod tests {
     }
 
     #[test]
+    fn precheck_requests_stop_at_the_default_and_configured_limits() {
+        use crate::domain::{ConflictDecision, RunHistory, decide_conflict};
+
+        // Exercise the same pure decision the live-session precheck calls.
+        assert_eq!(ResumeConfig::default().conflict_only_limit, 5);
+        for config in [
+            ResumeConfig::default(),
+            ResumeConfig {
+                conflict_only_limit: 1,
+            },
+        ] {
+            let mut events = vec![pass()];
+            for _ in 0..config.conflict_only_limit {
+                assert_eq!(
+                    decide_conflict(&RunHistory::from_events(&events), true, config),
+                    ConflictDecision::RequestRebase
+                );
+                events.push(event("conflict_precheck", json!({"requested": true})));
+            }
+            assert_eq!(
+                decide_conflict(&RunHistory::from_events(&events), true, config),
+                ConflictDecision::Inherit
+            );
+            assert_eq!(ResumeCount::of(&events).counted, 0);
+        }
+    }
+
+    #[test]
     fn precheck_requests_share_the_conflict_only_limit() {
         let precheck = |payload| event("conflict_precheck", payload);
         let mut events = vec![

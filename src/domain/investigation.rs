@@ -334,6 +334,44 @@ mod tests {
     }
 
     #[test]
+    fn ending_an_investigation_releases_a_new_goals_spike() {
+        let mut open = Investigations {
+            open: vec![goal(1, vec![None])],
+            ..Default::default()
+        };
+        let judge = |open: &Investigations| {
+            open.limit(
+                TaskId::new(2),
+                ExecutionClass::Spike,
+                Some(GoalId::new(2)),
+                limit(Some(1)),
+                NOW,
+            )
+        };
+        assert_eq!(judge(&open), Some(INVESTIGATION_LIMIT));
+        // The claim limit does not refuse submission of another goal's
+        // first Spike, whether a person or a runtime planner submits it.
+        for by_runtime in [false, true] {
+            assert!(
+                !spike_submit(
+                    TaskId::new(2),
+                    GoalId::new(2),
+                    SpikeSubmit {
+                        by_runtime,
+                        counted: false,
+                        replanning: false,
+                        cycles: 0
+                    },
+                    Some(1),
+                )
+                .unwrap()
+            );
+        }
+        open.open.clear();
+        assert_eq!(judge(&open), None);
+    }
+
+    #[test]
     fn a_spike_an_open_investigation_waits_for_goes_past_the_limit() {
         let open = Investigations {
             open: vec![goal(1, vec![None])],

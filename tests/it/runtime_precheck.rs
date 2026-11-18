@@ -1,55 +1,163 @@
 //! Runtime tests: the limit of the conflict precheck's requests to the live
 //! session of a passed run (ADR-0027 decision 4), which are conflict-only
 //! attempts after a passed review (ADR-0047 decision 24, task 511).
-use crate::runtime_review_conflict::{moving_main_then_pass, rebasing_agent};
-use crate::runtime_support;
+use crate::{common, runtime_support};
 use dagq::domain::EventKind;
-
-use dagq::domain::{AskKind, resume::CONFLICT_ONLY_RESUME_LIMIT};
 use runtime_support::*;
 
-/// The precheck's requests are not counted toward `MAX_RESUME_ATTEMPTS`:
-/// when main keeps moving into the run, the live session is asked to
-/// rebase up to the conflict-only limit. Past it nobody is asked: the run
-/// goes on to land, its conflicting landing parks it with its resumes used
-/// up, and the task is retried with the run's branch carried over
-/// (`retry_inherit`), whose run lands.
+use dagq::domain::AskKind;
+use dagq::{application::ProcessControl, infrastructure::adapters::SystemProcesses};
+
+/// Only this fixture's children matter: their starts are stable until they
+/// end. Host process listings and repeated start probes are outside Git.
+#[derive(Default)]
+struct WrapperProcesses(Mutex<HashMap<u32, String>>);
+impl ProcessControl for WrapperProcesses {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        SystemProcesses.kill(pid)
+    }
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        if !self.alive(pid) {
+            return None;
+        }
+        let mut starts = self.0.lock().unwrap();
+        if let Some(start) = starts.get(&pid) {
+            return Some(start.clone());
+        }
+        let start = SystemProcesses.start_identity(pid)?;
+        starts.insert(pid, start.clone());
+        Some(start)
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        Ok(vec![])
+    }
+    fn executables(&self) -> Result<Vec<dagq::domain::disk::ProcessExecutable>> {
+        Ok(vec![])
+    }
+}
+
+/// A passed run already used its conflict request limit. Its next real
+/// Git conflict starts no further turn; its conflicting landing parks it
+/// and the retry inherits its own commit and lands. The counter's frontier
+/// is unit-tested; live-session resolution has its own Git representative.
 #[test]
 fn precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch() {
-    retried_with_its_branch_past(CONFLICT_ONLY_RESUME_LIMIT, None);
-}
-
-/// `[resume] conflict_only_limit` of dagq.toml sets the limit (ADR-0047
-/// decision 24): with 2, the third conflict retries the task.
-#[test]
-fn the_conflict_only_limit_of_dagq_toml_retries_the_task_sooner() {
-    retried_with_its_branch_past(2, Some("[resume]\nconflict_only_limit = 2\n"));
-}
-
-/// The run of task 1 is asked to rebase `limit` times, then retried with
-/// its branch carried over; `config` is committed as dagq.toml first.
-fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
+    // The counter's default and configured frontiers are pure unit tests.
+    // Start at the frontier so this Git case runs only the exhausted
+    // precheck, the real conflicting landing and the inherited retry.
+    let limit = 1;
     let (_dir, repo, db) = fixture();
-    if let Some(config) = config {
-        fs::write(repo.join("dagq.toml"), config).unwrap();
-        git(&repo, &["add", "dagq.toml"]);
-        git(&repo, &["commit", "-q", "-m", "set the resume limit"]);
-    }
-    // The first run's session rebases at each request; the retry's run
-    // commits its work.
-    // The first run writes its id to `first-run`; a run of another id is
-    // the retry's.
+    fs::write(
+        repo.join("dagq.toml"),
+        "[resume]\nconflict_only_limit = 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-q", "-m", "set the resume limit"]);
     let first = "\"$(git rev-parse --path-format=absolute --git-common-dir)/first-run\"";
+    // Host retries receive the earlier branch through the prompt and ref;
+    // the worker must take its changes over before writing its new receipt.
     let agent = format!(
-        "[ -f {first} ] || printf '%s' \"$RUN_ID\" > {first}\n\
-         if [ \"$(cat {first})\" != \"$RUN_ID\" ]; then {IDLE_AGENT}; else {}\nfi",
-        rebasing_agent(limit)
+        "git cherry-pick --no-commit \"refs/dagq/runs/$(cat {first})\" || {{ \
+         printf 'resolved by the retry\\n' > change.txt; git add change.txt; }}; \
+         git commit -q -m 'carry the earlier work'; \
+         receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
     );
-    let backend = TestWorkspace::new(&db, false, &agent);
-    let mut reviews = vec![moving_main_then_pass(); limit + 1];
-    reviews.push(verdict("pass", &[], "meets the acceptance"));
-    let reviewer = TestReviewer::new(&reviews);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    let processes = Arc::new(WrapperProcesses::default());
+    let mut backend = TestWorkspace::new(&db, false, &agent);
+    backend.wrapper_processes = Some(processes.clone());
+    let handle = backend.stand_in();
+    let pid = dagq::domain::background_wrapper::BackgroundHandle::parse(&handle)
+        .unwrap()
+        .pid;
+    let run = orphan_run(&repo, &db, "earlier-supervisor", pid, pid);
+    fs::write(repo.join(".git/first-run"), run.id().as_str()).unwrap();
+    let tree = Path::new(run.worktree_path().unwrap());
+    fs::write(tree.join("change.txt"), "the run's work\n").unwrap();
+    fs::write(tree.join("carried.txt"), "carried from the first run\n").unwrap();
+    git(tree, &["add", "change.txt", "carried.txt"]);
+    git(
+        tree,
+        &["commit", "-q", "-m", "work before the last conflict"],
+    );
+    let head = git_out(tree, &["rev-parse", "HEAD"]);
+    write_receipt(&run, &head, "succeeded", "work before the last conflict");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), head],
+        )
+        .unwrap();
+    let queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.run(run.id()).unwrap();
+    queue.record_runtime_event(run.id(), EventKind::ValidationFinished,
+        json!({"status": "awaiting_integration", "receipt": session_receipt(&run, &head, "succeeded", "work before the last conflict")})).unwrap();
+    // One earlier resolution request already used this test's limit.
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ConflictPrecheck,
+            json!({"attempt": 1, "requested": true}),
+        )
+        .unwrap();
+    // This pass completed the earlier resolution: adoption must precheck
+    // the new main, rather than wait again for the historical request.
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ReviewFinished,
+            bound_as_judged(
+                &repo,
+                &run,
+                EventKind::ReviewFinished,
+                json!({"attempt": 1, "verdict": "pass", "reasons": [], "summary": "meets it"}),
+            ),
+        )
+        .unwrap();
+    age_lease(&db, &run, 31);
+    fs::write(repo.join("change.txt"), "main moved\n").unwrap();
+    git(&repo, &["add", "change.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main moves into the run"]);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    // Only Git is this case's boundary. The earlier wrapper is a port
+    // stand-in: acknowledge its exit request without another worker turn.
+    // The scoped thread is joined on every path and its poll is bounded.
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    let deadline = common::deadline(Duration::from_secs(20));
+    let outcome = std::thread::scope(|scope| {
+        let wrapper = scope.spawn(|| {
+            while !exit.is_file() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let observed = exit.is_file();
+            backend
+                .stands
+                .lock()
+                .unwrap()
+                .retain(|(id, _)| id != &handle);
+            let mut q = SqliteQueue::open(&db).unwrap();
+            dagq::application::RunCoordination::wrapper_exited(&mut q, run.id(), pid, 0).unwrap();
+            observed
+        });
+        let mut options = supervise_options(4, true);
+        options.processes = Some(runtime::ProcessesPort(processes));
+        let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+        assert!(
+            wrapper.join().unwrap(),
+            "the earlier wrapper received no exit request"
+        );
+        outcome
+    });
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -58,6 +166,17 @@ fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
     assert_eq!(first.status(), RunStatus::Failed);
     assert_eq!(detail.runs[1].status(), RunStatus::Integrated);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert!(
+        repo.join("carried.txt").is_file(),
+        "first head {:?}; expected {head}; inherited {:?}; events {:?}",
+        first.result_commit(),
+        payloads(&detail, "run_inherited"),
+        event_kinds(&detail)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("carried.txt")).unwrap(),
+        "carried from the first run\n"
+    );
     let of_first = |kind: &str| -> Vec<&Value> {
         detail
             .events
@@ -75,7 +194,10 @@ fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
     assert_eq!(last["attempt"], limit + 1);
     assert_eq!(last["exhausted"], true);
     assert!(last.get("asked").is_none(), "{last}");
-    assert_eq!(session_texts(&first).len(), limit);
+    assert!(
+        session_texts(&first).is_empty(),
+        "the exhausted run gets no new request"
+    );
     // Its landing conflicted and parked it; no resume started.
     let deferred = of_first("integration_deferred");
     assert_eq!(deferred.len(), 1, "{:?}", event_kinds(&detail));

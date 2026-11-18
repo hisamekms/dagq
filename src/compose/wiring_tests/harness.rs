@@ -147,6 +147,7 @@ pub(super) struct Wiring {
     _memdb: Connection,
     deadline: Instant,
     tick: Duration,
+    continuous: bool,
     generators: Generators,
     pid: u32,
     /// Whether the supervisor also runs Codex headless workers and jobs
@@ -266,6 +267,7 @@ impl Wiring {
             _memdb: memdb,
             deadline,
             tick: TICK,
+            continuous: false,
             generators,
             pid,
             codex: false,
@@ -315,6 +317,13 @@ impl Wiring {
     /// is unchanged. Other tests retain their defaults.
     pub(super) fn with_tick(mut self, tick: Duration) -> Self {
         self.tick = tick;
+        self
+    }
+
+    /// Keep passing while claims are held so the test can change the queue
+    /// before a later pass, within the same supervisor and test deadline.
+    pub(super) fn with_continuous_passes(mut self) -> Self {
+        self.continuous = true;
         self
     }
 
@@ -935,6 +944,7 @@ impl Wiring {
             let parts = Parts {
                 service: self.service(),
                 tick: self.tick,
+                continuous: self.continuous,
                 db: self.db.clone(),
                 pid: self.pid,
                 codex: self.codex,
@@ -1032,6 +1042,7 @@ impl Wiring {
 /// What the supervisor's thread builds its ports of.
 struct Parts {
     tick: Duration,
+    continuous: bool,
     service: Arc<dyn ServiceCaller>,
     db: PathBuf,
     pid: u32,
@@ -1227,7 +1238,8 @@ impl Parts {
             layout,
         };
         let mut settings = LoopSettings {
-            once: self.pass_probe.is_none()
+            once: !self.continuous
+                && self.pass_probe.is_none()
                 && ports.repository_startup_file.is_none()
                 && ports.operational_file.is_none(),
             cleanup_jobs: self

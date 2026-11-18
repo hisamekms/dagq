@@ -28,6 +28,7 @@ mod exit_reasons;
 mod fresh_session_decisions;
 mod full_disk;
 mod human_disk;
+mod investigation_limit;
 mod landing_answers;
 mod landing_binding;
 mod landing_incremental;

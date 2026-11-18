@@ -546,10 +546,7 @@ impl Supervisor<'_> {
             max: self.claim.limits.max_investigations.value,
             grace_secs: self.claim.conflicts.config.waiting_owner_grace_secs,
         };
-        let investigations = if investigation.max.is_some()
-            && limits.limit(ExecutionClass::Spike).is_none()
-            && lined.iter().any(|candidate| candidate.class.is_spike())
-        {
+        let investigations = if investigation_read_needed(investigation, limits, &lined) {
             self.queue.investigations()?
         } else {
             Investigations::default()
@@ -943,9 +940,66 @@ fn run_owner_waiting_since(queue: &mut dyn Queue, run: &RunId) -> Result<Option<
     Ok(owner_waiting_since(&asks, leased, &events))
 }
 
+/// The Spike limit has priority; only an otherwise claimable Spike needs
+/// the investigation snapshot to decide whether it opens another goal.
+fn investigation_read_needed(
+    investigation: InvestigationLimit,
+    classes: ClassLimits,
+    candidates: &[claim_order::Candidate],
+) -> bool {
+    investigation.max.is_some()
+        && classes.limit(ExecutionClass::Spike).is_none()
+        && candidates
+            .iter()
+            .any(|candidate| candidate.class.is_spike())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spike_limit_precedes_the_investigation_limit() {
+        let investigations = InvestigationLimit {
+            max: Some(1),
+            grace_secs: 600,
+        };
+        let full = ClassLimits {
+            max_spikes: Some(1),
+            running_spikes: 1,
+        };
+        let spike = claim_order::Candidate {
+            id: TaskId::new(1),
+            class: ExecutionClass::Spike,
+            priority: Priority::Normal,
+            ready_at_ms: None,
+        };
+        assert!(!investigation_read_needed(investigations, full, &[spike]));
+        let free = ClassLimits {
+            running_spikes: 0,
+            ..full
+        };
+        assert!(investigation_read_needed(investigations, free, &[spike]));
+        assert!(!investigation_read_needed(
+            InvestigationLimit::default(),
+            free,
+            &[spike]
+        ));
+        let implementation = claim_order::Candidate {
+            class: ExecutionClass::Implementation,
+            ..spike
+        };
+        assert!(!investigation_read_needed(
+            investigations,
+            free,
+            &[implementation]
+        ));
+        assert!(investigation_read_needed(
+            investigations,
+            free,
+            &[implementation, spike]
+        ));
+    }
 
     #[test]
     fn only_consecutive_changed_values_invalidate_the_hotspot_cache() {

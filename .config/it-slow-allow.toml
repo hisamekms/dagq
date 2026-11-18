@@ -392,13 +392,7 @@ task = 1707
 # 8.518s, class B
 [[test]]
 name = "runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch"
-reason = "B 境界（守る境界）: real git rebase conflict precheck representative"
-task = 1707
-
-# 5.809s, class D
-[[test]]
-name = "runtime_precheck::the_conflict_only_limit_of_dagq_toml_retries_the_task_sooner"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: configured limit counting"
+reason = "B 境界（Git）: an exhausted precheck on real Git, its conflicting rebase landing parked, and retry_inherit landing with the branch carried over; the used request frontier is seeded, and default counting is covered by domain::resume unit tests"
 task = 1707
 
 # 7.053s, class unknown
@@ -931,12 +925,6 @@ task = 2269
 [[test]]
 name = "runtime_spike_replan::a_spike_s_landing_records_one_request_whatever_the_verdict_and_passes_add_none"
 reason = "B 境界（Git・SQLite・supervisor の配線）: 3 本の Spike を実際の worker の session で走らせ integrate で着地させ、着地のトランザクションが依頼を記録すること（task の completed の次の event）と、2 つの接続の照合の pass が依頼を二重にも欠けにもしないことを確かめる。依頼の言葉・参照・attention の判断は domain::plan_request の unit test"
-task = 1493
-
-# 10.9s to 18.5s (stress 5 with six others at once, task 1493)
-[[test]]
-name = "runtime_spike_replan::the_investigation_limit_holds_a_new_goal_s_spike_until_an_investigation_ends"
-reason = "B 境界（SQLite・supervisor の配線・CLI）: max_spikes と max_investigations を dagq.toml から読んだ supervisor が、Spike の上限と調査中の計画の上限の控えを claim_deferred に記録して枠を実装に渡し、candidates・graph がその記録を出し、着地と依頼の却下で調査が終わった pass に控えた Spike を claim することを、実際の worker の session と integrate で確かめる。上限の判断は domain::investigation と domain::claim_order の unit test"
 task = 1493
 
 # 7.0s to 7.6s (stress 5, task 2416)
