@@ -331,13 +331,17 @@ pub fn client_mode_env(db: &Path, env: &[(&str, &str)]) -> Option<Vec<(String, S
 /// until it answers. It stops when the test's process or the queue's
 /// directory goes ([`OwnedByTest`]).
 pub fn serve_for_test(db: &Path, env: &[(String, String)]) {
+    serve_binary_for_test(Path::new(env!("CARGO_BIN_EXE_dagq")), db, env);
+}
+
+fn serve_binary_for_test(binary: &Path, db: &Path, env: &[(String, String)]) {
     let dir = db.parent().unwrap();
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("test-service.log"))
         .unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    let mut command = Command::new(binary);
     command.without_actor_env().owned_by_test();
     command.envs(env.iter().map(|(key, value)| (key, value)));
     // A child left running: it is reaped with the test's process.
@@ -489,6 +493,30 @@ impl Served {
 impl Drop for Served {
     fn drop(&mut self) {
         unserve(&self.0);
+    }
+}
+
+/// A real queue service started directly, without CLI start/stop commands.
+/// Use where another process is the boundary and the service only supports it.
+pub struct DirectlyServed(PathBuf);
+
+impl DirectlyServed {
+    pub fn start_with_binary(db: &Path, binary: &Path) -> Self {
+        // Match cli::invoke's isolated host configuration. Otherwise its
+        // first call restarts this supporting service for a changed read env.
+        let config = db.parent().unwrap().join("config");
+        serve_binary_for_test(
+            binary,
+            db,
+            &[("XDG_CONFIG_HOME".into(), config.to_str().unwrap().into())],
+        );
+        Self(db.to_owned())
+    }
+}
+
+impl Drop for DirectlyServed {
+    fn drop(&mut self) {
+        stop_for_test(self.0.parent().unwrap());
     }
 }
 

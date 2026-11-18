@@ -188,12 +188,16 @@ impl HostOpsState {
             .get_or_insert_with(|| head.clone())
             .clone();
         let base = base_commit(&updates, &env.layout.version, Some(&first));
-        if !retry_requested(&updates) {
-            if base.as_deref() == Some(head.as_str())
-                || self.update.seen.as_deref() == Some(head.as_str())
-            {
-                return Ok(());
-            }
+        let look = landing_look(
+            &head,
+            base.as_deref(),
+            self.update.seen.as_deref(),
+            retry_requested(&updates),
+        );
+        if look == LandingLook::Ignore {
+            return Ok(());
+        }
+        if look == LandingLook::Compare {
             let changes = match &base {
                 Some(base) => match env.repository.changed_paths(base, &head) {
                     Ok(paths) => changes_runtime(&paths),
@@ -323,6 +327,25 @@ impl HostOpsState {
         );
         self.update.job = Some(job);
         Ok(())
+    }
+}
+
+/// Whether a head needs its runtime diff read, can be built on a retry,
+/// or has already been handled. A retry also rebuilds an unchanged head.
+#[derive(Debug, PartialEq, Eq)]
+enum LandingLook {
+    Ignore,
+    Compare,
+    Build,
+}
+
+fn landing_look(head: &str, base: Option<&str>, seen: Option<&str>, retry: bool) -> LandingLook {
+    if retry {
+        LandingLook::Build
+    } else if base == Some(head) || seen == Some(head) {
+        LandingLook::Ignore
+    } else {
+        LandingLook::Compare
     }
 }
 
@@ -486,6 +509,46 @@ fn check_due(since_last: Option<Duration>, interval: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_new_landing_is_compared_and_a_seen_head_only_builds_on_retry() {
+        for (head, base, seen, retry, expected) in [
+            ("seed", Some("unknown"), None, false, LandingLook::Compare),
+            ("seed", Some("seed"), None, false, LandingLook::Ignore),
+            (
+                "docs",
+                Some("seed"),
+                Some("docs"),
+                false,
+                LandingLook::Ignore,
+            ),
+            (
+                "source",
+                Some("seed"),
+                Some("docs"),
+                false,
+                LandingLook::Compare,
+            ),
+            ("source", Some("source"), None, false, LandingLook::Ignore),
+            (
+                "restored-source",
+                Some("source"),
+                None,
+                false,
+                LandingLook::Compare,
+            ),
+            (
+                "source",
+                Some("source"),
+                Some("source"),
+                true,
+                LandingLook::Build,
+            ),
+            ("seed", None, None, false, LandingLook::Compare),
+        ] {
+            assert_eq!(landing_look(head, base, seen, retry), expected);
+        }
+    }
 
     /// The automatic update's job is the runtime binary's `auto-update` of
     /// main's head for this supervisor, given this supervisor's providers

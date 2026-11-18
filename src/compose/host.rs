@@ -1145,6 +1145,27 @@ impl OneShot {
         )
     }
 
+    /// The test CLI install entry with a named source fixture.
+    /// Normal callers use `install`, whose adapter has no fixture input.
+    #[cfg(feature = "test-paths")]
+    pub fn install_with_fixture(
+        &self,
+        location: &QueueLocation,
+        launchd: &dyn LaunchAgent,
+        options: &InstallOptions,
+        watch_timeout: Duration,
+        fixture: PathBuf,
+    ) -> Result<Value> {
+        self.install_on(
+            location,
+            launchd,
+            &SystemProcesses,
+            &LocalBinaries::with_fixture(fixture),
+            options,
+            watch_timeout,
+        )
+    }
+
     /// [`Self::install`] with the processes `processes` (the drain's
     /// `down`'s too) and the binaries `binaries`: tests' fakes.
     pub fn install_on(

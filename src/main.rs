@@ -247,6 +247,10 @@ enum Command {
         /// before the install puts the old one back and tells the inbox (tests shorten it).
         #[arg(long, hide = true, default_value_t = dagq::application::update::WATCH_TIMEOUT.as_secs())]
         watch_timeout: u64,
+        /// Test build: reuse this source inode and omit its throwaway-queue probe.
+        #[cfg(feature = "test-paths")]
+        #[arg(long, hide = true)]
+        binary_fixture: Option<PathBuf>,
         /// Known to a build whose install sends its steps to the queue service: what an install
         /// probes a binary it rolls back to with (`--help` with it), else it hands that binary
         /// the whole install.
@@ -5544,6 +5548,8 @@ fn execute(cli: Cli) -> Result<Value> {
         e2e_timeout,
         poll_ms,
         watch_timeout,
+        #[cfg(feature = "test-paths")]
+        binary_fixture,
         sends_steps,
     } = cli.command
     {
@@ -5620,6 +5626,16 @@ fn execute(cli: Cli) -> Result<Value> {
                 Some(release.as_str()).filter(|version| !version.is_empty()),
                 &options,
                 Duration::from_secs(watch_timeout),
+            );
+        }
+        #[cfg(feature = "test-paths")]
+        if let Some(fixture) = binary_fixture {
+            return one_shot.install_with_fixture(
+                &location,
+                &Launchctl { uid: current_uid() },
+                &options,
+                Duration::from_secs(watch_timeout),
+                fixture,
             );
         }
         return one_shot.install(

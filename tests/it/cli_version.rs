@@ -1,9 +1,7 @@
 use crate::common;
-use dagq::domain::EventKind;
-use dagq::infrastructure::git_binary::git_executable;
 
 use common::cli::*;
-use common::{Bounded, WithoutActor, service::OwnedByTest};
+use common::{Bounded, WithoutActor};
 
 use std::{
     path::Path,
@@ -400,752 +398,51 @@ const FAST_SUPERVISOR: [&str; 6] = [
     "100",
 ];
 
-/// `install` puts a binary in place by a rename that keeps the old one as
-/// `<name>.previous`, and hands a running supervisor over to it (ADR-0045
-/// decisions 10, 11, 14): the supervisor process execs the new file under
-/// its own pid and token and goes on. `--rollback` swaps the two back the
-/// same way; without a previous binary it refuses.
-#[test]
-fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("queue").join("queue.db");
-    ok(&db, &["init"]);
-    let repo = dir.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    for args in [
-        &["init", "-q", "-b", "main"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "seed",
-        ],
-    ] {
-        assert!(
-            Command::new(git_executable().expect("git executable"))
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .bounded_status()
-                .unwrap()
-                .success()
-        );
-    }
-    let stub = |name: &str, text: &str| {
-        let path = dir.path().join(name);
-        crate::common::template::script(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n"));
-
-        path
-    };
-    let claude = stub("claude", "stub 1.0");
-    // The fixed binary the supervisor runs, and the one `install` replaces.
-    let fixed = dir.path().join("bin").join("dagq");
-    std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    crate::common::template::dagq(&fixed);
-    let previous = dir.path().join("bin").join("dagq.previous");
-
-    let missing = invoke(
-        &db,
-        &["install", "--rollback", "--to", fixed.to_str().unwrap()],
-    );
-    assert!(!missing.status.success());
-    assert!(
-        String::from_utf8_lossy(&missing.stderr).contains("no previous binary"),
-        "{}",
-        String::from_utf8_lossy(&missing.stderr)
-    );
-
-    // Killed when the test ends however it does (task 1352): a panic left
-    // it running from the copy, and the service it started with it.
-    let mut supervisor = common::KillOnDrop::new(
-        Command::new(&fixed)
-            .without_actor_env()
-            .owned_by_test()
-            .arg("--db")
-            .arg(&db)
-            .args(["supervise", "--observe-interval", "0", "--repo"])
-            .arg(&repo)
-            .arg("--claude")
-            .arg(&claude)
-            // Looks for the handoff every 100ms instead of 2s (task 1048).
-            .args(FAST_SUPERVISOR)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-        "the supervisor",
-    );
-    let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
-    let started = std::time::Instant::now();
-    // The registration and its acceptance of handoffs are two of the
-    // supervisor's requests to the queue service (ADR-t3102-3 decision 3).
-    while !registered()
-        .first()
-        .is_some_and(|registration| registration.handoff_accepted)
-    {
-        assert!(
-            started.elapsed().as_secs() < 30,
-            "the supervisor never registered to accept a handoff"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let token = registered()[0].token.clone();
-    assert_eq!(registered()[0].pid, supervisor.child().id());
-
-    for args in [&["--from", env!("CARGO_BIN_EXE_dagq")][..], &["--rollback"]] {
-        let mut full = vec![
-            "install",
-            "--to",
-            fixed.to_str().unwrap(),
-            "--handoff-timeout",
-            "60",
-            "--poll-ms",
-            "50",
-        ];
-        full.extend_from_slice(args);
-        let report = ok(&db, &full);
-        assert_eq!(report["outcome"], "installed", "{report}");
-        assert_eq!(report["version"], dagq::VERSION);
-        assert_eq!(report["previous"], previous.to_str().unwrap());
-        assert_eq!(report["migrated"], Value::Null);
-        assert_eq!(
-            report["supervisors"][0]["token"],
-            token.as_str(),
-            "{report}"
-        );
-        assert_eq!(report["supervisors"][0]["pid"], supervisor.child().id());
-        assert!(previous.is_file());
-        let registration = registered().remove(0);
-        assert_eq!(registration.token, token);
-        assert_eq!(registration.pid, supervisor.child().id());
-        assert_eq!(registration.handoff_binary, None);
-        assert_eq!(registration.binary_version.as_deref(), Some(dagq::VERSION));
-        assert!(
-            supervisor.child().try_wait().unwrap().is_none(),
-            "the supervisor exited"
-        );
-    }
-
-    // SIGINT drains the continued supervisor like any other.
-    unsafe { libc::kill(supervisor.child().id() as i32, libc::SIGINT) };
-    let exit = {
-        let _waiting = common::within(common::STEP_LIMIT, "the supervisor to drain on SIGINT");
-        supervisor.child().wait().unwrap()
-    };
-    assert!(exit.success());
-    assert!(registered().is_empty());
-}
-
-/// A person's `install` of a build whose supervisor dies at its start
-/// (ADR-0073 decisions 13 and 14): with a real supervisor process, the
-/// handoff fails, the binary it replaced is put back, the command exits
-/// non-zero with the `update_failed` it recorded on stdout, and the inbox
-/// is asked; the automatic update's state is left alone.
-#[test]
-fn install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("queue").join("queue.db");
-    ok(&db, &["init"]);
-    let repo = dir.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    for args in [
-        &["init", "-q", "-b", "main"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "seed",
-        ],
-    ] {
-        assert!(
-            Command::new(git_executable().expect("git executable"))
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .bounded_status()
-                .unwrap()
-                .success()
-        );
-    }
-    let stub = |name: &str, text: &str| {
-        let path = dir.path().join(name);
-        crate::common::template::script(&path, text);
-        path
-    };
-    let claude = stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n");
-    let bin = env!("CARGO_BIN_EXE_dagq");
-    let quoted_bin = crate::common::shell_path(bin);
-    // Like the real binary for every check `install` makes, but a
-    // supervisor it runs dies at once.
-    let broken = stub(
-        "broken-dagq",
-        &format!(
-            "#!/bin/sh\ncase \" $* \" in *\" --handoff-token probe \"*) exec {quoted_bin} \"$@\";; esac\n\
-for a in \"$@\"; do if [ \"$a\" = supervise ]; then echo 'broken build' >&2; exit 3; fi; done\n\
-exec {quoted_bin} \"$@\"\n"
-        ),
-    );
-    let fixed = dir.path().join("bin").join("dagq");
-    std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    crate::common::template::dagq(&fixed);
-    // The fixed binary is the queue's, whose service only it starts
-    // (ADR-t3102-2 decision 3).
-    dagq::infrastructure::queue_binary::write(
-        &db,
-        &dagq::infrastructure::queue_binary::QueueBinary::new(&fixed),
-    )
-    .unwrap();
-    let mut supervisor = common::KillOnDrop::new(
-        Command::new(&fixed)
-            .without_actor_env()
-            .owned_by_test()
-            .arg("--db")
-            .arg(&db)
-            .args(["supervise", "--observe-interval", "0", "--repo"])
-            .arg(&repo)
-            .arg("--claude")
-            .arg(&claude)
-            .args(FAST_SUPERVISOR)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-        "the supervisor",
-    );
-    let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
-    let started = std::time::Instant::now();
-    while registered().is_empty() {
-        assert!(
-            started.elapsed().as_secs() < 30,
-            "the supervisor never registered"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    let done = std::sync::atomic::AtomicBool::new(false);
-    /// Ends the reaping loop below however the install ends, a panic
-    /// included.
-    struct Done<'a>(&'a std::sync::atomic::AtomicBool);
-    impl Drop for Done<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    let output = std::thread::scope(|scope| {
-        let install = scope.spawn(|| {
-            let _done = Done(&done);
-            invoke(
-                &db,
-                &[
-                    "install",
-                    "--from",
-                    broken.to_str().unwrap(),
-                    "--to",
-                    fixed.to_str().unwrap(),
-                    "--handoff-timeout",
-                    "60",
-                    "--poll-ms",
-                    "50",
-                    "--watch-timeout",
-                    "5",
-                ],
-            )
-        });
-        // Reaps the supervisor once the broken build's exec ended it.
-        let _waiting = common::within(common::STEP_LIMIT, "the install of the broken build");
-        while !done.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = supervisor.child().try_wait();
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        install.join().unwrap()
-    });
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("update_failed"), "{stderr}");
-    let report: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stdout)));
-    assert_eq!(report["source"], "install", "{report}");
-    assert_eq!(report["stage"], "install", "{report}");
-    assert_eq!(report["kept"], false, "{report}");
-    assert_eq!(report["restored"]["restored"], true, "{report}");
-    assert_eq!(
-        std::fs::read(&fixed).unwrap(),
-        std::fs::read(bin).unwrap(),
-        "the binary in place is not the one the broken build replaced"
-    );
-    let asks = ok(&db, &["asks"]);
-    let ask = asks["asks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|ask| ask["kind"] == "update_failed")
-        .unwrap_or_else(|| panic!("no update_failed ask: {asks}"));
-    assert_eq!(ask["id"], report["ask_id"], "{ask}");
-    assert!(
-        ask["question"]
-            .as_str()
-            .unwrap()
-            .contains("A person's `dagq install`"),
-        "{ask}"
-    );
-    let status = ok(&db, &["status"]);
-    assert_eq!(status["auto_update"]["state"], "idle", "{status}");
-}
-
-/// `supervise --auto-update` builds and installs the runtime of every
-/// landing on main that changes it (ADR-0045 decision 17): its job builds
-/// the commit in the queue's own checkout (a stub build copies a binary),
-/// puts it in place like `install` and hands the supervisor over to it
-/// under its pid and token. A commit that changes no runtime path starts
-/// no job. A build whose supervisor dies at its start puts the old binary
-/// back and opens the `update_failed` ask; `status` shows each step.
-#[test]
-fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("queue").join("queue.db");
-    ok(&db, &["init"]);
-    let repo = dir.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    let git = |args: &[&str]| {
-        let output = Command::new(git_executable().expect("git executable"))
-            .arg("-C")
-            .arg(&repo)
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-            .args(args)
-            .bounded_output()
-            .unwrap();
-        assert!(output.status.success(), "git {args:?}: {output:?}");
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    };
-    let commit = |path: &str| {
-        let file = repo.join(path);
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, path).unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-q", "-m", path]);
-        git(&["rev-parse", "HEAD"])
-    };
-    git(&["init", "-q", "-b", "main"]);
-    // The automatic update builds only dagq's source (ADR-t614-1).
-    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
-    let seed = commit("seed.txt");
-    let stub = |name: &str, text: &str| {
-        let path = dir.path().join(name);
-        crate::common::template::script(&path, text);
-
-        path
-    };
-    let claude = stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n");
-    let bin = env!("CARGO_BIN_EXE_dagq");
-    let quoted_bin = crate::common::shell_path(bin);
-    // Like the real binary for every check `install` makes, but a
-    // supervisor it runs dies at once.
-    let broken = stub(
-        "broken-dagq",
-        &format!(
-            "#!/bin/sh\ncase \" $* \" in *\" --handoff-token probe \"*) exec {quoted_bin} \"$@\";; esac\n\
-for a in \"$@\"; do if [ \"$a\" = supervise ]; then echo 'broken build' >&2; exit 3; fi; done\n\
-exec {quoted_bin} \"$@\"\n"
-        ),
-    );
-    // The copy replaces the last build's binary (by a rename) rather than
-    // writing over it, as cargo does: a process of it may still run (the install probe's throwaway
-    // service as it exits), and Linux refuses a write over a running
-    // binary (ETXTBSY), which failed the broken build at its build stage.
-    // A good build is a hard link of the template of this build
-    // (`common::template::dagq`): a copy is a new file macOS checks at its
-    // first exec (about 2 s), and the job runs the build before it installs
-    // it. The installed copy is new either way and is checked as it was.
-    let built = dir.path().join("built").join("dagq");
-    std::fs::create_dir_all(built.parent().unwrap()).unwrap();
-    crate::common::template::dagq(&built);
-    let build = format!(
-        "mkdir -p \"$CARGO_TARGET_DIR/release\" && rm -f \"$CARGO_TARGET_DIR/release/dagq.new\" \
-&& if [ -f src/broken ]; then cp {} \
-\"$CARGO_TARGET_DIR/release/dagq.new\"; else ln -f {} \"$CARGO_TARGET_DIR/release/dagq.new\"; fi \
-&& mv -f \"$CARGO_TARGET_DIR/release/dagq.new\" \"$CARGO_TARGET_DIR/release/dagq\"",
-        crate::common::shell_path(&broken),
-        crate::common::shell_path(&built)
-    );
-    let fixed = dir.path().join("bin").join("dagq");
-    std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    crate::common::template::dagq(&fixed);
-    // The fixed binary is the queue's, whose service only it starts
-    // (ADR-t3102-2 decision 3).
-    dagq::infrastructure::queue_binary::write(
-        &db,
-        &dagq::infrastructure::queue_binary::QueueBinary::new(&fixed),
-    )
-    .unwrap();
-    let log = dir.path().join("supervisor.log");
-    // Killed when the test ends however it does (task 1352): a panic left
-    // it running from the copy, and the service it started with it.
-    let mut supervisor = common::KillOnDrop::new(
-        Command::new(&fixed)
-            .without_actor_env()
-            .owned_by_test()
-            .arg("--db")
-            .arg(&db)
-            .args(["supervise", "--observe-interval", "0", "--repo"])
-            .arg(&repo)
-            .arg("--claude")
-            .arg(&claude)
-            .args(["--auto-update", "--update-interval", "1"])
-            .arg("--update-build-command")
-            .arg(&build)
-            // The e2e gate (ADR-t963-1) passes without running the e2e.
-            .args(["--update-e2e-command", "echo 'test e2e::stub ... ok'"])
-            // The job's watch sees the next heartbeat sooner (task 1048).
-            .args(FAST_SUPERVISOR)
-            .args(["--update-poll-ms", "50"])
-            .stdout(std::process::Stdio::null())
-            // Every process of the supervisor, the exec'd ones too, appends
-            // here: the looks at main are waited for in it.
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .unwrap(),
-        "the supervisor",
-    );
-    let supervisor_actor_id = format!("supervisor:{}", supervisor.child().id());
-    // Waits for the look at main's `sha` that builds nothing, for `why`;
-    // a later look at the same head starts no job either.
-    let looked = |sha: &str, why: &str| {
-        let (line, log) = (
-            format!("automatic update: main's {sha} builds nothing: {why}"),
-            &log,
-        );
-        move || std::fs::read_to_string(log).is_ok_and(|text| text.contains(&line))
-    };
-    let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
-    let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
-        let started = std::time::Instant::now();
-        while !done() {
-            assert!(
-                started.elapsed().as_secs() < 90,
-                "{what} did not happen within 90s; status: {}",
-                ok(&db, &["status"])
-            );
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-    };
-    // The registration and its automatic update are two of the
-    // supervisor's requests to the queue service (ADR-t3102-3 decision 3).
-    wait("the registration with its automatic update", &mut || {
-        registered()
-            .first()
-            .is_some_and(|registration| registration.auto_update)
-    });
-    let token = registered()[0].token.clone();
-    let updates = || SqliteQueue::open(&db).unwrap().update_events(100).unwrap();
-    let installed = |sha: &str| {
-        updates()
-            .iter()
-            .any(|u| u.kind == EventKind::UpdateInstalled && u.payload["commit"] == sha)
-    };
-
-    // The test binary names a commit this repository does not have, so the
-    // first look builds main's head.
-    wait("the update to the seed", &mut || installed(&seed));
-    let status = ok(&db, &["status"]);
-    assert_eq!(status["auto_update"]["enabled"], true, "{status}");
-    assert_eq!(status["auto_update"]["state"], "installed", "{status}");
-    assert_eq!(status["auto_update"]["commit"], seed.as_str(), "{status}");
-    assert_eq!(status["supervisors"][0]["auto_update"], true, "{status}");
-    assert_eq!(status["version"], dagq::VERSION);
-    assert!(fixed.with_file_name("dagq.previous").is_file());
-    let registration = registered().remove(0);
-    assert_eq!(
-        (registration.token.as_str(), registration.pid),
-        (token.as_str(), supervisor.child().id())
-    );
-    assert!(
-        supervisor.child().try_wait().unwrap().is_none(),
-        "the supervisor exited"
-    );
-    let checkout = db.parent().unwrap().join("update").join("checkout");
-    assert!(checkout.join("seed.txt").is_file());
-
-    // Documentation changes no runtime path: no job.
-    let started = |sha: &str| {
-        updates()
-            .iter()
-            .any(|u| u.kind == EventKind::UpdateStarted && u.payload["commit"] == sha)
-    };
-    let docs = commit("docs/notes.md");
-    wait(
-        "the look at the documentation change",
-        &mut looked(&docs, "it changes no runtime path"),
-    );
-    assert!(!started(&docs), "{:?}", updates());
-
-    let source = commit("src/lib.rs");
-    wait("the update to the source change", &mut || {
-        installed(&source)
-    });
-    assert!(
-        supervisor.child().try_wait().unwrap().is_none(),
-        "the supervisor exited"
-    );
-    assert_eq!(registered()[0].pid, supervisor.child().id());
-
-    // Once the repository is not dagq's source (ADR-t614-1), runtime
-    // landings build nothing; they do again once it is.
-    // A look reads the working file before main's head. Committed before the
-    // working file changes, so no look sees the new manifest with the old
-    // head; the working file leaves dagq first and is committed once a look
-    // read it, so no look that read dagq's manifest sees the new head either.
-    let manifest = |name: &str| {
-        if name != "dagq" {
-            std::fs::write(
-                repo.join("Cargo.toml"),
-                format!("[package]\nname = \"{name}\"\n"),
-            )
-            .unwrap();
-            wait(
-                "the look at the working file outside dagq's source",
-                &mut || {
-                    std::fs::read_to_string(&log)
-                        .is_ok_and(|text| text.contains("the repository is not dagq's source (its"))
-                },
-            );
-        }
-        let staged = dir.path().join("Cargo.toml.staged");
-        std::fs::write(&staged, format!("[package]\nname = \"{name}\"\n")).unwrap();
-        let blob = git(&["hash-object", "-w", staged.to_str().unwrap()]);
-        git(&[
-            "update-index",
-            "--cacheinfo",
-            &format!("100644,{blob},Cargo.toml"),
-        ]);
-        git(&["commit", "-q", "-m", name]);
-        git(&["checkout", "--", "Cargo.toml"]);
-        git(&["rev-parse", "HEAD"])
-    };
-    let renamed = manifest("myapp");
-    let elsewhere = commit("src/elsewhere.rs");
-    wait(
-        "the look at the runtime change outside dagq's source",
-        &mut looked(&elsewhere, "the repository is not dagq's source"),
-    );
-    assert!(
-        !started(&renamed) && !started(&elsewhere),
-        "{:?}",
-        updates()
-    );
-    let restored = manifest("dagq");
-    wait("the update once dagq's source again", &mut || {
-        installed(&restored)
-    });
-
-    // A build whose supervisor dies at its start: the binary it replaced
-    // is put back and the inbox is asked.
-    let broken_commit = commit("src/broken");
-    wait("the failed update", &mut || {
-        // Reaps the supervisor once the broken build's exec ended it.
-        let _ = supervisor.child().try_wait();
-        updates().iter().any(|u| {
-            u.kind == EventKind::UpdateFailed && u.payload["commit"] == broken_commit.as_str()
-        })
-    });
-    let failed = updates()
-        .into_iter()
-        .find(|u| {
-            u.kind == EventKind::UpdateFailed && u.payload["commit"] == broken_commit.as_str()
-        })
-        .unwrap();
-    let assert_update_actor = |kind: EventKind, commit: &str| {
-        let event = updates()
-            .into_iter()
-            .find(|event| event.kind == kind && event.payload["commit"] == commit)
-            .unwrap_or_else(|| panic!("no {kind} event for {commit}"));
-        let actor = event
-            .actor
-            .unwrap_or_else(|| panic!("{} has no actor", event.kind));
-        let started = updates()
-            .into_iter()
-            .find(|event| {
-                event.kind == EventKind::UpdateStarted && event.payload["commit"] == commit
-            })
-            .expect("the supervisor recorded the job's start");
-        let job_name = Path::new(started.payload["log"].as_str().unwrap())
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert_eq!(
-            (actor.role.as_str(), actor.id.as_str(), actor.requested_by),
-            ("updater", format!("updater:{job_name}").as_str(), None),
-            "{} actor",
-            event.kind
-        );
-        let parent = started.actor.expect("the start has the supervisor's actor");
-        assert_eq!(
-            (parent.role.as_str(), parent.id.as_str()),
-            ("supervisor", supervisor_actor_id.as_str())
-        );
-    };
-    assert_update_actor(EventKind::UpdateInstalled, &source);
-    assert_update_actor(EventKind::UpdateFailed, &broken_commit);
-    assert_eq!(failed.payload["stage"], "install", "{failed:?}");
-    // Every supervisor failed the handoff: each is brought back, with the
-    // starting supervisor recovered after the job records its failure.
-    assert_eq!(failed.payload["kept"], false, "{failed:?}");
-    assert_eq!(
-        failed.payload["supervisors"][0]["supervisor"]["state"], "brought_back_after_this_record",
-        "{failed:?}"
-    );
-    assert_eq!(
-        std::fs::read(&fixed).unwrap(),
-        std::fs::read(bin).unwrap(),
-        "the binary in place is not the one the broken build replaced"
-    );
-    let status = ok(&db, &["status"]);
-    assert_eq!(status["auto_update"]["state"], "failed", "{status}");
-    let asks = ok(&db, &["asks"]);
-    let ask = asks["asks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|ask| ask["kind"] == "update_failed")
-        .unwrap_or_else(|| panic!("no update_failed ask: {asks}"));
-    assert!(ask.get("subject").is_none_or(|s| s.is_null()), "{ask}");
-    assert_eq!(ask["options"], serde_json::json!(["retry", "skip"]));
-    assert!(
-        ask["question"]
-            .as_str()
-            .unwrap()
-            .contains("failed at its install")
-    );
-
-    // The steps are queue events (ADR-0073 decision 17): `events` shows
-    // them by kind with their commit, an install is an attention `watch`
-    // wakes on, `events` counts them by kind, and `binary_updates` stays empty.
-    let steps = ok(
-        &db,
-        &[
-            "events",
-            "--kind",
-            "update_installed",
-            "--kind",
-            "update_failed",
-        ],
-    );
-    let steps = steps["events"].as_array().unwrap();
-    assert!(
-        steps
-            .iter()
-            .any(|e| e["kind"] == "update_installed" && e["commit"] == source.as_str()),
-        "{steps:?}"
-    );
-    assert!(
-        steps.iter().any(|e| e["kind"] == "update_failed"
-            && e["commit"] == broken_commit.as_str()
-            && e["stage"] == "install"),
-        "{steps:?}"
-    );
-    let watched = ok(&db, &["watch", "--after", "0", "--timeout", "1"]);
-    let installs: Vec<_> = watched["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|e| e["kind"] == "update_installed")
-        .collect();
-    assert_eq!(installs.len(), 3, "{watched}");
-    assert_eq!(installs[0]["next"], "report the update", "{watched}");
-    let of_kind = |kind: &str| -> Vec<Value> {
-        ok(&db, &["events", "--all", "--kind", kind, "--limit", "1000"])["events"]
-            .as_array()
-            .unwrap()
-            .clone()
-    };
-    let failed_at = |stage: &str| {
-        of_kind("update_failed")
-            .iter()
-            .filter(|e| e["stage"] == stage)
-            .count()
-    };
-    assert_eq!(of_kind("update_installed").len(), 3);
-    assert_eq!(failed_at("install"), 1);
-    assert!(of_kind("update_started").len() >= 4);
-    // Every build passed the e2e gate before it was put in place (ADR-t963-1).
-    assert!(of_kind("update_e2e_passed").len() >= 4);
-    assert_eq!(failed_at("e2e"), 0);
-    let rows: i64 = rusqlite::Connection::open(&db)
-        .unwrap()
-        .query_row("SELECT count(*) FROM binary_updates", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(rows, 0);
-    let exit = {
-        let _waiting = common::within(common::STEP_LIMIT, "the broken supervisor to exit");
-        supervisor.child().wait().unwrap()
-    };
-    assert_eq!(exit.code(), Some(3));
-}
-
 /// A queue and a repository with one commit to supervise, and a stub of
 /// claude beside them.
 struct Supervised {
+    /// Stop the supporting service before deleting its queue directory.
+    _service: common::service::DirectlyServed,
     dir: tempfile::TempDir,
     db: std::path::PathBuf,
     repo: std::path::PathBuf,
     claude: std::path::PathBuf,
-    /// The queue's service, this test's: a supervisor reaches the queue
-    /// through it (ADR-t3102-3), and one the supervisor started would end
-    /// with the stand-in owner, before the supervisor's own last writes.
-    _service: common::service::Served,
+    codex: std::path::PathBuf,
+    auto_update: bool,
 }
 
 fn supervised() -> Supervised {
+    supervised_with_binary(Path::new(env!("CARGO_BIN_EXE_dagq")), || {})
+}
+
+fn supervised_with_binary(binary: &Path, ready: impl FnOnce()) -> Supervised {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue").join("queue.db");
-    ok(&db, &["init"]);
-    let repo = dir.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    for args in [
-        &["init", "-q", "-b", "main"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "seed",
-        ],
-    ] {
-        assert!(
-            Command::new(git_executable().expect("git executable"))
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .bounded_status()
-                .unwrap()
-                .success()
-        );
-    }
-    let stub = |name: &str, text: &str| {
-        let path = dir.path().join(name);
-        crate::common::template::script(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n"));
-        path
-    };
-    let claude = stub("claude", "stub 1.0");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    drop(common::template::queue(&db));
+    ready();
+    let (service, repo, claude, codex) = std::thread::scope(|scope| {
+        let service =
+            scope.spawn(|| common::service::DirectlyServed::start_with_binary(&db, binary));
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        common::template::repository(&repo, "seed");
+        let stub = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            crate::common::template::script(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n"));
+            path
+        };
+        let claude = stub("claude", "stub 1.0");
+        let codex = stub("codex", "codex-cli 0.200.0");
+        (service.join().unwrap(), repo, claude, codex)
+    });
     Supervised {
-        _service: common::service::Served::start(&db),
+        _service: service,
         db,
         repo,
         claude,
+        codex,
+        auto_update: false,
         dir,
     }
 }
@@ -1168,6 +465,21 @@ impl Supervised {
                 .arg(&self.repo)
                 .arg("--claude")
                 .arg(&self.claude)
+                .arg("--codex")
+                .arg(&self.codex)
+                .args(self.auto_update.then_some("--auto-update"))
+                // This fixture exercises process ownership and exec, without
+                // starting unrelated observation, review or report work.
+                .args([
+                    "--observe-daily",
+                    "false",
+                    "--throughput-review",
+                    "false",
+                    "--report-daily",
+                    "false",
+                    "--forecast-snapshots",
+                    "false",
+                ])
                 .args(FAST_SUPERVISOR)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -1183,10 +495,14 @@ impl Supervised {
 
     fn wait_registered(&self) {
         let started = std::time::Instant::now();
-        while self.registered().is_empty() {
+        while !self
+            .registered()
+            .first()
+            .is_some_and(|r| r.handoff_accepted)
+        {
             assert!(
                 started.elapsed().as_secs() < 30,
-                "the supervisor never registered"
+                "the supervisor never registered to accept a handoff"
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -1254,44 +570,184 @@ fn a_supervisor_stops_by_itself_once_its_owner_is_gone() {
 
 /// A supervisor handed over to another binary by `install` (the exec of
 /// the automatic update's handoff too) keeps its owner, since the exec
-/// keeps its environment, and still stops once the owner is gone.
+/// keeps its environment, and still stops once the owner is gone. The
+/// file adapter then restores the kept inode without a second exec.
 #[test]
-fn a_supervisor_handed_over_by_an_exec_keeps_its_owner() {
-    let fixture = supervised();
-    let fixed = fixture.dir.path().join("bin").join("dagq");
-    std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
-    crate::common::template::dagq(&fixed);
-    let mut owner = common::service::StandInOwner::start();
-    let mut supervisor = fixture.supervise(&fixed, owner.pid());
-    fixture.wait_registered();
-    let token = fixture.registered()[0].token.clone();
-    let report = ok(
-        &fixture.db,
-        &[
-            "install",
-            "--from",
-            env!("CARGO_BIN_EXE_dagq"),
-            "--to",
-            fixed.to_str().unwrap(),
-            "--handoff-timeout",
-            "60",
-            "--poll-ms",
-            "50",
-        ],
-    );
-    assert_eq!(report["outcome"], "installed", "{report}");
-    assert_eq!(
-        report["supervisors"][0]["token"],
-        token.as_str(),
-        "{report}"
-    );
-    assert_eq!(report["supervisors"][0]["pid"], supervisor.child().id());
-    let handed = common::service::events(&fixture.db, "supervisor_started");
-    assert!(
-        handed
-            .iter()
-            .any(|event| event["payload"]["handoff"] == true),
-        "{handed:?}"
-    );
-    fixture.kill_owner_and_see_the_supervisor_stop(&mut owner, &mut supervisor);
+fn install_execs_a_running_supervisor_under_its_pid_and_keeps_its_owner() {
+    let templates = tempfile::tempdir().unwrap();
+    let templates_path = templates.path().to_owned();
+    common::template::with_root(templates.path(), || {
+        let phase = std::time::Instant::now();
+        // Every run starts with a fresh, unexecuted file and private
+        // templates. No previous Cargo call can warm this image for us.
+        let image_dir = tempfile::tempdir().unwrap();
+        let source = image_dir.path().join("dagq");
+        let measured = |path: &Path| {
+            ring::digest::digest(&ring::digest::SHA256, &std::fs::read(path).unwrap())
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        std::thread::scope(|scope| {
+            let image = scope.spawn(|| {
+                std::fs::copy(env!("CARGO_BIN_EXE_dagq"), &source).unwrap();
+                // Keep the real executable code and strip only symbol/debug data.
+                // Stripping and its first exec are both inside this cold test.
+                let stripped = Command::new("strip").arg(&source).bounded_output().unwrap();
+                assert!(stripped.status.success(), "{stripped:?}");
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o555)).unwrap();
+                measured(&source)
+            });
+            let mut expected_digest = String::new();
+            let mut fixture =
+                supervised_with_binary(&source, || expected_digest = image.join().unwrap());
+            eprintln!(
+                "install boundary: cold fixture {:?}, image {} bytes",
+                phase.elapsed(),
+                std::fs::metadata(&source).unwrap().len()
+            );
+            // This repository is not dagq's source, so no update job starts; the
+            // registration's enabled bit must still cross the exec.
+            fixture.auto_update = true;
+            let fixed = fixture.dir.path().join("bin").join("dagq");
+            std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
+            // A small predecessor reports its own version and launches the real
+            // supervisor under the same PID. The incoming file is the actual build.
+            let old_version = "0.0.0-install-fixture";
+            common::template::script(
+                &fixed,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'dagq {old_version}'; else exec {} \"$@\"; fi\n",
+                    common::shell_path(&source)
+                ),
+            );
+            use std::os::unix::fs::MetadataExt;
+            let original_inode = std::fs::metadata(&fixed).unwrap().ino();
+            let mut owner = common::service::StandInOwner::start();
+            let mut supervisor = fixture.supervise(&fixed, owner.pid());
+            fixture.wait_registered();
+            eprintln!("install boundary: registered {:?}", phase.elapsed());
+            let before = fixture.registered().remove(0);
+            assert_eq!(before.binary_version.as_deref(), Some(dagq::VERSION));
+            assert!(before.auto_update);
+            let token = before.token.clone();
+            assert_ne!(std::fs::metadata(&source).unwrap().ino(), original_inode);
+            let invoke_install = |args: &[&str]| {
+                Command::new(&source)
+                    .without_actor_env()
+                    .env(
+                        dagq::domain::queue_service::OWNER_PID_ENV,
+                        std::process::id().to_string(),
+                    )
+                    .env(
+                        "XDG_CONFIG_HOME",
+                        fixture.db.parent().unwrap().join("config"),
+                    )
+                    .arg("--db")
+                    .arg(&fixture.db)
+                    .args(args)
+                    .bounded_output()
+                    .unwrap()
+            };
+            // Exercise the CLI selection and composition of Source::Rollback before
+            // any replacement: no second successful install/exec is needed here.
+            let missing =
+                invoke_install(&["install", "--rollback", "--to", fixed.to_str().unwrap()]);
+            assert!(!missing.status.success());
+            assert!(
+                String::from_utf8_lossy(&missing.stderr).contains("no previous binary"),
+                "{missing:?}"
+            );
+            eprintln!("install boundary: rollback refused {:?}", phase.elapsed());
+            let output = invoke_install(&[
+                "install",
+                "--from",
+                source.to_str().unwrap(),
+                "--to",
+                fixed.to_str().unwrap(),
+                "--handoff-timeout",
+                "60",
+                "--poll-ms",
+                "20",
+                "--binary-fixture",
+                source.to_str().unwrap(),
+            ]);
+            assert!(output.status.success(), "{output:?}");
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            eprintln!("install boundary: installed {:?}", phase.elapsed());
+            assert_eq!(report["outcome"], "installed", "{report}");
+            assert_eq!(report["version"], dagq::VERSION);
+            assert_eq!(report["previous_version"], old_version);
+            assert_eq!(
+                report["previous"],
+                fixed.with_file_name("dagq.previous").to_str().unwrap()
+            );
+            assert_eq!(report["migrated"], Value::Null);
+            assert_eq!(report["supervisors"][0]["token"], token.as_str());
+            assert_eq!(report["supervisors"][0]["pid"], supervisor.child().id());
+            let started = std::time::Instant::now();
+            loop {
+                let handed = common::service::events(&fixture.db, "supervisor_started");
+                let ready = fixture
+                    .registered()
+                    .first()
+                    .is_some_and(|r| r.handoff_accepted && r.handoff_binary.is_none());
+                if ready
+                    && handed
+                        .iter()
+                        .any(|event| event["payload"]["handoff"] == true)
+                {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < common::STEP_LIMIT,
+                    "the installed binary never took the handoff: {handed:?}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let registration = fixture.registered().remove(0);
+            assert!(registration.auto_update);
+            assert_eq!(registration.token, token);
+            assert_eq!(registration.pid, supervisor.child().id());
+            assert_eq!(registration.handoff_binary, None);
+            assert_eq!(registration.binary_version.as_deref(), Some(dagq::VERSION));
+            let previous = fixed.with_file_name("dagq.previous");
+            assert_eq!(std::fs::metadata(&previous).unwrap().ino(), original_inode);
+            assert_ne!(std::fs::metadata(&fixed).unwrap().ino(), original_inode);
+            assert_eq!(
+                std::fs::metadata(&fixed).unwrap().ino(),
+                std::fs::metadata(&source).unwrap().ino()
+            );
+            // Compare the reported facts with independent SHA-256 measurements of
+            // the files, including the distinct predecessor's actual version.
+            assert_eq!(report["digest"], expected_digest);
+            assert_eq!(report["replaced_binary"]["digest"], measured(&previous));
+            assert_eq!(report["replaced_binary"]["version"], old_version);
+            assert!(supervisor.child().try_wait().unwrap().is_none());
+            fixture.kill_owner_and_see_the_supervisor_stop(&mut owner, &mut supervisor);
+            eprintln!("install boundary: stopped {:?}", phase.elapsed());
+            dagq::application::install::Binaries::restore(
+                &dagq::infrastructure::binaries::LocalBinaries,
+                &fixed,
+            )
+            .unwrap();
+            assert_eq!(std::fs::metadata(&fixed).unwrap().ino(), original_inode);
+            assert!(!previous.exists());
+            let fixture_dir = fixture.dir.path().to_owned();
+            drop(fixture);
+            assert!(
+                !fixture_dir.exists(),
+                "install images must leave with the fixture"
+            );
+            drop(image_dir);
+            assert!(
+                !source.exists(),
+                "the cold executable must not outlive its fixture"
+            );
+        });
+    });
+    drop(templates);
+    assert!(!templates_path.exists());
 }

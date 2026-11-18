@@ -194,8 +194,8 @@ task = 3804
 [[boundary]]
 id = "install-execs-the-running-supervisor-under-its-pid-and-rolls-back"
 kind = "プロセス"
-test = "cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back"
-reason = "install が rename で前の binary を残して置き換え、走っている実の supervisor の process が自分の pid と token のまま新しい file を exec して続け、--rollback が同じく戻すことは、実の process の exec と file system でしか確かめられない。いつ戻すかの判断は release_update の unit test"
+test = "cli_version::install_execs_a_running_supervisor_under_its_pid_and_keeps_its_owner"
+reason = "install が rename で前の binary を残して置き換え、走っている実の supervisor の process が自分の pid と token のまま新しい file を exec して続け、exec 後も owner を保つことは、実の process の exec と file system でしか確かめられない。rollback と失敗時の復元・ask は application::install と application::update の unit test"
 task = 3804
 
 [[boundary]]

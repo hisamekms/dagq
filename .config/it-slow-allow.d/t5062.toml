@@ -1,0 +1,4 @@
+[[test]]
+name = "cli_version::install_execs_a_running_supervisor_under_its_pid_and_keeps_its_owner"
+reason = "B 境界（プロセス）: CLI install から実 binary の一度の stage・rename と supervisor の exec が pid・token・owner を保ち、kept inode に戻せることを確かめる代表。冷えた fixture の起動と実 file の digest・version の測定を含み、共有の install image を残さない。install・rollback・ask の判断は application::update の unit test"
+task = 5062

@@ -26,7 +26,32 @@ use crate::application::install::{
 /// clearing client routing variables, `schema` restores the credential-file
 /// variable so the check uses the caller's credential: an update job's own
 /// token rather than the supervisor's that started it.
-pub struct LocalBinaries;
+pub struct LocalBinaries {
+    #[cfg(any(test, feature = "test-paths"))]
+    fixture_source: Option<PathBuf>,
+}
+
+/// The default host adapter always probes and copies its input build.
+#[allow(non_upper_case_globals)]
+pub const LocalBinaries: LocalBinaries = LocalBinaries {
+    #[cfg(any(test, feature = "test-paths"))]
+    fixture_source: None,
+};
+
+#[cfg(any(test, feature = "test-paths"))]
+fn fixture_source(source: &Path, fixture: Option<&Path>) -> bool {
+    fixture == Some(source)
+}
+
+/// Hex SHA-256 for replacement facts. The native implementation keeps
+/// executable-sized inputs inexpensive in debug builds too.
+fn binary_digest(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Whether `migrate --check` failed with the words of no service that
 /// answers the schema ([`SCHEMA_UNANSWERED`](crate::domain::queue_service::SCHEMA_UNANSWERED)),
@@ -152,6 +177,87 @@ fn up_command(binary: &Path, env: impl Fn(&str) -> Option<std::ffi::OsString>) -
     command
 }
 
+impl LocalBinaries {
+    /// A test build may reuse a named executable's inode and omit its
+    /// throwaway-queue probe. Every check still inspects this source, and
+    /// replacement facts are always measured from the staged and kept files.
+    #[cfg(any(test, feature = "test-paths"))]
+    pub fn with_fixture(source: PathBuf) -> Self {
+        Self {
+            fixture_source: Some(source),
+        }
+    }
+
+    fn is_fixture(&self, source: &Path) -> bool {
+        #[cfg(any(test, feature = "test-paths"))]
+        {
+            fixture_source(source, self.fixture_source.as_deref())
+        }
+        #[cfg(not(any(test, feature = "test-paths")))]
+        {
+            let _ = source;
+            false
+        }
+    }
+
+    /// Stage and rename as an install does. Only a test build can select
+    /// hardlink staging; both paths read their facts from the actual files.
+    fn replace_with_fixture_source(
+        &self,
+        source: &Path,
+        target: &Path,
+    ) -> Result<crate::application::install::Replacement> {
+        let dir = target
+            .parent()
+            .with_context(|| format!("{} has no directory", target.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let name = target
+            .file_name()
+            .with_context(|| format!("{} has no file name", target.display()))?
+            .to_string_lossy()
+            .into_owned();
+        let pid = std::process::id();
+        let staged = dir.join(format!(".{name}.install-{pid}"));
+        if self.is_fixture(source) {
+            fs::hard_link(source, &staged)
+                .with_context(|| format!("link {} to {}", source.display(), staged.display()))?;
+        } else {
+            fs::copy(source, &staged)
+                .with_context(|| format!("copy {} to {}", source.display(), staged.display()))?;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        }
+        // Default facts are read from the name this install alone
+        // holds it under, so another replacement of the target cannot come
+        // between them and the file it moves.
+        let digest = |path: &Path| fs::read(path).ok().map(|bytes| binary_digest(&bytes));
+        let mut replacement = crate::application::install::Replacement {
+            digest: digest(&staged),
+            ..Default::default()
+        };
+        if !target.exists() {
+            fs::rename(&staged, target)
+                .with_context(|| format!("move the new binary to {}", target.display()))?;
+            return Ok(replacement);
+        }
+        // The binary in place keeps its inode (a running process keeps
+        // using it) under a second name, which then becomes `.previous`.
+        let kept = dir.join(format!(".{name}.previous-{pid}"));
+        let _ = fs::remove_file(&kept);
+        if fs::hard_link(target, &kept).is_err() {
+            fs::copy(target, &kept)
+                .with_context(|| format!("keep {} as {}", target.display(), kept.display()))?;
+        }
+        replacement.replaced_digest = digest(&kept);
+        replacement.replaced_version = self.version(&kept).ok();
+        fs::rename(&staged, target)
+            .with_context(|| format!("move the new binary to {}", target.display()))?;
+        fs::rename(&kept, previous_path(target))
+            .with_context(|| format!("keep the replaced binary next to {}", target.display()))
+            .map_err(|error| error.context(replacement.clone()))?;
+        Ok(replacement)
+    }
+}
+
 impl Binaries for LocalBinaries {
     /// `<target>.install.lock` is shared by every queue and manual
     /// install of this target, independent of their build locks. Its
@@ -196,6 +302,9 @@ impl Binaries for LocalBinaries {
     }
 
     fn probe(&self, binary: &Path) -> Result<()> {
+        if self.is_fixture(binary) {
+            return Ok(());
+        }
         let dir = env::temp_dir().join(format!(
             "dagq-install-probe-{}-{}",
             std::process::id(),
@@ -342,53 +451,7 @@ impl Binaries for LocalBinaries {
         source: &Path,
         target: &Path,
     ) -> Result<crate::application::install::Replacement> {
-        let dir = target
-            .parent()
-            .with_context(|| format!("{} has no directory", target.display()))?;
-        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        let name = target
-            .file_name()
-            .with_context(|| format!("{} has no file name", target.display()))?
-            .to_string_lossy()
-            .into_owned();
-        let pid = std::process::id();
-        let staged = dir.join(format!(".{name}.install-{pid}"));
-        fs::copy(source, &staged)
-            .with_context(|| format!("copy {} to {}", source.display(), staged.display()))?;
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
-        // Each binary's facts are read from the name this install alone
-        // holds it under, so another replacement of the target cannot come
-        // between them and the file it moves.
-        let digest = |path: &Path| {
-            fs::read(path)
-                .ok()
-                .map(|bytes| crate::domain::replan_snapshot::sha256(&bytes))
-        };
-        let mut replacement = crate::application::install::Replacement {
-            digest: digest(&staged),
-            ..Default::default()
-        };
-        if !target.exists() {
-            fs::rename(&staged, target)
-                .with_context(|| format!("move the new binary to {}", target.display()))?;
-            return Ok(replacement);
-        }
-        // The binary in place keeps its inode (a running process keeps
-        // using it) under a second name, which then becomes `.previous`.
-        let kept = dir.join(format!(".{name}.previous-{pid}"));
-        let _ = fs::remove_file(&kept);
-        if fs::hard_link(target, &kept).is_err() {
-            fs::copy(target, &kept)
-                .with_context(|| format!("keep {} as {}", target.display(), kept.display()))?;
-        }
-        replacement.replaced_digest = digest(&kept);
-        replacement.replaced_version = self.version(&kept).ok();
-        fs::rename(&staged, target)
-            .with_context(|| format!("move the new binary to {}", target.display()))?;
-        fs::rename(&kept, previous_path(target))
-            .with_context(|| format!("keep the replaced binary next to {}", target.display()))
-            .map_err(|error| error.context(replacement.clone()))?;
-        Ok(replacement)
+        self.replace_with_fixture_source(source, target)
     }
 
     fn restore(&self, target: &Path) -> Result<()> {
@@ -612,6 +675,28 @@ mod tests {
     use super::*;
     use crate::domain::{actor::ROLE_ENV, queue_service::CREDENTIAL_FILE_ENV};
     use std::ffi::{OsStr, OsString};
+
+    #[test]
+    fn only_a_test_builds_named_source_skips_probe_and_uses_a_hardlink() {
+        let source = Path::new("/fixture/dagq");
+        assert!(!fixture_source(source, None));
+        assert!(!fixture_source(source, Some(Path::new("/another/dagq"))));
+        assert!(fixture_source(source, Some(source)));
+        assert!(!LocalBinaries.is_fixture(source));
+        assert!(LocalBinaries::with_fixture(source.into()).is_fixture(source));
+    }
+
+    #[test]
+    fn replacement_digests_keep_the_sha256_wire_format() {
+        assert_eq!(
+            binary_digest(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            binary_digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     /// What `command` sets (`Some`) or removes (`None`) of `name`; absent
     /// when it leaves `name` as this process has it.

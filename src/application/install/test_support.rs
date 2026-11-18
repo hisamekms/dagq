@@ -104,10 +104,12 @@ pub(crate) enum Handoff {
 
 pub(crate) struct InstallSteps {
     pub(crate) calls: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(crate) replacement_sources: std::sync::Mutex<Vec<PathBuf>>,
     pub(crate) registrations: std::sync::Mutex<Vec<SupervisorRegistration>>,
     pub(crate) first_open: std::sync::Mutex<Option<OpenFailure>>,
     pub(crate) schema: Option<SchemaCheck>,
     pub(crate) handoff: Handoff,
+    pub(crate) dies_on_handoff: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) restart_failures: std::sync::atomic::AtomicUsize,
     pub(crate) in_place: bool,
     pub(crate) breaking_failure: Option<String>,
@@ -152,6 +154,7 @@ impl Default for InstallSteps {
     fn default() -> Self {
         Self {
             calls: Default::default(),
+            replacement_sources: Default::default(),
             registrations: std::sync::Mutex::new(vec![registration("first", 1, 10_000)]),
             first_open: std::sync::Mutex::new(None),
             schema: Some(SchemaCheck {
@@ -162,6 +165,7 @@ impl Default for InstallSteps {
                 opens: true,
             }),
             handoff: Handoff::Taken,
+            dies_on_handoff: None,
             restart_failures: std::sync::atomic::AtomicUsize::new(0),
             in_place: false,
             breaking_failure: None,
@@ -211,6 +215,22 @@ impl InstallSteps {
 }
 
 impl Binaries for InstallSteps {
+    fn checkout(&self, _: &Path, checkout: &Path, commit: &str) -> Result<()> {
+        ensure!(self.gate.is_some(), "no update build was configured");
+        self.note(format!("checkout {} {commit}", checkout.display()));
+        Ok(())
+    }
+    fn build_into(
+        &self,
+        checkout: &Path,
+        _: &Path,
+        _: &str,
+        _: Option<&str>,
+        _: &Path,
+    ) -> Result<PathBuf> {
+        self.note(format!("build {}", checkout.display()));
+        self.build(checkout)
+    }
     fn build(&self, _: &Path) -> Result<PathBuf> {
         if self.gate.is_some() {
             return Ok(PathBuf::from("/source"));
@@ -318,7 +338,11 @@ impl Binaries for InstallSteps {
     fn replace(&self, source: &Path, target: &Path) -> Result<()> {
         self.replace_held(source, target).map(drop)
     }
-    fn replace_held(&self, _: &Path, target: &Path) -> Result<super::Replacement> {
+    fn replace_held(&self, source: &Path, target: &Path) -> Result<super::Replacement> {
+        self.replacement_sources
+            .lock()
+            .unwrap()
+            .push(source.to_owned());
         self.note("replace");
         let replacement =
             self.replaced
@@ -445,8 +469,11 @@ impl crate::application::supervisor_service::ServiceCaller for InstallSteps {
                 ))
             }
             "processes" => Ok(json!(self.processes)),
-            "latest_events_of" => Ok(json!([])),
+            "latest_events_of" | "e2e_gate_events" => Ok(json!([])),
             "request_handoff" => {
+                if let Some(alive) = &self.dies_on_handoff {
+                    alive.store(false, SeqCst);
+                }
                 let token = params["args"][0].as_str().unwrap();
                 match self.handoff {
                     Handoff::Unsettled => Err(anyhow::anyhow!("handoff answer lost")

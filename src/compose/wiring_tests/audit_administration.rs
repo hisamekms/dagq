@@ -43,6 +43,161 @@ fn after(record: &AuditRecord) -> &Value {
     record.change.as_ref().unwrap().after.as_ref().unwrap()
 }
 
+/// An update job's recorded steps reach the same watch and events reads
+/// as the CLI: only an install wakes this role-less watch, once, while
+/// events --all also keeps the build and gate steps of a failed install.
+#[test]
+fn update_steps_reach_watch_once_per_install_and_events_keep_every_stage() {
+    use crate::application::{
+        queue_reads::{EventsRead, observation::events},
+        watch::{WatchOptions, watch},
+    };
+    use crate::domain::EventId;
+    use std::time::Duration;
+
+    let test = Test::new("update_steps_watch_and_events");
+    let supervisor = test.sign_in(&test.lease);
+    let job = test.issued(&supervisor, "update-observation");
+    let (job_pid, _) = test.wiring.processes().start();
+    assert!(test.bind(&job, job_pid).ok);
+    let queue = test.wiring.queue();
+    let generators = test.wiring.generators();
+    let watched = |after| {
+        watch(
+            &queue,
+            &*generators.clock,
+            test.wiring.processes(),
+            None,
+            None,
+            &WatchOptions {
+                after: Some(after),
+                timeout: Some(Duration::ZERO),
+                interval: Duration::ZERO,
+                role: None,
+            },
+        )
+        .unwrap()
+    };
+    let record = |kind: &str, commit: &str, extra: Value| {
+        let mut payload = json!({"pid": job_pid, "commit": commit});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let args = json!([kind, payload]);
+        let sent = if kind == "update_started" {
+            // Starting the job is the supervisor's step, before the job
+            // begins sending its own build, gate and install steps.
+            send(
+                &test.backend,
+                &supervisor,
+                UseCase::Supervisor,
+                super::update_job_token::supervisor_op("record_queue_event", args),
+                test.pid,
+            )
+        } else {
+            let mut params = job_step("record_queue_event", args, job_pid);
+            params["call"]["record"] = json!(format!("{commit}-{kind}"));
+            send(&test.backend, &job, UseCase::Control, params, job_pid)
+        };
+        assert!(sent.ok, "{sent:?}");
+    };
+    let mut cursor = EventId::new(0);
+    for commit in ["seed", "source", "restored-source", "broken"] {
+        for kind in ["update_started", "update_built", "update_e2e_passed"] {
+            record(kind, commit, json!({}));
+        }
+        assert_eq!(
+            watched(cursor)["events"],
+            json!([]),
+            "steps alone do not wake"
+        );
+        if commit == "broken" {
+            record("update_failed", commit, json!({"stage": "install"}));
+            continue;
+        }
+        let installed = json!({"version": "0.2.0", "e2e": {"status": "passed"}});
+        record("update_installed", commit, installed.clone());
+        // A lost answer resends the same record, without a second wake.
+        record("update_installed", commit, installed);
+        let wake = watched(cursor);
+        assert_eq!(wake["events"].as_array().unwrap().len(), 1, "{wake}");
+        assert_eq!(wake["events"][0]["kind"], "update_installed");
+        assert_eq!(wake["events"][0]["commit"], commit);
+        assert_eq!(wake["events"][0]["next"], "report the update");
+        cursor = serde_json::from_value(wake["cursor"].clone()).unwrap();
+        assert_eq!(
+            watched(cursor)["events"],
+            json!([]),
+            "the cursor consumes the wake"
+        );
+    }
+    let from_start = watched(EventId::new(0));
+    let installs: Vec<_> = from_start["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "update_installed")
+        .collect();
+    assert_eq!(installs.len(), 3);
+    assert!(
+        installs
+            .iter()
+            .all(|event| event["next"] == "report the update")
+    );
+    let history = events(
+        &queue,
+        &EventsRead {
+            after: 0,
+            limit: 1000,
+            all: true,
+            full: false,
+            run: None,
+            task: None,
+            goal: None,
+            kind: vec![],
+            since: None,
+            until: None,
+        },
+    )
+    .unwrap();
+    let of_kind = |kind: &str| {
+        history["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(of_kind("update_installed").len(), 3);
+    for kind in ["update_started", "update_e2e_passed"] {
+        let steps = of_kind(kind);
+        assert_eq!(steps.len(), 4);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|event| event["commit"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["seed", "source", "restored-source", "broken"]
+        );
+    }
+    let failures = of_kind("update_failed");
+    assert_eq!(
+        failures
+            .iter()
+            .filter(|event| event["stage"] == "install")
+            .count(),
+        1
+    );
+    assert_eq!(
+        failures
+            .iter()
+            .filter(|event| event["stage"] == "e2e")
+            .count(),
+        0
+    );
+}
+
 #[test]
 fn an_updates_install_and_up_and_down_reach_the_audit_as_their_principals() {
     let test = Test::new("audit_administration_install");
@@ -94,6 +249,10 @@ fn an_updates_install_and_up_and_down_reach_the_audit_as_their_principals() {
         installed_events, 2,
         "the record's resend writes no second event"
     );
+    let legacy_rows: i64 = super::harness::connect(&test.wiring.db)
+        .query_row("SELECT count(*) FROM binary_updates", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(legacy_rows, 0, "update steps belong to run_events");
     let binaries = of(&test.wiring, AuditAction::BinaryInstalled);
     assert_eq!(
         binaries.len(),

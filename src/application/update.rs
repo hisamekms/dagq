@@ -4002,3 +4002,7 @@ mod tests {
         assert_eq!(launchd["by"], "launchd");
     }
 }
+
+#[cfg(test)]
+#[path = "update/install_decision_tests.rs"]
+mod install_decision_tests;

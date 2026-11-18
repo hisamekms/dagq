@@ -53,17 +53,6 @@ name = "background_logs::a_closed_background_planners_log_is_read_by_its_id"
 reason = "B 境界（守る境界）: planner log CLI over background planner's session.log"
 task = 1707
 
-# 26.818s, class B
-[[test]]
-name = "cli_version::auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back"
-reason = "B 境界（守る境界）: build/install/exec across processes and git"
-task = 1707
-
-# 10.764s, class B
-[[test]]
-name = "cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back"
-reason = "B 境界（守る境界）: exec handoff under same pid, file rename"
-task = 1707
 
 # 5.016s, class B
 [[test]]
@@ -1397,11 +1386,6 @@ name = "cli_version::a_supervisor_stops_by_itself_once_its_owner_is_gone"
 reason = "B 境界（守る境界）: プロセス。実バイナリのsupervisorがSIGKILLされたownerを見て自分でdrainし登録を消すこと（判断はsupervise::handoffのunit test）"
 task = 1808
 
-[[test]]
-name = "cli_version::a_supervisor_handed_over_by_an_exec_keeps_its_owner"
-reason = "B 境界（守る境界）: プロセス。installの引き継ぎのexecがownerのenvを保ち、exec後のsupervisorもownerで止まること"
-task = 1808
-
 # 7.3〜8.8s (stress 60s under the host's load of other runs, task 2599)
 [[test]]
 name = "runtime_review_concern::a_high_send_back_revises_the_live_session"
@@ -1502,11 +1486,6 @@ task = 955
 name = "runtime_integrate::integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once"
 reason = "B 境界（Git・SQLite・supervisor と integrate の配線）: 実際の supervisor の run と integrate の着地が receipt の follow_ups を store の transaction で goal の draft として 1 度だけ登録し、着地しない receipt では登録せず、閉じた goal では goal なしで登録することを確かめる代表の 1 本。各 entry が何になるかの判断は application::integrate の a_receipts_follow_up_is_a_draft_of_the_goal_or_skipped_with_the_reason"
 task = 3768
-
-[[test]]
-name = "cli_version::install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox"
-reason = "B 境界（守る境界）: install hands a running supervisor over to a built binary whose supervisor dies, across processes, and puts the old binary back by a file rename"
-task = 2163
 
 [[test]]
 name = "queue_service::the_service_answers_its_principals_and_refuses_the_rest_on_its_side"
