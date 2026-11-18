@@ -8,7 +8,7 @@ use super::goal_owner::{Owner, TaskOwner};
 
 use super::{
     DomainError, EvidenceCheck, ExecutionClass, GoalId, NewTask, Priority, PrioritySource,
-    Provider, TaskChange, TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority,
+    Provider, RunId, TaskChange, TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority,
     plan_request::{PriorityBy, RecordedOrigin},
     require,
     scope::{dedup_globs, validate_path_globs},
@@ -171,7 +171,8 @@ pub struct Task {
     #[serde(skip)]
     named_mode: Option<WorkerMode>,
     /// Only a claim makes a task `in_progress`, and only the landing of its
-    /// run makes it `completed`; a terminal status never changes.
+    /// run or a verified `already_satisfied` close makes it `completed`; a
+    /// terminal status never changes.
     status: TaskStatus,
     /// The one goal it belongs to, if any. A closed goal takes no new tasks.
     goal_id: Option<GoalId>,
@@ -453,6 +454,36 @@ pub fn claim(mut task: Task) -> Result<Task, DomainError> {
     })?;
     task.status = TaskStatus::InProgress;
     Ok(task)
+}
+
+/// An event returned by a task command, saved unchanged with its task.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewTaskEvent {
+    pub run_id: RunId,
+    pub kind: super::EventKind,
+    pub payload: serde_json::Value,
+}
+
+/// A changed task and the ordered events the store saves in its transaction.
+pub type Recorded = (Task, Vec<NewTaskEvent>);
+
+/// Complete an in-progress task when its run lands or its verified
+/// `already_satisfied` claim is closed. Both entrances record the same
+/// status change on that run. The caller owns the transaction and supplies
+/// the run ID; this command does not perform I/O or change a terminal task.
+pub fn complete(mut task: Task, run_id: RunId) -> Result<Recorded, DomainError> {
+    require(task.status == TaskStatus::InProgress, || {
+        DomainError::TaskNotInProgress { task_id: task.id }
+    })?;
+    task.status = TaskStatus::Completed;
+    Ok((
+        task,
+        vec![NewTaskEvent {
+            run_id,
+            kind: super::EventKind::TaskStatusChanged,
+            payload: serde_json::json!({"from": "in_progress", "to": "completed"}),
+        }],
+    ))
 }
 
 /// The goal a task moves to, as the move reads it: its ID, its priority
@@ -1408,6 +1439,122 @@ mod tests {
         assert_eq!(back.stored_worker_mode(), None);
         let headless = edit(back, edit_of(None, Some(WorkerMode::Headless))).unwrap();
         assert_eq!(headless.stored_worker_mode(), Some(WorkerMode::Headless));
+    }
+
+    #[test]
+    fn complete_returns_the_completed_task_and_its_run_event() {
+        let (task, events) = complete(
+            Task::restore(record(TaskStatus::InProgress)).unwrap(),
+            RunId::new("landed-run").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(task.status(), TaskStatus::Completed);
+        assert_eq!(task.id(), TaskId::new(5));
+        assert_eq!(
+            events,
+            vec![NewTaskEvent {
+                run_id: RunId::new("landed-run").unwrap(),
+                kind: super::super::EventKind::TaskStatusChanged,
+                payload: serde_json::json!({"from": "in_progress", "to": "completed"}),
+            }]
+        );
+        assert_eq!(events[0].kind.as_str(), "task_status_changed");
+    }
+
+    #[test]
+    fn complete_refuses_a_draft_task() {
+        let error = complete(
+            Task::restore(record(TaskStatus::Draft)).unwrap(),
+            RunId::new("run").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::TaskNotInProgress {
+                task_id: TaskId::new(5)
+            }
+        );
+        assert_eq!(error.to_string(), "task 5 is not in progress");
+    }
+
+    #[test]
+    fn complete_refuses_a_submitted_task() {
+        let error = complete(
+            Task::restore(record(TaskStatus::Submitted)).unwrap(),
+            RunId::new("run").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::TaskNotInProgress {
+                task_id: TaskId::new(5)
+            }
+        );
+        assert_eq!(error.to_string(), "task 5 is not in progress");
+    }
+
+    #[test]
+    fn complete_refuses_a_ready_task() {
+        let error = complete(
+            Task::restore(record(TaskStatus::Ready)).unwrap(),
+            RunId::new("run").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::TaskNotInProgress {
+                task_id: TaskId::new(5)
+            }
+        );
+        assert_eq!(error.to_string(), "task 5 is not in progress");
+    }
+
+    #[test]
+    fn complete_refuses_a_completed_task() {
+        let error = complete(
+            Task::restore(record(TaskStatus::Completed)).unwrap(),
+            RunId::new("run").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::TaskNotInProgress {
+                task_id: TaskId::new(5)
+            }
+        );
+        assert_eq!(error.to_string(), "task 5 is not in progress");
+    }
+
+    #[test]
+    fn complete_refuses_a_canceled_task() {
+        let error = complete(
+            Task::restore(record(TaskStatus::Canceled)).unwrap(),
+            RunId::new("run").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::TaskNotInProgress {
+                task_id: TaskId::new(5)
+            }
+        );
+        assert_eq!(error.to_string(), "task 5 is not in progress");
+    }
+
+    #[test]
+    fn complete_refuses_a_replaced_task() {
+        let error = complete(
+            Task::restore(record(TaskStatus::Replaced)).unwrap(),
+            RunId::new("run").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::TaskNotInProgress {
+                task_id: TaskId::new(5)
+            }
+        );
+        assert_eq!(error.to_string(), "task 5 is not in progress");
     }
 
     #[test]

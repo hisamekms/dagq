@@ -120,7 +120,7 @@ pathは`src/domain/`から。
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| taskの遷移と編集 | `TaskStatus::transition`、`task::edit`、`task::edit_ended_verify`（ADR-t883-1）、`task::duplicate_refusal` |
+| taskの遷移と編集 | `TaskStatus::transition`、`task::complete`、`task::edit`、`task::edit_ended_verify`（ADR-t883-1）、`task::duplicate_refusal` |
 | 優先度 | `domain::base_priority`（ADR-t1639-1・ADR-t1811-1）、誰が置いたかは`PriorityBy`、由来は`RecordedOrigin`、`task::set_goal`、`application::effective_priority`（ADR-t791-1） |
 | slotとclaimの順 | `domain::slot_order`、`dependency_graph`の`candidates`、`domain::claim_order` |
 | proposalとplan review | `proposal.rs`、`TaskStore::submit`、`infrastructure::proposals::approve`、`domain::lint::lint`、`domain::plan_review`、follow_upの所属は[所属の判断](follow-up-membership.md) |

@@ -951,25 +951,28 @@ pub(super) fn complete_task(
     now: &str,
     now_secs: i64,
 ) -> Result<Task> {
+    let (task, events) = task::complete(read_task(conn, task_id)?, run.clone())?;
     ensure!(
         conn.execute(
-            "UPDATE tasks SET status='completed', updated_at=?2 WHERE id=?1 AND status='in_progress'",
-            sql_params![task_id, now],
+            "UPDATE tasks SET status=?3, updated_at=?2 WHERE id=?1 AND status='in_progress'",
+            sql_params![task_id, now, task.status().as_str()],
         )? == 1,
         "task {task_id} is not in progress"
     );
     search_writes::task(conn, task_id)?;
-    event(
-        conn,
-        task_id,
-        Some(run),
-        EventKind::TaskStatusChanged,
-        json!({"from": TaskStatus::InProgress, "to": TaskStatus::Completed}),
-    )?;
+    for recorded in events {
+        event(
+            conn,
+            task_id,
+            Some(&recorded.run_id),
+            recorded.kind,
+            recorded.payload,
+        )?;
+    }
     // A Spike's completion leaves its replanning request in the same
     // transaction (ADR-t1487-1 decision 5).
     super::plan_requests::record_spike_request(conn, task_id, now_secs)?;
-    super::task_holds::end_with_task_port(conn, task_id, TaskStatus::Completed, now_secs)?;
+    super::task_holds::end_with_task_port(conn, task_id, task.status(), now_secs)?;
     read_task(conn, task_id)
 }
 

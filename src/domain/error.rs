@@ -31,6 +31,10 @@ pub enum DomainError {
         status: TaskStatus,
         action: TaskAction,
     },
+    /// Completing a task requires a claimed, in-progress task.
+    TaskNotInProgress {
+        task_id: TaskId,
+    },
     /// A goal that is closed takes no task (`add --goal`, `set-goal`).
     GoalClosed {
         goal_id: GoalId,
@@ -845,6 +849,9 @@ impl fmt::Display for DomainError {
                 "an already_satisfied receipt must name in base_checks each check run on the base, with its command and result",
             ),
             Self::MissingRunDirectory => f.write_str("missing run directory"),
+            Self::TaskNotInProgress { task_id } => {
+                write!(f, "task {task_id} is not in progress")
+            }
             Self::TaskNotClaimable { task_id, status } => {
                 write!(f, "task {task_id} is {}, not ready", status.as_str())
             }
