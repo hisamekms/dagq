@@ -67,7 +67,15 @@ impl Supervisor<'_> {
         let mut ready = Vec::new();
         for candidate in candidates {
             let run = &candidate.run;
+            // A resolved approved resume has handed its lease back to the
+            // landing queue. Its status stays needs_session until landing;
+            // it must not open another worker session while it waits.
             if self.in_slot(run.id()) {
+                continue;
+            }
+            let events = self.queue.run_events(run.id())?;
+            let history = RunHistory::from_events(&events);
+            if history.can_queue_landing(run.status()) && history.landing_ready() {
                 continue;
             }
             if self.no_claude && run.actual_provider() == crate::domain::Provider::Claude {
@@ -463,7 +471,8 @@ impl Supervisor<'_> {
         });
         let phase = if approved {
             self.queue_landing(&run, "resume");
-            Phase::AwaitingSlot
+            self.return_to_landing_queue(&run)?;
+            return Ok(());
         } else {
             Phase::Validating(Some(self.validate(run.clone())), None)
         };
@@ -1017,7 +1026,7 @@ impl Supervisor<'_> {
     /// `resume_finished` and move the run on. A resolved run whose
     /// integrate was approved has exited; its workspace is closed, the
     /// resolved head becomes the commit it lands ([`landing_head`]), and it
-    /// keeps its lease and waits for the landing slot; when that head
+    /// returns its lease and waits in the common queue; when that head
     /// cannot be confirmed as its branch's, the resume ends unresolved
     /// with the reason recorded. An unapproved
     /// resolved run keeps its session and lease and goes through
@@ -1025,9 +1034,8 @@ impl Supervisor<'_> {
     /// `failed` receipt ends the run; anything else leaves it
     /// `needs_session` for the next attempt, or for the recovery job after the
     /// last.
-    /// Once a resolved approved resume waits for a landing slot, its finish
-    /// is already recorded: an error during that wait only releases the
-    /// lease, rather than finishing the same attempt twice.
+    /// Once a resolved approved resume enters the queue, its finish is
+    /// already recorded; the worker must not finish that attempt twice.
     pub(super) fn finish_resumed_session(
         &mut self,
         slot: &mut Slot,
@@ -1119,13 +1127,7 @@ impl Supervisor<'_> {
                     payload,
                 )?;
                 self.queue_landing(&run, "resume");
-                slot.run = run;
-                slot.transition(
-                    Phase::AwaitingSlot,
-                    EventKind::LandingQueued.as_str(),
-                    &*self.queue,
-                );
-                return Ok(Step::Continue);
+                return Ok(Step::Done(Box::new(self.return_to_landing_queue(&run)?)));
             }
             (ResumeOutcome::Resolved, None) => {
                 let run = self.queue.finish_resume(

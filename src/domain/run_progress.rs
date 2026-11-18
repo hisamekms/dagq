@@ -51,10 +51,10 @@ fn recorded(events: &[RunEvent]) -> bool {
 
 /// Whether a run with `lease` can be shown in `phase` in `status`, and
 /// with `queued` whether its events queue it to land with no lease
-/// ([`RunHistory::queued_to_land`]): without a working process holding
+/// ([`RunHistory::landing_ready`]): without a working process holding
 /// its lease only a landing it waits for in the queue goes on, and with
-/// no lease at all only one the supervisor lands from its events (a run
-/// whose lease was given back is in no queue, ADR-t3049-1).
+/// no lease at all only one the supervisor lands from its events, including
+/// a run whose owner returned its lease after finishing preparation.
 fn shown(phase: &str, status: RunStatus, lease: Lease, queued: bool) -> bool {
     lease == Lease::Live
         || (phase == LANDING_QUEUE
@@ -133,8 +133,7 @@ impl Progress {
     /// The progress of a run in `status` with `lease`, from its events
     /// (oldest first) at `now` (unix seconds).
     pub fn of(status: RunStatus, lease: Lease, events: &[RunEvent], now: i64) -> Self {
-        let queued =
-            lease == Lease::None && RunHistory::from_events(events).queued_to_land().is_some();
+        let queued = lease == Lease::None && RunHistory::from_events(events).landing_ready();
         let current =
             current(events, now * 1000).filter(|(phase, _)| shown(phase, status, lease, queued));
         let since = current.as_ref().map(|(_, start)| start.div_euclid(1000));
@@ -257,9 +256,7 @@ mod tests {
     }
 
     /// Without a live lease no step goes on, but a landing it waits for in
-    /// the queue: a stale lease's, or one a `land` answer queued with no
-    /// lease (a run whose lease was given back is in no queue,
-    /// ADR-t3049-1).
+    /// the queue: a stale lease's, or an authorized ready run with no lease.
     #[test]
     fn without_a_live_lease_only_a_queued_landing_is_shown() {
         let run = run_id(3);

@@ -364,7 +364,7 @@ receipt \"$(git rev-parse HEAD)\"",
     std::fs::write(&release, "go").unwrap();
     let outcome = joined(supervisor, "the supervisor asked to hand off");
     assert_eq!(outcome["outcome"], "handoff", "{outcome}");
-    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    assert_eq!(outcome["handed_over"], 0, "{outcome}");
     // The landing in progress was waited for; task 2's was not started.
     assert_eq!(
         queue.show(TaskId::new(1)).unwrap().task.status(),
@@ -373,15 +373,7 @@ receipt \"$(git rev-parse HEAD)\"",
     let run = queue.show(second).unwrap().runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     assert!(!event_kinds(&queue.show(second).unwrap()).contains(&"integration_started"));
-    assert_eq!(
-        queue
-            .runs_leased_by(&token)
-            .unwrap()
-            .iter()
-            .map(|run| run.id().clone())
-            .collect::<Vec<_>>(),
-        vec![run.id().clone()]
-    );
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
 
     let outcome = supervise_reviewed_with(
         &db,
@@ -543,9 +535,20 @@ fn hands_over_a_landing_verified_again(stop: bool) {
             .contains("the supervisor drains for a handoff"),
         "{handed}"
     );
-    for kind in ["integration_held", "integration_deferred", "lease_released"] {
+    for kind in ["integration_held", "integration_deferred"] {
         assert!(payloads(&detail, kind).is_empty(), "{kind}");
     }
+    let release = detail
+        .events
+        .iter()
+        .rfind(|event| event.kind.as_str() == "lease_released")
+        .unwrap();
+    let handoff = detail
+        .events
+        .iter()
+        .find(|event| event.kind.as_str() == "integration_handed_over")
+        .unwrap();
+    assert!(release.id < handoff.id, "{release:?} {handoff:?}");
 
     let outcome = supervise_reviewed_owned_with(
         &db,

@@ -273,7 +273,11 @@ fn a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died() {
         ["landing", "returning", "review"],
         "{from_dead:?}"
     );
-    assert!(!from_dead.contains(&"landing_queue"), "{from_dead:?}");
+    assert_eq!(
+        from_dead[3..6],
+        ["exiting", "landing_queue", "landing"],
+        "{from_dead:?}"
+    );
     assert_eq!(reviewer.prompts().len(), 2);
     assert_eq!(
         queue.show(TaskId::new(2)).unwrap().runs[0].status(),

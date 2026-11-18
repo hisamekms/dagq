@@ -408,7 +408,41 @@ impl Wiring {
         task: TaskId,
         disk: Option<crate::application::integrate::DiskRoom>,
     ) -> Result<Value> {
-        use crate::application::integrate::{IntegrateTarget, Integration, Integrator};
+        use crate::application::integrate::IntegrateTarget;
+        self.with_integrator(disk, |integrator, ctx| {
+            let request = integrator
+                .approve(
+                    ctx,
+                    &ActorContext::user(),
+                    IntegrateTarget::Task(task),
+                    Path::new(CHECKOUT),
+                )?
+                .expect("a run awaits integration");
+            let outcome = integrator.land(ctx, &request)?;
+            Ok(serde_json::to_value(outcome)?)
+        })
+    }
+
+    /// Run the human approval and queue selection without executing the
+    /// selected landing's verification.
+    pub(super) fn approve_integration(
+        &self,
+        target: crate::application::integrate::IntegrateTarget,
+    ) -> Result<Option<crate::application::integrate::IntegrationRequest>> {
+        self.with_integrator(None, |integrator, ctx| {
+            integrator.approve(ctx, &ActorContext::user(), target, Path::new(CHECKOUT))
+        })
+    }
+
+    fn with_integrator<T>(
+        &self,
+        disk: Option<crate::application::integrate::DiskRoom>,
+        act: impl FnOnce(
+            &crate::application::integrate::Integrator,
+            &mut crate::application::integrate::Integration<'_>,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        use crate::application::integrate::{Integration, Integrator};
         let mut queue = self.queue();
         let mut ctx = Integration {
             queue: &mut queue,
@@ -434,17 +468,7 @@ impl Wiring {
             programs: None,
             build: crate::VERSION,
         };
-        let integrator = Integrator::of_process(self.pid);
-        let request = integrator
-            .approve(
-                &mut ctx,
-                &ActorContext::user(),
-                IntegrateTarget::Task(task),
-                Path::new(CHECKOUT),
-            )?
-            .expect("a run awaits integration");
-        let outcome = integrator.land(&mut ctx, &request)?;
-        Ok(serde_json::to_value(outcome)?)
+        act(&Integrator::of_process(self.pid), &mut ctx)
     }
 
     /// The repository rules table read by each pass of the real supervisor.

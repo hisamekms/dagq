@@ -699,16 +699,19 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
         ],
         "{phases:?}"
     );
-    // The landing covers the run from `integration_started` to
-    // `run_integrated`: it is recorded right after the one, the push right
-    // after the other, and no phase is recorded between.
+    // The start records the run leaving the queue before its landing
+    // phase. The push follows `run_integrated` with no intervening phase.
     assert_eq!(
         kinds[position("integration_started") + 1],
+        "landing_queue_left"
+    );
+    assert_eq!(
+        kinds[position("integration_started") + 2],
         "run_phase_changed"
     );
     assert_eq!(kinds[position("run_integrated") + 1], "run_phase_changed");
     assert!(
-        !kinds[position("integration_started") + 2..position("run_integrated")]
+        !kinds[position("integration_started") + 3..position("run_integrated")]
             .contains(&"run_phase_changed"),
         "{kinds:?}"
     );
@@ -1492,7 +1495,13 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     let seed = git_out(&repo, &["rev-parse", "main"]);
 
-    // Take the slot by hand, as a crashed `integrate` would have.
+    // Approve and take the slot by hand, as a crashed `integrate` would
+    // have. The recovered run retains its place ahead of the other run.
+    let kind = EventKind::IntegrationApproved;
+    let approval = bound_as_judged(&repo, &run, kind, json!({"push": false}));
+    queue
+        .record_runtime_event(run.id(), kind, approval)
+        .unwrap();
     let taken = queue
         .begin_integration(run.id(), &LeaseToken::new("crashed"), &sha(&seed))
         .unwrap();
@@ -1568,13 +1577,19 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), seed);
     assert!(queue.run_leases().unwrap().is_empty());
     fs::remove_file(repo.join("change.txt")).unwrap();
-    assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
-    let landed = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    assert_landed(&repo, &landed, "test task", &seed);
+    let error = format!("{:#}", integrate(&db, 1, &repo).unwrap_err());
+    assert!(
+        error.contains("queued behind an earlier landing"),
+        "{error}"
+    );
     assert_eq!(
         integrate(&db, other.as_i64(), &repo).unwrap()["outcome"],
         "integrated"
     );
+    let parent = git_out(&repo, &["rev-parse", "main"]);
+    assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
+    let landed = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_landed(&repo, &landed, "test task", &parent);
     assert_eq!(
         git_out(&repo, &["rev-list", "--count", &format!("{seed}..main")]),
         "2"

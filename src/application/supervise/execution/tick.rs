@@ -120,7 +120,14 @@ impl Supervisor<'_> {
                         self.revoke_worker_token(&run);
                     }
                     self.request_cleanup(Some(run.task_id()));
-                    self.finished.push(*run);
+                    // A run can return its lease to the landing queue and
+                    // finish again here after landing. Report the latest
+                    // outcome per run, including runs left waiting.
+                    if let Some(earlier) = self.finished.iter_mut().find(|r| r.id() == run.id()) {
+                        *earlier = *run;
+                    } else {
+                        self.finished.push(*run);
+                    }
                 }
                 Ok(Step::Triaged(run)) => self.note_triaged(&run),
                 // What the step did is judged once the service answers

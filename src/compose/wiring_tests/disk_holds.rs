@@ -375,7 +375,9 @@ fn below_the_reserve_a_landing_waits_and_with_room_it_lands() {
             receipts: vec![succeeded],
             verdicts: vec![verdict("pass", "meets the acceptance")],
         },
-    );
+    )
+    .with_tick(std::time::Duration::from_millis(1))
+    .with_continuous_passes();
     wiring.free.store(ROOM, Ordering::SeqCst);
     let free = wiring.free.clone();
     wiring
@@ -383,22 +385,26 @@ fn below_the_reserve_a_landing_waits_and_with_room_it_lands() {
         .on_next_turn(Box::new(move || free.store(SHORT, Ordering::SeqCst)));
     let task = wiring.ready_task(&[]);
     let free = wiring.free.clone();
+    // The queued run has handed back its lease. Keep the supervisor
+    // running to observe the disk recovery after this test restores room.
     let mut awaiting = None;
-    wiring.supervise_once_while(|queue| {
-        if queue_payloads(queue, "landing_held").is_empty() {
+    wiring.supervise_once_while_stoppable(|queue, stop| {
+        let detail = queue.show(task).unwrap();
+        let Some(run) = detail.runs.first() else {
             return false;
+        };
+        if run.status() == RunStatus::Integrated {
+            stop();
+            return true;
         }
-        awaiting = queue
-            .show(task)
-            .unwrap()
-            .runs
-            .first()
-            .map(|run| run.status());
-        free.store(ROOM, Ordering::SeqCst);
-        true
+        if awaiting.is_none() && !queue_payloads(queue, "landing_held").is_empty() {
+            awaiting = Some((run.status(), queue.run_lease(run.id()).unwrap().is_some()));
+            free.store(ROOM, Ordering::SeqCst);
+        }
+        false
     });
 
-    assert_eq!(awaiting, Some(RunStatus::AwaitingIntegration));
+    assert_eq!(awaiting, Some((RunStatus::AwaitingIntegration, false)));
     let mut queue = wiring.queue();
     let held = queue_payloads(&queue, "landing_held");
     assert_eq!(held.len(), 1, "{held:?}");
@@ -450,19 +456,35 @@ fn a_resolved_approved_resume_is_a_disk_candidate_while_still_needs_session() {
     assert_eq!(parked["outcome"], "needs_session", "{parked}");
     let run = wiring.queue().show(task).unwrap().runs[0].id().clone();
 
+    // The queued run owns no worker slot, so observe successive passes
+    // until its landing finishes rather than relying on --once draining it.
+    let wiring = wiring.with_continuous_passes();
     wiring.free.store(ROOM, Ordering::SeqCst);
     let free = wiring.free.clone();
     wiring.agent.on_next_turn(Box::new(move || {
         free.store(SHORT, Ordering::SeqCst);
     }));
     let mut held_status = None;
-    wiring.supervise_once_while(|queue| {
-        if queue_payloads(queue, "landing_held").is_empty() {
-            return false;
+    wiring.supervise_once_while_stoppable(|queue, stop| {
+        if held_status.is_none() && !queue_payloads(queue, "landing_held").is_empty() {
+            held_status = Some(queue.show(task).unwrap().runs[0].status());
+            wiring.free.store(5 * GIB, Ordering::SeqCst);
         }
-        held_status = Some(queue.show(task).unwrap().runs[0].status());
-        wiring.free.store(5 * GIB, Ordering::SeqCst);
-        true
+        let detail = queue.show(task).unwrap();
+        let resumed = detail
+            .events
+            .iter()
+            .find(|e| e.kind.as_str() == "resume_finished");
+        if resumed.is_some_and(|resumed| {
+            detail
+                .events
+                .iter()
+                .any(|e| e.id > resumed.id && e.kind.as_str() == "integration_compared")
+        }) {
+            stop();
+            return true;
+        }
+        false
     });
     assert_eq!(held_status, Some(RunStatus::NeedsSession));
     let mut queue = wiring.queue();

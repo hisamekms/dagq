@@ -155,6 +155,17 @@ fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
             .any(|event| event.kind == EventKind::SupervisorConfigChanged)
     );
 
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        let detail = queue.show(heavy).unwrap();
+        detail
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::LandingQueued)
+            && detail
+                .runs
+                .first()
+                .is_some_and(|run| queue.run_lease(run.id()).unwrap().is_none())
+    });
     let status = runtime::status(&db).unwrap();
     let supervisor_status = status["supervisors"]
         .as_array()
@@ -164,10 +175,10 @@ fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
         .unwrap()
         .clone();
     assert_eq!(
-        supervisor_status["slots"]["landing_queue"], 1,
+        supervisor_status["slots"]["landing_queue"], 0,
         "{supervisor_status}"
     );
-    assert_eq!(supervisor_status["slots"]["used"], 1, "{supervisor_status}");
+    assert_eq!(supervisor_status["slots"]["used"], 0, "{supervisor_status}");
     let first_run = SqliteQueue::open(&db).unwrap().show(first).unwrap().runs[0]
         .id()
         .to_string();
@@ -178,7 +189,8 @@ fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
         .find(|run| run["run_id"] == first_run.as_str())
         .cloned()
         .unwrap_or_else(|| panic!("{status}"));
-    assert_eq!(listed["progress"]["slot"], "landing_queue", "{listed}");
+    assert!(listed["progress"]["slot"].is_null(), "{listed}");
+    assert_eq!(status["landing_queue"][1]["run_id"], first_run, "{status}");
 
     // The queued excess holds further claims.
     await_passes(&passes, SOME_PASSES);
@@ -192,8 +204,13 @@ fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
     }
     assert_eq!(claims(&db).len(), 3);
 
-    // Drain: the other landing gives its slot back, and the two runs land.
+    // Keep the lane occupied until the stop has drained. The pending
+    // landings can wait for the next supervisor without claiming more work.
     stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(claims(&db).len(), 3);
     queue
         .abort_integration(
             blocker.id(),
@@ -203,10 +220,6 @@ fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
             &dagq::domain::Reason::new(ReasonCode::Other),
         )
         .unwrap();
-    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(claims(&db).len(), 3);
 }
 
 /// The kinds of the task's events, oldest first, with their ids.

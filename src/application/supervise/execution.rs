@@ -449,6 +449,8 @@ pub enum PausePoint {
     /// A receipt's validation that ended, before the supervisor acts on
     /// its result.
     ValidationEnd,
+    /// A queued landing selected, before the transaction that starts it.
+    LandingStart,
     /// A landing recheck that found a run no longer landing, before the
     /// supervisor records the finding and parks the run.
     RecheckFailure,

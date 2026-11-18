@@ -64,7 +64,7 @@ struct RacedHandoff {
     when: fn(&dagq::domain::TaskDetail) -> bool,
 }
 
-/// Task 1's run was queued to land in its slot.
+/// Task 1's run was returned to the shared landing queue.
 fn landing_queued(detail: &dagq::domain::TaskDetail) -> bool {
     event_kinds(detail).contains(&"landing_queued")
 }
@@ -103,8 +103,8 @@ fn ask_for_a_handoff_once_queued() -> Option<f64> {
 
 /// ADR-t3077-1 decision 1 when the request and the landing race: a
 /// handoff asked in the pass that would begin the landing of a run waiting
-/// for the slot, after that pass read none, begins no landing. The run is
-/// handed over with its lease (the next process lands it as in
+/// in the queue, after that pass read none, begins no landing. The run
+/// stays queued without a lease (the next process lands it as in
 /// `runtime_handoff::a_handoff_starts_no_landing_and_hands_over_a_run_awaiting_the_slot`).
 /// With `stop`, a stop asked with it wins from the next pass, and its
 /// drain lands the run whatever request it holds.
@@ -127,7 +127,11 @@ fn a_handoff_asked_after_the_pass_read_none(stop: bool) {
         &backend,
         &reviewer,
         &SuperviseOptions {
-            load_average: ask_for_a_handoff_once_queued,
+            pauses: Some(runtime::PausesPort(Arc::new(|point, _| {
+                if point == runtime::PausePoint::LandingStart {
+                    ask_for_a_handoff_once_queued();
+                }
+            }))),
             ..options
         },
     );
@@ -147,19 +151,10 @@ fn a_handoff_asked_after_the_pass_read_none(stop: bool) {
         return;
     }
     assert_eq!(outcome["outcome"], "handoff", "{outcome}");
-    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    assert_eq!(outcome["handed_over"], 0, "{outcome}");
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     assert_eq!(started, 0);
-    let token = only_registration(&db).token;
-    assert_eq!(
-        queue
-            .runs_leased_by(&token)
-            .unwrap()
-            .iter()
-            .map(|run| run.id().clone())
-            .collect::<Vec<_>>(),
-        vec![run.id().clone()]
-    );
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
 }
 
 #[test]

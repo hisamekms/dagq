@@ -48,8 +48,8 @@ supervisorはreviewがpassしたrunと、上限の後の差し戻しを収束と
 ## 流れ
 
 ```text
-reviewのpass → 着地の前のe2e（要るrunだけ） → 着地slot
-承認: 束縛の確認 → runの選択 → leaseと空き容量の確認 → 着地の承認の記録 → slotを取る
+着地を許す判断 → 共通の着地の列 → 着地の前のe2e（要るrunだけ） → 同じ列 → 着地slot
+承認: 束縛の確認 → runの選択 → leaseと空き容量の確認 → 着地の承認の記録 → 共通の列で順番を確認 → slotを取る
 着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → 判断との照合 → reviewのプログラム → 検証のコマンド
       └─ 通れば squash commit → mainを進める → 完了 → 後始末 → push → follow_upsの登録
       └─ 通らなければ needs_session / held（hostの失敗） / failed（receiptが失敗を報告）
@@ -86,7 +86,15 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## 承認とslot
 
 承認されたrunのうちe2eの要らない着地はworkerの空きを待たず、e2eの開始だけがworkerの空きを待つ。
-承認順でe2eが空きを待つrunを飛ばして後続の着地を進めるが、着地はqueue全体で1本ずつとし、着地のほかの控えは保つ。
+着地を許した全てのrunは一本の列に入り、効く優先度が高い順、同じ優先度なら列に入った時刻の順で着地を始める。
+reviewのpassもleaseを返して同じ列を待ち、workerのslotから直接着地を始めない。
+人が直接着地を始めるときも同じ列で選び、先に進めるrunがあれば後続のrunは承認を記録して順番を待つ。
+先頭だけに効くe2eのworker枠不足・ディスク不足・掃除の予約では、独立に進める後続を同じ順で選ぶ。
+着地中のrunや共通のturnの使用があれば誰も始めず、人が直接着地を頼んだrunも承認を記録して待つ。
+直接の`integrate`も共通のturnが空くまで着地slotを取らず、turnを取った後に列の順番を確かめ直す。
+着地の開始を見送っても列に入った時刻は変えず、未解決のrunは承認を保ってresumeへ進む。
+復旧・drain・引き継ぎも同じ列を使い、drainを延ばさない開始条件とleaseの所有を保つ（[ADR-t5283-1](../../adr/2026-11-18-t5283-1-one-landing-queue.md)）。
+引き継ぎでは、既にleaseを返したrunはそのまま列に残り、検証のやり直しの前で区切った着地は所有者が引き継ぐ。
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
 - 人とinboxの`integrate`の承認は、その時のrunの差分の組に結んで記録する（`integrate::binding::of_run`）。

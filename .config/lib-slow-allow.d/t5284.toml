@@ -1,0 +1,9 @@
+[[test]]
+name = "compose::wiring_tests::landing_answers::an_earlier_land_answer_and_a_later_pass_share_one_visible_landing_order"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、land 回答と後続の review pass が同じ列に入り、先の着地中に後続が開始せず、2本の位置が status に出て、先の完了後に後続が着地して出入りの event が残ることを確かめる。supervisor の起動は1回、task は2本、tick は1 msに縮めている。同じ queue の開始・待ち・完了をつなぐ配線は分割できず、順序・資源の控え・entry の組み立ては domain::landing_queue の副作用のない unit test に分離済み。"
+task = 5284
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::an_approved_run_blocked_by_an_active_landing_still_resumes"
+reason = "境界: 人の着地の承認を記録する入口から、実際の supervisor と wrapper が同じ run の resume を完了して共通列へ返すまでを通す。前段の worker と review は fixture で省き、supervisor の起動1回、resume の turn 1回、tick 1 msに絞った。"
+task = 5284

@@ -2,7 +2,7 @@
 //! slot's run and moves it on by its `Phase` (one function across the
 //! phases, so the order of its checks and calls is read in one place),
 //! [`Supervisor::step_awaiting_slot`] the look at a run waiting for the
-//! landing slot (it lands, runs its e2e first, is parked or waits) and
+//! landing queue (it returns to the queue, runs e2e, is parked or waits) and
 //! [`Supervisor::step_landing_wait`] that look under the lock of a
 //! cleanup for disk space. `Phase`, the free functions these share with
 //! the other submodules and `tick`, the pass that calls `step`, stay in
@@ -15,8 +15,8 @@ use super::*;
 impl Supervisor<'_> {
     /// A look at a run in its slot waiting for the landing slot, its park
     /// included ([`Self::park_step`]): not while a cleanup for disk space
-    /// has it reserved, removing its build outputs; it lands once the job
-    /// passed it, building them again. The lock is held until the look is
+    /// has it reserved, removing its build outputs; it can return to the
+    /// common queue once the job passed it. The lock is held until the look is
     /// done, so the job reserves no run this look moves on (a landing, an
     /// e2e, a park or the lease handed back), and a run moved on is no
     /// longer the job's to take ([`cleanup::Cleaning::withdraw`]).
@@ -40,13 +40,18 @@ impl Supervisor<'_> {
         step
     }
 
-    /// A look at a run in its slot waiting for the landing slot: it lands,
-    /// runs its e2e first, is parked, or waits.
+    /// Finish the selected e2e or adopted landing's preparation, then
+    /// return ownership to the common queue; integration starts only there.
     fn step_awaiting_slot(&mut self, slot: &mut Slot) -> Result<Step> {
-        // Judged again on each look: only the landing of another run
-        // keeps it in the landing queue (ADR-t1591-1).
+        // This phase prepares a queue candidate; it never owns the turn.
         slot.landing_turn = false;
         slot.blocked_by = None;
+        if self.e2e_due(&slot.run)?.is_none() {
+            let current = self.queue.run(slot.run.id())?;
+            return Ok(Step::Done(Box::new(
+                self.return_to_landing_queue(&current)?,
+            )));
+        }
         // Its verification would fail on the missing program, an
         // unreadable CI, an unresolved landing branch or short disk:
         // the run stays awaiting integration, leased, and the
@@ -95,75 +100,11 @@ impl Supervisor<'_> {
             slot.transition(phase, "e2e_due", &*self.queue);
             return Ok(Step::Continue);
         }
-        if let Some(landing) = self.queue.runs_with_status(RunStatus::Integrating)?.first() {
-            // Reviewed and its e2e done, it waits only for its
-            // landing turn (ADR-t1591-1).
-            slot.landing_turn = true;
-            slot.blocked_by = Some(landing.id().clone());
-            return Ok(Step::Continue);
-        }
-        let current = self.queue.run(slot.run.id())?;
-        let previous = current.status();
-        let main = self.repository.main_head()?;
-        // A head the landing recheck found not landing on this main
-        // is parked for a resume instead (ADR-0068 decision 3).
-        if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
-            return Ok(Step::Done(Box::new(parked)));
-        }
-        // A run whose task is being replanned or held does not
-        // land (ADR-t1521-2 decision 1, ADR-t1879-1): the park
-        // above takes it out of its slot; a fence that came since
-        // that look is the next look's.
-        if self.queue.turn_fence(current.task_id())?.is_some() {
-            return Ok(Step::Continue);
-        }
-        // Its verification takes turns with the automatic update's
-        // build and e2e (ADR-t2719-1): only looked at here, the
-        // landing takes the turn itself before its commands.
-        if self.landing_waits_its_turn(&current)? {
-            slot.landing_turn = true;
-            return Ok(Step::Continue);
-        }
-        let run = match self.begin_landing(slot.run.id(), &main) {
-            Ok(run) => run,
-            // Unanswered, it may have taken the slot for this run:
-            // the reconciliation reads what the queue holds.
-            Err(error) if crate::application::supervisor_service::unreachable(&error) => {
-                return Err(error);
-            }
-            // A handoff asked since this pass read none at its
-            // start: the same write refused the landing
-            // (ADR-t3077-1 decision 1), and the run waits, its
-            // lease kept, for the next pass to drain for the
-            // request.
-            Err(error)
-                if error
-                    .downcast_ref::<crate::application::HandoffAsked>()
-                    .is_some() =>
-            {
-                info!(run_id = %slot.run.id(), "run {} does not land: its supervisor was asked to hand off", slot.run.id());
-                return Ok(Step::Continue);
-            }
-            // An `integrate` took the slot since the check: try again later.
-            Err(_)
-                if let Some(landing) =
-                    self.queue.runs_with_status(RunStatus::Integrating)?.first() =>
-            {
-                slot.landing_turn = true;
-                slot.blocked_by = Some(landing.id().clone());
-                return Ok(Step::Continue);
-            }
-            Err(error) => return Err(error),
-        };
-        info!(run_id = %run.id(), "run {} lands onto main {main} ({})", run.id(), previous.as_str());
-        let landing = Phase::Landing(Some(self.spawn_landing(run.clone(), previous, main)?));
-        slot.run = run;
-        slot.transition(
-            landing,
-            EventKind::IntegrationStarted.as_str(),
-            &*self.queue,
-        );
-        Ok(Step::Continue)
+        // The owner returns a ready run to the common landing queue.
+        // No worker slot may start integration, even when the turn is free.
+        Ok(Step::Done(Box::new(
+            self.return_to_landing_queue(&slot.run)?,
+        )))
     }
 
     /// The record of a revise or a conflict's resolution that rewrote
@@ -648,13 +589,7 @@ impl Supervisor<'_> {
                 match then {
                     AfterExit::Land => {
                         self.queue_landing(&run, "exit");
-                        slot.run = run;
-                        slot.transition(
-                            Phase::AwaitingSlot,
-                            EventKind::LandingQueued.as_str(),
-                            &*self.queue,
-                        );
-                        Ok(Step::Continue)
+                        Ok(Step::Done(Box::new(self.return_to_landing_queue(&run)?)))
                     }
                     AfterExit::Ask {
                         decision,

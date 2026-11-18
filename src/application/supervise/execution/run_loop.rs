@@ -576,14 +576,16 @@ impl Supervisor<'_> {
                         .unwrap_or_else(|| run_phase::Phase::for_disk_status(run.status()))
                 };
                 // An approved resume keeps needs_session until its landing
-                // starts. Its slot already waits to land after resolution,
-                // so status alone must not exclude it from this pass's gate.
+                // starts. Both owned preparation and an unleased ready entry
+                // remain landing candidates after resolution.
                 let awaiting_slot = slot.is_some_and(|s| matches!(s.phase, Phase::AwaitingSlot));
+                let history = RunHistory::from_events(&events);
+                let ready_to_land = awaiting_slot
+                    || (slot.is_none()
+                        && history.can_queue_landing(run.status())
+                        && history.landing_ready());
                 let waiting = crate::domain::task_hold::waiting_to_land(
-                    awaiting_slot
-                        || (run.status() == RunStatus::AwaitingIntegration
-                            && slot.is_none()
-                            && RunHistory::from_events(&events).queued_to_land().is_some()),
+                    ready_to_land,
                     self.queue.hold_guard(run.task_id())?,
                 );
                 moving.push(super::super::host_ops::disk::DiskTarget {
@@ -595,7 +597,7 @@ impl Supervisor<'_> {
                     task: run.task_id(),
                     phase: phase.name().to_owned(),
                     container: run.in_container(),
-                    candidate: awaiting_slot
+                    candidate: ready_to_land
                         || run.status() == RunStatus::AwaitingIntegration
                         || run.status() == RunStatus::Integrating,
                     waiting,
@@ -657,6 +659,7 @@ impl Supervisor<'_> {
             }
             self.registration.drain_for(stopping, self.claim.claiming);
             self.note_handoff_drain(stopping);
+            self.refresh_landing_backpressure()?;
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
             self.return_waiting_runs();
@@ -791,6 +794,10 @@ impl Supervisor<'_> {
                 // (ADR-t3330-1).
                 if stopping {
                     self.drain_landing_answers()?;
+                } else if !self.landing.pending_landings.is_empty()
+                    && let Err(error) = self.start_approved_landings(self.claim.parallel, true)
+                {
+                    warn!(error = %format_args!("{error:#}"), "a run returned by this drain could not start its landing: {error:#}");
                 }
             }
             self.poll_observer();
@@ -944,6 +951,9 @@ impl Supervisor<'_> {
         .into_iter()
         .filter_map(|(name, waits)| waits.then_some(name))
         .collect();
+        if once && !stopping && self.claim.claiming && self.locally_queued_landings_pending() {
+            waits.push("landing_queue");
+        }
         // Read from the queue, so only when nothing else is waited for. A
         // supervisor that stops leaves the park to the next.
         if waits.is_empty() && !stopping && self.hold_parks_going() {

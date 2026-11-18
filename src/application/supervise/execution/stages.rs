@@ -26,6 +26,9 @@ use std::collections::BTreeSet;
 #[derive(Default)]
 pub(super) struct SlotTable {
     slots: Vec<Slot>,
+    /// Capacity snapshot of ready, unfenced landings with no lease. The
+    /// supervisor rebuilds it from the shared queue each pass.
+    unleased_landing_waits: usize,
 }
 
 impl SlotTable {
@@ -107,20 +110,45 @@ impl SlotTable {
             .collect()
     }
 
-    /// Worker capacity shared by claim, resume, recovery, adoption, stranded
-    /// runs, e2e admission, landing-answer admission and human-wait returns.
-    /// Review and e2e stay workers; only human waits and the bounded landing
-    /// lane leave capacity (ADR-t5107-1).
+    /// Worker capacity shared by claim, resume, recovery, adoption, e2e
+    /// and human-wait returns. Review and e2e stay workers. Integrating
+    /// runs and human waits stay outside the count. Landing waits,
+    /// including unleased ready entries, count beyond the first
+    /// `parallel` (ADR-t5107-1 decision 2).
     pub(super) fn used(&self, parallel: usize) -> usize {
-        light_slots::worker_slots(
-            self.slots.iter().filter(|slot| !slot.out_of_slot()).count(),
-            self.slots
-                .iter()
-                .filter(|slot| !slot.out_of_slot() && matches!(slot.phase, Phase::Landing(_)))
-                .count(),
-            self.landing_queue(),
-            parallel,
-        )
+        light_slots::worker_slots(self.active_workers(), self.queued_landings(), parallel)
+    }
+
+    /// The same capacity for an e2e that replaces one waiting entry.
+    pub(super) fn queued_e2e_has_room(&self, parallel: usize) -> bool {
+        light_slots::queued_e2e_has_room(self.active_workers(), self.queued_landings(), parallel)
+    }
+
+    fn active_workers(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| {
+                !slot.out_of_slot()
+                    && !matches!(slot.phase, Phase::Landing(_))
+                    && !slot.in_landing_queue()
+            })
+            .count()
+    }
+
+    fn queued_landings(&self) -> usize {
+        self.landing_queue() + self.unleased_landing_waits
+    }
+
+    pub(super) fn set_unleased_landing_waits(&mut self, waiting: usize) {
+        self.unleased_landing_waits = waiting;
+    }
+
+    pub(super) fn add_unleased_landing_wait(&mut self) {
+        self.unleased_landing_waits += 1;
+    }
+
+    pub(super) fn remove_unleased_landing_wait(&mut self) {
+        self.unleased_landing_waits = self.unleased_landing_waits.saturating_sub(1);
     }
 
     /// The runs that wait only for their landing turn (ADR-t1591-1).
@@ -612,6 +640,9 @@ pub(super) struct LandingState {
     /// of approved landings (ADR-t3330-1): they keep the drain going for
     /// no other landing.
     pub(super) drain_landings: HashSet<RunId>,
+    /// Runs this owner returned to the shared queue; a stop may finish
+    /// this finite set without extending its drain for unrelated work.
+    pub(super) pending_landings: HashSet<RunId>,
 }
 
 /// The resume, and the headless sessions opened again during a wait:
@@ -894,17 +925,6 @@ mod tests {
         }
         assert_eq!(claim.slots.used(3), 1);
         assert_eq!(claim.room(3), ClaimRoom::Any);
-        assert!(
-            !super::super::landing::approved_landing_waits(
-                false,
-                claim.slots.used(3),
-                3,
-                true,
-                || Ok(false),
-                || Ok(false)
-            )
-            .unwrap()
-        );
         // A landing failure's needs_session is no longer a landing phase.
         claim.slots.slots[1].run = with_status(&claim.slots[1], RunStatus::NeedsSession);
         claim.slots.slots[1].phase = Phase::AwaitingSlot;
@@ -923,28 +943,6 @@ mod tests {
             claim.slots.admit(active);
             assert_eq!(claim.slots.used(3), 3);
             assert_eq!(claim.room(3), ClaimRoom::None);
-            assert!(
-                super::super::landing::approved_landing_waits(
-                    false,
-                    claim.slots.used(3),
-                    3,
-                    true,
-                    || Ok(false),
-                    || Ok(false)
-                )
-                .unwrap()
-            );
-            assert!(
-                !super::super::landing::approved_landing_waits(
-                    false,
-                    claim.slots.used(3),
-                    3,
-                    false,
-                    || Ok(false),
-                    || Ok(false)
-                )
-                .unwrap()
-            );
             claim.slots.release(4);
         }
         claim.slots.leave_for(0, waiting(Some(1)));
@@ -961,6 +959,37 @@ mod tests {
         }
         assert_eq!(claim.slots.used(3), 4);
         assert_eq!(claim.room(3), ClaimRoom::None);
+    }
+
+    #[test]
+    fn unleased_landing_excess_reserves_worker_capacity_until_the_queue_shrinks() {
+        let mut claim = claim_state(LightChanges::default());
+        let parallel = 3;
+        let mut integrating = slot("integrating");
+        integrating.phase = Phase::Landing(None);
+        claim.slots.admit(integrating);
+
+        claim.slots.set_unleased_landing_waits(6);
+        assert_eq!(claim.slots.used(parallel), 3);
+        assert_eq!(claim.room(parallel), ClaimRoom::None);
+        assert!(claim.slots.queued_e2e_has_room(parallel));
+
+        // An e2e replaces one waiting entry already counted against the
+        // worker budget. It uses the same total capacity.
+        claim.slots.remove_unleased_landing_wait();
+        let mut e2e = slot("e2e");
+        e2e.phase = Phase::AwaitingE2e;
+        claim.slots.admit(e2e);
+        assert_eq!(claim.slots.used(parallel), 3);
+        assert_eq!(claim.room(parallel), ClaimRoom::None);
+
+        // As more entries leave the queue, normal claims get room again.
+        claim.slots.remove_unleased_landing_wait();
+        assert_eq!(claim.slots.used(parallel), 2);
+        assert_eq!(claim.room(parallel), ClaimRoom::Any);
+        claim.slots.admit(slot("worker1"));
+        claim.slots.admit(slot("worker2"));
+        assert!(!claim.slots.queued_e2e_has_room(parallel));
     }
 
     /// The load windows follow the runs the slots hold.

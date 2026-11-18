@@ -61,7 +61,7 @@ validationを通ったrun（awaiting_integration）
   → 1 開始: review.mdと各jobのpromptを書く
   → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを並列に
   → 3 判定: 全jobがそろってから
-       pass    → 5a 定義を変えるrunはagentのeval → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
+       pass    → 5a 定義を変えるrunはagentのeval → 5 衝突の事前判定 → 終了の依頼とclose → 共通の着地の列 → 着地の前のe2e → 同じ列 → 着地
        revise  → 4 reviseの往復（runを通した上限まで）→ validationからやり直す
        concern → AIが決めるconcern: land（passと同じ道）/ send_back（4と同じ道）/ ask
        上限の後の差し戻し → 4a コードで着地かask
@@ -74,6 +74,7 @@ validationを通ったrun（awaiting_integration）
 - supervisorはreviewの間もrunのleaseとslotを持ち、runのstatusは`awaiting_integration`のままにし、進行はeventで読む。
 - review jobは読むだけで、worktreeは生きているworkerのsessionのものなので書く道具を持たない。
 - 直すのはworkerのsessionで、supervisorは依頼を次のturnとして`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
+- 着地を許したrunはsessionの終了後にleaseを返し、workerのslotから離れて共通の列で順番を待つ。
 - 着地は`integrate`と同じ処理をsupervisorが走らせ（[integrate](integrate.md)）、review中のrunを人の`integrate`は拒む。
 - 資料`review.md`は[`review`](commands.md)、promptは[Prompt](prompt.md#headlessのjobのprompt)、providerは[Agent provider lifecycle](../provider-lifecycle.md)。
 
@@ -121,7 +122,8 @@ validationを通ったrun（awaiting_integration）
    衝突の事前判定（ADR-0027決定4）で衝突すれば解消を生きたsessionに依頼して4と同じ待ちに入り、衝突だけの試行に数える（[Needs session](needs-session.md)の「試行の数え方」）。
    落とし穴: askの前に前の`approve_landing`を閉じないと、開いたaskに畳まれて新しい理由が届かず古い答えが適用されうる（`ask_approve_landing`）。
 6. **askの回答**: 答えはslotの空きに依らずその場で適用し、`retry_review`はresumeせず同じreceiptを再reviewする（[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)、`apply_landing_answers`）。
-   `land`は承認の古い順に候補を選ぶ（[承認とslot](integrate.md#承認とslot)）。
+   同じ列で候補を選ぶ（[承認とslot](integrate.md#承認とslot)）。
+   後の着地判断が有効なら、古い回答は適用せず着地後に閉じる。
    着地せずに終わったrunの閉じていない`approve_landing`はruntimeが閉じる。
 7. **引き継ぎ**: 他のsupervisorがadoptして最後の段のeventから続きを決め、途中のerrorはrunをabandonして`review and integrate`のattentionにする。
 8. **reviseの間のask**: `worker_question`の答えを次のturnに届け、待つrunはslotから外れる（[人の答えを待つrun](waiting.md)の「差し戻しと解消依頼の段」）。

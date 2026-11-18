@@ -157,7 +157,7 @@ pub fn kept(events: &[RunEvent], build: Option<&str>) -> Option<Keep> {
     if super::resume::parked_by_recheck(events) {
         return Some(Keep::RecheckParked);
     }
-    if history.queued_to_land().is_some()
+    if history.landing_ready()
         || history.recovered_landing().is_some()
         || history.queued_review_retry().is_some()
     {
@@ -298,8 +298,8 @@ mod tests {
         }
     }
 
-    /// A run whose third review passed, its session asked to exit, queued
-    /// to land and its lease given back by a supervisor that stopped.
+    /// A legacy pass given back after closing its session, without the
+    /// queue-ready mark. It still needs its preparation taken up.
     fn handed_back() -> Vec<RunEvent> {
         vec![
             event(1, EventKind::ValidationFinished, json!({"accepted": true})),
@@ -307,7 +307,7 @@ mod tests {
             event(3, EventKind::ReviewFinished, json!({"verdict": "pass"})),
             event(4, EventKind::ConflictPrecheck, json!({})),
             event(5, EventKind::ExitRequested, json!({})),
-            event(6, EventKind::LandingQueued, json!({"via": "exit"})),
+            event(6, EventKind::SessionClosed, json!({})),
             event(7, EventKind::LeaseReleased, json!({"reason": "finished"})),
         ]
     }
@@ -329,8 +329,17 @@ mod tests {
     }
 
     #[test]
-    fn a_passed_run_given_back_with_no_lease_and_no_ask_is_taken_up() {
+    fn a_legacy_pass_is_taken_up_but_a_ready_pass_uses_the_landing_queue() {
         assert_eq!(judge(seen(), &handed_back(), None), Stranded::TakeUp);
+        let ready = with(
+            handed_back(),
+            EventKind::LandingQueued,
+            json!({"via": "exit"}),
+        );
+        assert_eq!(
+            judge(seen(), &ready, None),
+            Stranded::Keep(Keep::QueuedElsewhere)
+        );
         // Its e2e retried before the hand-back changes nothing.
         let events = with(
             handed_back(),

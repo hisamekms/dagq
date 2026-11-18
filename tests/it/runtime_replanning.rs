@@ -261,16 +261,17 @@ fn a_withheld_revise_under_an_operation_that_parks_no_more_rests_the_run_out_of_
     assert_ne!(main, base);
 }
 
-/// A passed run that waits in the landing slot for its landing's turn (the
-/// automatic update's gate, which the test holds, keeps the landing checks
-/// from starting) and whose task an operation then guards past its park
-/// does not wait there: it begins no landing, rests out of the slot with
-/// its lease given back, and another task, added while it held the only
-/// worker's slot, takes the slot and lands once the gate is let go.
+/// A passed run waits unleased while the automatic update holds the turn.
+/// A replan fence keeps it queued once the turn is free, and another task
+/// can use the free worker slot and land.
 #[test]
 fn a_run_waiting_in_the_landing_slot_rests_out_of_it_once_its_task_is_guarded() {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(
+        2,
+        "printf 'other\\n' > other.txt; git add other.txt; git commit -qm other; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
     let reviewer = TestReviewer::new(&[
         verdict("pass", &[], "meets the acceptance"),
         verdict("pass", &[], "fine"),
@@ -294,10 +295,7 @@ fn a_run_waiting_in_the_landing_slot_rests_out_of_it_once_its_task_is_guarded() 
         await_passes(&options.passes, SOME_PASSES);
         let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
         assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-        assert!(
-            queue.run_lease(run.id()).unwrap().is_some(),
-            "it waits in its slot"
-        );
+        assert!(queue.run_lease(run.id()).unwrap().is_none());
         let other = add_ready_task(&mut queue, "other task", &[]);
         let guarded = std::process::Command::new("sh")
             .arg("-c")
@@ -305,9 +303,6 @@ fn a_run_waiting_in_the_landing_slot_rests_out_of_it_once_its_task_is_guarded() 
             .status()
             .unwrap();
         assert!(guarded.success());
-        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
-            queue.show(TaskId::new(1)).unwrap().runs[0].status() == RunStatus::NeedsSession
-        });
         drop(gate);
         let _waiting = crate::common::within(crate::common::STEP_LIMIT, "the supervisor to return");
         let outcome = supervisor
@@ -320,17 +315,13 @@ fn a_run_waiting_in_the_landing_slot_rests_out_of_it_once_its_task_is_guarded() 
     let run = &detail.runs[0];
     let kinds = event_kinds(&detail);
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
-    assert_eq!(run.status(), RunStatus::NeedsSession, "{kinds:?}");
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration, "{kinds:?}");
     assert!(queue.run_lease(run.id()).unwrap().is_none());
-    let at = |kind: &str| {
-        kinds
+    assert!(
+        payloads(&detail, "landing_queue_waiting")
             .iter()
-            .rposition(|k| *k == kind)
-            .unwrap_or_else(|| panic!("no {kind} in {kinds:?}"))
-    };
-    assert!(at("landing_queued") < at("replan_parked"), "{kinds:?}");
-    assert!(at("replan_parked") < at("lease_released"), "{kinds:?}");
-    assert_eq!(payloads(&detail, "replan_parked")[0]["fence"], "blocked");
+            .any(|event| event["waiting_for"] == "fence")
+    );
     for kind in ["integration_started", "ask_opened"] {
         assert!(!kinds.contains(&kind), "{kind} in {kinds:?}");
     }

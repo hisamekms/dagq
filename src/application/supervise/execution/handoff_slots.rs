@@ -151,8 +151,8 @@ pub(super) fn reads_resumed_session(
 pub(super) enum Queued {
     /// Not queued, or not read.
     No,
-    /// A person's `land` or a recovered landing
-    /// ([`crate::domain::RunHistory::queued_to_land`]).
+    /// Any landing authorization whose owner finished preparation
+    /// ([`crate::domain::RunHistory::landing_ready`]).
     ToLand,
     /// Its resume resolved or was skipped and the approved run was queued
     /// ([`crate::domain::RunHistory::queued_after_resume`]).
@@ -160,14 +160,14 @@ pub(super) enum Queued {
 }
 
 /// How the `events` of a run in `status` without `handoff.json` queue it
-/// to land: an `awaiting_integration` run by a person's `land` or a
-/// recovered landing, a `needs_session` one by its approved resume's end
+/// to land: a ready `awaiting_integration` run by any authorization,
+/// a `needs_session` one by its approved resume's end
 /// ([`crate::domain::RunHistory::queued_after_resume`]).
 pub(super) fn queued(status: RunStatus, events: &[RunEvent]) -> Queued {
     let history = RunHistory::from_events(events);
     match status {
         RunStatus::NeedsSession if history.queued_after_resume().is_some() => Queued::AfterResume,
-        RunStatus::AwaitingIntegration if history.queued_to_land().is_some() => Queued::ToLand,
+        RunStatus::AwaitingIntegration if history.landing_ready() => Queued::ToLand,
         _ => Queued::No,
     }
 }
@@ -176,13 +176,10 @@ pub(super) fn queued(status: RunStatus, events: &[RunEvent]) -> Queued {
 /// whether its resumed session lives on (read only when
 /// [`reads_resumed_session`]) and `queued` how it was queued to land
 /// (read only for an `awaiting_integration` or `needs_session` run
-/// without `handoff.json`). An `awaiting_integration` run a person's
-/// `land` or a recovered landing queued (one handed over while it awaited
-/// the landing slot, ADR-t3077-1) gives its lease back to the approved
-/// landings rather than having its review adopted, which would ask or
-/// review it again over the answer. A `needs_session` run queued after
-/// its resume waits for the landing slot again rather than giving its
-/// lease back, for the resume would run again.
+/// without `handoff.json`). A ready `awaiting_integration` run returns
+/// its lease to the common queue rather than repeating its review. A
+/// `needs_session` run queued after its resume takes up landing preparation
+/// and then returns to the same queue, without repeating its resume.
 pub(super) fn takeover(
     status: RunStatus,
     snapshot: Option<handoff::SnapshotKind>,

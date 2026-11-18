@@ -74,18 +74,23 @@ pub enum ClaimRoom {
     None,
 }
 
-/// Worker slots in use among leased runs that have no human-wait mark.
-/// Integrating runs leave worker capacity entirely. Landing-turn waits
-/// leave it up to `parallel`; their excess supplies backpressure. Review,
-/// e2e, revise and resume remain workers, including a failed landing that
-/// returned to `needs_session`. Inputs describe disjoint landing stages.
-pub fn worker_slots(
-    nonwaiting: usize,
-    integrating: usize,
-    queued: usize,
-    parallel: usize,
-) -> usize {
-    nonwaiting.saturating_sub(integrating + outside_the_slots(queued, parallel))
+/// Worker capacity in use: active workers and the excess landing queue
+/// over `parallel`. Ready landings contribute to backpressure even after
+/// their leases were returned. Active workers exclude human waits and
+/// integrating runs, but include review, e2e, revise and resume.
+pub fn worker_slots(active_workers: usize, queued: usize, parallel: usize) -> usize {
+    active_workers + queued.saturating_sub(parallel)
+}
+
+/// A queued run takes a worker slot to run e2e. Removing it from the
+/// queue and starting its e2e are one admission: if it replaces an excess
+/// wait, it uses capacity already charged to the queue. Even when direct
+/// approvals grew the queue past the limit, replacements can drain it
+/// without increasing the charge or exceeding the actual worker limit.
+pub fn queued_e2e_has_room(active_workers: usize, queued: usize, parallel: usize) -> bool {
+    active_workers < parallel
+        && worker_slots(active_workers + 1, queued.saturating_sub(1), parallel)
+            <= worker_slots(active_workers, queued, parallel).max(parallel)
 }
 
 /// New claims use worker capacity regardless of change, paths or priority.
@@ -166,7 +171,7 @@ mod tests {
     #[test]
     fn landing_stages_leave_two_claims_for_any_change() {
         // One worker, one integrator, two queued landings: two more workers.
-        let used = worker_slots(4, 1, 2, 3);
+        let used = worker_slots(1, 2, 3);
         assert_eq!(used, 1);
         for light in [
             LightChanges::default(),
@@ -183,20 +188,32 @@ mod tests {
     #[test]
     fn landing_queue_excess_is_worker_backpressure() {
         assert_eq!(outside_the_slots(5, 3), 3);
-        assert_eq!(worker_slots(7, 1, 5, 3), 3);
+        assert_eq!(worker_slots(1, 5, 3), 3);
         assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
+        assert_eq!(worker_slots(0, 6, 3), 3);
+        assert_eq!(worker_slots(0, 5, 3), 2);
+        assert_eq!(worker_slots(0, 0, 3), 0);
+    }
+
+    #[test]
+    fn queued_e2e_can_replace_excess_but_cannot_overbook_workers() {
+        assert!(queued_e2e_has_room(2, 3, 3));
+        assert!(!queued_e2e_has_room(3, 3, 3));
+        assert!(queued_e2e_has_room(0, 6, 3));
+        assert!(queued_e2e_has_room(2, 7, 3));
+        assert!(!queued_e2e_has_room(3, 7, 3));
     }
 
     #[test]
     fn returning_runs_precede_claims_and_failed_landings_are_workers() {
-        assert_eq!(claim_room(worker_slots(4, 1, 2, 3), 3, 1), ClaimRoom::None);
+        assert_eq!(claim_room(worker_slots(1, 2, 3), 3, 1), ClaimRoom::None);
         // Landing failure moves out of the lane into needs_session.
-        assert_eq!(worker_slots(4, 0, 2, 3), 2);
+        assert_eq!(worker_slots(2, 2, 3), 2);
         assert_eq!(claim_room(2, 3, 0), ClaimRoom::Any);
-        assert_eq!(worker_slots(5, 0, 2, 3), 3);
+        assert_eq!(worker_slots(3, 2, 3), 3);
         assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
         // Review and e2e are ordinary workers, not queued landings.
-        assert_eq!(worker_slots(3, 0, 0, 3), 3);
+        assert_eq!(worker_slots(3, 0, 3), 3);
     }
 
     #[test]

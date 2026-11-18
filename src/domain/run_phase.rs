@@ -402,12 +402,8 @@ impl Phase {
                 Self::ClaimHeld
             });
         }
-        Self::awaiting_at_rest(status, events, build).or_else(|| {
-            Self::at_rest(
-                status,
-                RunHistory::from_events(events).queued_approval().is_some(),
-            )
-        })
+        Self::awaiting_at_rest(status, events, build)
+            .or_else(|| Self::at_rest(status, RunHistory::from_events(events).landing_ready()))
     }
 
     /// The phase of a run awaiting integration that no lease holds and no
@@ -423,7 +419,7 @@ impl Phase {
         build: Option<&str>,
     ) -> Option<Self> {
         (status == RunStatus::AwaitingIntegration
-            && RunHistory::from_events(events).queued_approval().is_none()
+            && !RunHistory::from_events(events).landing_ready()
             && super::stranded_landing::kept(events, build).is_none())
         .then_some(Self::Returning)
     }
@@ -459,7 +455,7 @@ impl Phase {
         if status.is_unfinished() && held_unreleased(events) {
             return Some(Self::Held);
         }
-        let queued = RunHistory::from_events(events).queued_approval().is_some();
+        let queued = RunHistory::from_events(events).landing_ready();
         Self::awaiting_at_rest(status, events, build).or_else(|| Self::at_rest(status, queued))
     }
 
@@ -485,7 +481,7 @@ impl Phase {
                 Some(Self::Returning)
             }
             _ => Self::awaiting_at_rest(status, events, None)
-                .or_else(|| Self::at_rest(status, history.queued_approval().is_some())),
+                .or_else(|| Self::at_rest(status, history.landing_ready())),
         }
     }
 }
@@ -851,11 +847,11 @@ mod tests {
     }
 
     /// A passed run whose supervisor stopped and gave its lease back as it
-    /// waited for its landing (ADR-t3049-1) waits to go back to a slot,
-    /// for the supervisor that takes it up, not for a person; one an ask
+    /// waited for its landing waits in the common landing queue without
+    /// taking a worker slot; one an ask
     /// was opened for after its review waits for a person's answer.
     #[test]
-    fn a_passed_run_given_back_waits_to_go_back_unless_a_person_was_asked() {
+    fn a_passed_run_given_back_waits_in_the_landing_queue_unless_a_person_was_asked() {
         let given_back = vec![
             event(1, event_kind::REVIEW_FINISHED, json!({"verdict": "pass"})),
             event(2, event_kind::EXIT_REQUESTED, json!({})),
@@ -865,17 +861,20 @@ mod tests {
         let awaiting = RunStatus::AwaitingIntegration;
         assert_eq!(
             Phase::resting(awaiting, &given_back, None),
-            Some(Phase::Returning)
+            Some(Phase::LandingQueue)
         );
         assert_eq!(
             Phase::after_landing(awaiting, &given_back, None),
-            Some(Phase::Returning)
+            Some(Phase::LandingQueue)
         );
         assert_eq!(
             Phase::after_recovery(awaiting, &given_back),
-            Some(Phase::Returning)
+            Some(Phase::LandingQueue)
         );
-        assert_eq!(Phase::Returning.tags(), tags(Blocker::Queue, Holds::None));
+        assert_eq!(
+            Phase::LandingQueue.tags(),
+            tags(Blocker::Queue, Holds::None)
+        );
         let mut asked = given_back.clone();
         asked.push(event(
             5,

@@ -634,11 +634,9 @@ fn short_at_landing_until_freed(_: &Path) -> Option<u64> {
     Some(if queued { GIB / 2 } else { 8 * GIB })
 }
 
-/// A handoff does not wait for a run whose landing waits for room, nor
-/// hands it back (ADR-t3048-1): the supervisor execs with the run's lease
-/// kept, and the process that continues under the same token takes it
-/// over, puts it back in the landing queue without reviewing it again and
-/// lands it once there is room.
+/// A handoff leaves an unleased run in the landing queue while it waits
+/// for disk. The next supervisor selects it once there is room without
+/// reviewing it again.
 #[test]
 fn a_handoff_hands_over_a_landing_that_waits_for_room() {
     let (_dir, repo, db) = fixture();
@@ -685,10 +683,10 @@ fn a_handoff_hands_over_a_landing_that_waits_for_room() {
     assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
     let outcome = joined(first, "the supervisor asked to hand off").unwrap();
     assert_eq!(outcome["outcome"], "handoff", "{outcome}");
-    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    assert_eq!(outcome["handed_over"], 0, "{outcome}");
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    assert_eq!(queue.runs_leased_by(&token).unwrap().len(), 1);
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
     assert!(queue_events(&db, "integration_started").is_empty());
 
     HANDOFF_FREED.store(true, Ordering::SeqCst);

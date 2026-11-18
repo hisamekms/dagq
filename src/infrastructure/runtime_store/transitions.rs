@@ -1097,6 +1097,8 @@ impl<E: TransactionEntries> StoreQueue<E> {
         {
             return Err(NotHeld("run is still leased".to_owned()).into());
         }
+        let judgment =
+            crate::domain::RunHistory::from_events(&run_events_of(&tx, id)?).landing_judgment();
         run_event(
             &tx,
             id,
@@ -1108,6 +1110,12 @@ impl<E: TransactionEntries> StoreQueue<E> {
             "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind='integration_started'",
             sql_params![id],
             |r| r.get(0),
+        )?;
+        run_event(
+            &tx,
+            id,
+            EventKind::LandingQueueLeft,
+            json!({"judgment": judgment, "reason": "start"}),
         )?;
         let done = then(crate::domain::EventId::new(started))?;
         tx.commit()?;

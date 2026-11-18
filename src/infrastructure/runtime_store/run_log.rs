@@ -1511,12 +1511,9 @@ impl<E: TransactionEntries> StoreQueue<E> {
         )?)
     }
 
-    /// The oldest run awaiting integration by validation time: the FIFO
-    /// order of the merge queue. Runs waiting for a session are skipped;
-    /// they are resumed explicitly by `integrate ID`. So are the runs of a
-    /// task a replanning operation guards (ADR-t1521-2) or a hold is open on
-    /// (ADR-t1879-1), which wait for the outcome or the release without
-    /// holding back the others.
+    /// The oldest validation available for a direct `integrate --next`
+    /// to approve when the common landing queue has no ready entry. Runs
+    /// waiting for a session, a replan, or a task hold are skipped here.
     pub fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         let tx = self.read_entry("next_awaiting_integration")?;
         Ok(SqlRead::query_row(

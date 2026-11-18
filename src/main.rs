@@ -1476,7 +1476,8 @@ enum Command {
         /// Task whose run awaits integration or comes back from a session.
         #[arg(required_unless_present = "next", conflicts_with = "next")]
         id: Option<i64>,
-        /// Land the oldest run awaiting integration instead of naming a task.
+        /// Land the first ready queued run by priority and entry time.
+        /// If none is ready, choose a run awaiting integration by validation order.
         #[arg(long)]
         next: bool,
         /// Checkout of the repository to land in; defaults to the working directory.

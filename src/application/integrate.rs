@@ -18,6 +18,7 @@ use crate::domain::run_phase;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
@@ -35,14 +36,15 @@ use crate::domain::{
 };
 use crate::domain::{
     CommitSha, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult, Reason,
-    ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus, Task,
-    TaskId, TaskRun,
+    ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunEvent, RunHistory, RunId, RunStatus,
+    Task, TaskId, TaskRun,
     disk::{DiskConfig, DiskRun, DiskStage, DiskState, gib},
     execution_class::missing_spike_result,
     heartbeat_stale,
     landing_branch::{
         DEFAULT_REMOTE, LandingBranch, RemoteSource, RepositoryConfig, missing_remote,
     },
+    landing_queue::{Capacity, Entry, LandingQueue, Resources, recorded_entry},
     landing_verification,
     measure::{LoadSummary, LoadWindow},
     required_of,
@@ -713,7 +715,8 @@ fn receipt_ends_landing(receipt: &Receipt) -> Option<String> {
 pub enum IntegrateTarget {
     /// The task's run that awaits integration or comes back from a session.
     Task(TaskId),
-    /// The oldest run awaiting integration by validation time (FIFO).
+    /// The first ready entry by effective priority and entry time. When
+    /// none is ready, approve an awaiting run by validation order.
     Next,
 }
 
@@ -1084,12 +1087,139 @@ pub fn landing_refusal(
     None
 }
 
+/// Runs from which both landing paths reconstruct the common queue.
+pub(super) fn landing_candidates(
+    queue: &(impl RunLog + ?Sized),
+) -> Result<Vec<(TaskRun, Vec<RunEvent>)>> {
+    let mut runs = queue.runs_with_status(RunStatus::AwaitingIntegration)?;
+    runs.extend(queue.runs_with_status(RunStatus::NeedsSession)?);
+    let mut candidates = Vec::new();
+    for run in runs {
+        let events = queue.run_events(run.id())?;
+        if RunHistory::from_events(&events).can_queue_landing(run.status()) {
+            candidates.push((run, events));
+        }
+    }
+    Ok(candidates)
+}
+
+/// Select by the domain order. After approval, record the observed
+/// entries and also consider the explicitly approved target if it still
+/// needs a session, as a named invocation may attempt that landing.
+fn first_direct_landing(
+    queue: &mut dyn Queue,
+    capacity: Capacity,
+    approved_target: Option<&TaskRun>,
+) -> Result<Option<TaskRun>> {
+    let graph = super::dependency_graph(queue.graph_input()?, None);
+    let priorities: HashMap<_, _> = graph
+        .tasks
+        .iter()
+        .map(|task| (task.id, task.effective_priority))
+        .collect();
+    let mut candidates = landing_candidates(queue)?;
+    if let Some(run) = approved_target
+        && !candidates
+            .iter()
+            .any(|(candidate, _)| candidate.id() == run.id())
+    {
+        candidates.push((run.clone(), queue.run_events(run.id())?));
+    }
+    let mut entries = Vec::new();
+    let mut runnable = HashMap::new();
+    for (run, events) in candidates {
+        let priority = match priorities.get(&run.task_id()) {
+            Some(&priority) => priority,
+            None => queue.show(run.task_id())?.task.priority(),
+        };
+        let Some(entry) = Entry::from_events(
+            run.id().clone(),
+            run.task_id(),
+            &events,
+            priority,
+            run.result_commit().map(|commit| commit.as_str()),
+        ) else {
+            continue;
+        };
+        let history = RunHistory::from_events(&events);
+        let resources = Resources {
+            // Approval already refused a live lease on the named run.
+            // The start transaction still requires the exact token for
+            // any lease left there, including a stale one.
+            leased: approved_target.is_none_or(|target| target.id() != run.id())
+                && queue.run_lease(run.id())?.is_some(),
+            preparing: !history.landing_ready(),
+            fenced: queue.turn_fence(run.task_id())?.is_some(),
+            ..Default::default()
+        };
+        let waiting_in_queue = history.can_queue_landing(run.status());
+        let entered = recorded_entry(&events, &entry);
+        runnable.insert(
+            run.id().clone(),
+            (run, resources, waiting_in_queue, entered),
+        );
+        entries.push(entry);
+    }
+    let order = LandingQueue::new(entries);
+    // A person's integrate does not use the supervisor's worker slots or
+    // run e2e, but its observations keep the run's actual e2e requirement.
+    let selected = order
+        .select(capacity, |entry| runnable[&entry.run_id].1)
+        .map(|entry| &entry.run_id);
+    if let Some(target) = approved_target {
+        for entry in &order.entries {
+            let (_, _, waiting_in_queue, entered) = &runnable[&entry.run_id];
+            // A named attempt on a run that still needs a session joins
+            // the queue only if it can start now. Otherwise the approval
+            // remains for its worker resume.
+            if !entered && (*waiting_in_queue || selected == Some(&entry.run_id)) {
+                queue.record_runtime_event(
+                    &entry.run_id,
+                    EventKind::LandingQueueEntered,
+                    json!(entry),
+                )?;
+            }
+        }
+        let entry = order
+            .entries
+            .iter()
+            .find(|entry| &entry.run_id == target.id())
+            .with_context(|| {
+                format!(
+                    "run {} is not ready to land; its approval is recorded",
+                    target.id()
+                )
+            })?;
+        if let Some(wait) =
+            LandingQueue::explain(entry, capacity, runnable[target.id()].1, selected)
+        {
+            if wait == crate::domain::landing_queue::Wait::Integrating
+                && let Some(active) = queue.runs_with_status(RunStatus::Integrating)?.first()
+            {
+                bail!(
+                    "run {} is integrating; one run lands at a time (see doctor if it is stuck)",
+                    active.id()
+                );
+            }
+            bail!(
+                "run {} {}; its approval is recorded",
+                target.id(),
+                wait.describe()
+            );
+        }
+    }
+    Ok(selected
+        .and_then(|id| runnable.remove(id))
+        .map(|(run, _, _, _)| run))
+}
+
 /// The first half of `integrate` ([`Integrator::approve`]). The requester
 /// is refused before anything is recorded when the policy does not grant
 /// it [`Capability::IntegrationRequest`] on the run. `repo`'s Git common
 /// directory (`common_dir`) must be the one the queue is bound to.
-/// `--next` takes only runs awaiting integration, never one that waits
-/// for a session.
+/// `--next` first takes a ready entry from the common landing queue,
+/// including an approved run whose resume has resolved. If none is ready,
+/// it can approve a run awaiting integration by validation order.
 fn begin(
     ctx: &mut Integration<'_>,
     requester: &ActorContext,
@@ -1136,9 +1266,12 @@ fn begin(
                     )
                 })?
         }
-        IntegrateTarget::Next => match queue.next_awaiting_integration()? {
+        IntegrateTarget::Next => match first_direct_landing(queue, Capacity::default(), None)? {
             Some(run) => run,
-            None => return Ok(None),
+            None => match queue.next_awaiting_integration()? {
+                Some(run) => run,
+                None => return Ok(None),
+            },
         },
     };
     StaticPolicy.authorize(
@@ -1174,6 +1307,32 @@ fn begin(
     queue.approve_integration(run.id(), approval, &|lease| {
         !heartbeat_stale(processes.alive(lease.pid), clock.now() - lease.heartbeat_at)
     })?;
+    // Direct approval joins the same order; naming a task cannot jump
+    // over an earlier independently runnable authorization.
+    let capacity = Capacity {
+        integrating: !queue.runs_with_status(RunStatus::Integrating)?.is_empty(),
+        ..Default::default()
+    };
+    first_direct_landing(queue, capacity, Some(&run))?;
+    // Leave the run queued while the update owns the common turn. Read
+    // the order again after waiting, while holding the turn for the start.
+    let _turn = match ctx.heavy_turn.as_ref() {
+        Some(turn) => match turn.try_check(ctx.files)? {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                let guard = turn.check(ctx.files, super::heavy_turn::CHECK_POLL, |what| {
+                    info!(run_id = %run.id(), "the landing waits for {}", what.describe());
+                })?;
+                let capacity = Capacity {
+                    integrating: !queue.runs_with_status(RunStatus::Integrating)?.is_empty(),
+                    ..capacity
+                };
+                first_direct_landing(queue, capacity, Some(&run))?;
+                Some(guard)
+            }
+        },
+        None => None,
+    };
     let previous = run.status();
     let token = ctx.ids.lease_token();
     let main = ctx.repository.main_head()?;
@@ -1195,7 +1354,9 @@ fn begin(
 /// Whether the approval to land run `id` of `payload` is recorded now,
 /// from the run, lease and events read in the approval's own write
 /// ([`RunTransitions::approve_integration`]): `false` for a run approved
-/// already, bound to the same diff ([`approved_as_bound`]). Refused is a
+/// already in the landing queue, bound to the same diff
+/// ([`approved_as_bound`]). A fresh direct request can approve a run again
+/// after a previous landing withdrew it from the queue. Refused is a
 /// run whose status is not the one `payload` names (it changed since the
 /// caller read it), one that awaits neither
 /// integration nor a session, and one a lease `held` says is held (the
@@ -1209,7 +1370,8 @@ pub fn approvable(
     held: &dyn Fn(&crate::domain::RunLease) -> bool,
 ) -> Result<bool> {
     let leased = lease.is_some_and(held);
-    let approved = approved_as_bound(events, payload);
+    let approved = RunHistory::from_events(events).landing_judgment().is_some()
+        && approved_as_bound(events, payload);
     approval_due(
         run.id(),
         run.status(),

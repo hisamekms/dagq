@@ -1247,6 +1247,25 @@ impl Supervisor<'_> {
         run: &TaskRun,
         main: &CommitSha,
     ) -> Result<Option<TaskRun>> {
+        self.park_recheck_as(run, main, Some(self.registration.token().clone()))
+    }
+
+    /// The same last look for a queued run without an owner. The write
+    /// refuses a lease acquired since selection; it never parks another owner.
+    pub(super) fn park_queued_by_recheck(
+        &mut self,
+        run: &TaskRun,
+        main: &CommitSha,
+    ) -> Result<Option<TaskRun>> {
+        self.park_recheck_as(run, main, None)
+    }
+
+    fn park_recheck_as(
+        &mut self,
+        run: &TaskRun,
+        main: &CommitSha,
+        token: Option<crate::domain::LeaseToken>,
+    ) -> Result<Option<TaskRun>> {
         let Some(head) = run.result_commit() else {
             return Ok(None);
         };
@@ -1265,12 +1284,9 @@ impl Supervisor<'_> {
             }
         }
         payload["repeat"] = json!(true);
-        let parked = self.queue.park_rechecked(
-            run.id(),
-            Some(self.registration.token()),
-            &reason,
-            payload,
-        )?;
+        let parked = self
+            .queue
+            .park_rechecked(run.id(), token.as_ref(), &reason, payload)?;
         if parked.is_some() {
             info!(run_id = %run.id(), "run {}: parked for a resume instead of landing onto main {main}: {reason}", run.id());
         }

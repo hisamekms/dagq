@@ -1262,7 +1262,11 @@ fn runtime_wait(
 ) -> Option<(&'static str, AttentionNext)> {
     use crate::domain::stranded_landing::{Stranded, judge};
     let history = RunHistory::from_events(events);
-    if history.queued_to_land().is_some() {
+    if history.landing_ready()
+        && !seen.fenced
+        && !seen.ask_open
+        && seen.task == TaskStatus::InProgress
+    {
         Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
     } else if history.recovered_landing().is_some() {
         Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
@@ -1554,13 +1558,10 @@ mod tests {
         assert_eq!(landing_recheck_main_attention(None), None);
     }
 
-    /// A passed run whose lease was given back is queued to land in the
-    /// attention only while the supervisor would take it up: not while its
-    /// task is held or replanned, nor with an ask of it open, nor once a
-    /// take-up of it failed, when it is a person's (`review and integrate`,
-    /// or the ask) as the take-up judges.
+    /// A ready pass shares the queue's waiting mark. A fence, an open ask
+    /// or an abandoned run still leaves the appropriate attention in control.
     #[test]
-    fn a_given_back_run_is_queued_to_land_only_while_the_supervisor_takes_it_up() {
+    fn a_ready_landing_is_queued_unless_fenced_asked_or_given_up() {
         let events = [
             event(1, EventKind::ReviewFinished, json!({"verdict": "pass"})),
             event(2, EventKind::ExitRequested, json!({})),
@@ -1576,7 +1577,7 @@ mod tests {
         };
         assert_eq!(
             runtime_wait(&events, seen),
-            Some((event_kind::LEASE_RELEASED, AttentionNext::QueuedToLand))
+            Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
         );
         let fenced = Seen {
             fenced: true,

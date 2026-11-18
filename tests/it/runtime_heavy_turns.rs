@@ -283,10 +283,10 @@ fn a_direct_integrate_waits_for_the_update_jobs_e2e() {
         let integrate = scope.spawn(|| {
             landing_one_shot().integrate(&db, IntegrateTarget::Task(TaskId::new(2)), &repo, None)
         });
-        wait_until(&db, Duration::from_secs(60), |queue| {
-            queue.run(waiting.id()).unwrap().status() == RunStatus::Integrating
+        wait_until(&db, Duration::from_secs(60), |_| {
+            run_step(&db, waiting.id(), "landing_queue_entered").is_some()
         });
-        thread::sleep(Duration::from_millis(500));
+        assert_eq!(run_step(&db, waiting.id(), "integration_started"), None);
         assert!(!verified.exists());
         assert!(!integrate.is_finished());
         fs::write(&gate, "go").unwrap();

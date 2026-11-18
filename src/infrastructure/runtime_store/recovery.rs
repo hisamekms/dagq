@@ -185,6 +185,16 @@ impl<E: TransactionEntries> StoreQueue<E> {
     /// [`Self::lease_for_review`] for the e2e of a run queued to land
     /// (ADR-t1233-2), recorded with `reason: e2e`, refused the same way.
     pub fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        let run = self.run(id)?;
+        if run.status() == RunStatus::NeedsSession {
+            return self.lease_unheld(
+                id,
+                token,
+                "e2e",
+                RunStatus::NeedsSession,
+                Some(GuardedStep::Integrate),
+            );
+        }
         self.lease_awaiting(id, token, "e2e")
     }
 
@@ -680,6 +690,16 @@ impl<E: TransactionEntries> StoreQueue<E> {
         let Some(run) = stored_run(&tx, id)?.filter(|run| run.status() == status) else {
             return Ok(None);
         };
+        // An approved resume stays needs_session. Recheck its authorization
+        // under the lease's write transaction, not at the caller's earlier read.
+        if reason == "e2e"
+            && status == RunStatus::NeedsSession
+            && RunHistory::from_events(&run_events_of(&tx, id)?)
+                .queued_after_resume()
+                .is_none()
+        {
+            return Ok(None);
+        }
         if let Some(step) = guarded
             && replanning(&tx, id, step)?
         {

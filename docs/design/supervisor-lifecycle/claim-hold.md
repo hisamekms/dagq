@@ -131,7 +131,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 - 走っている通常の掃除jobに乗ったときは、そのjobと続く残りのjobの両方を空き容量の掃除とし、残りのjobが終わるまで待つ（`CleanupWatch::for_disk`）。
   掃除の連なりは「乗った通常のjob → 残りのjob」の1回までで、次の頼みは回収から一定の間隔が経つまで出さない（`asks_for_cleanup`）。
   頼みが受けられなかったとき（drainのあいだ）は間隔に数えない。
-- 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、leaseを持ったままrebaseも検証もしない。
+- 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、列で待ち、rebaseも検証もしない。
   `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べ、列の着地の開始（`start_approved_landings`）だけが待つ（[Review](review.md#review-supervisor)）。
 - resume: workerのsessionが容量不足で落ちたrunは、claimが控える間は復旧jobもaskも無しに`failed`か`interrupted`のまま待ち、控えが解けたpassで同じrunでresumeする（[Triage](triage.md)）。
 - 落とし穴: 着地の控えはhostのものでなく記録したsupervisorの候補のものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
@@ -194,8 +194,9 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ## workerのslotと着地の列
 
-着地中と、review・e2eを終えて着地の順番だけを待つrunは着地の列に属し、workerのslotに数えない。
-順番待ちを外に数える上限はworkerの並列度までで、超過分はworkerのslotに数えて背圧にする。
+着地は[共通の列](integrate.md#承認とslot)から選ぶ。
+着地中はworkerのslotに数えない。
+着地の順番待ちをworkerのslotの外に数えるのはworkerの並列度までで、leaseを返したrunも超過分を数えてclaimに背圧を掛ける。
 review・e2e・revise・resumeの途中はworkerのslotに残す。
 承認された着地でworkerの空きを待つのはe2eの開始だけで、e2eの要らない後続の着地を止めない。
 軽い枠は無く、claimの可否はchangeによらずworkerのslotの空きで決まり、人の待ちからの戻りを新しいclaimより先にする。

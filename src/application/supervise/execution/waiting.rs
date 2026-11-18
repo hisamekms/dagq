@@ -179,9 +179,9 @@ fn asked_since(asked_at: i64) -> SystemTime {
 }
 
 impl Supervisor<'_> {
-    /// Worker slots in use, excluding human waits and the bounded landing
-    /// lane. All admission and return decisions share this count; reporting
-    /// has its own projection of the recorded phases.
+    /// Worker capacity used by admissions and returns, including the
+    /// excess of the shared landing queue. Status has its own projection
+    /// of recorded phases.
     pub(super) fn used_slots(&self) -> usize {
         self.claim.slots.used(self.claim.parallel)
     }

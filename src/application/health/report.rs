@@ -67,6 +67,7 @@ pub fn status(
     let disk_relax =
         crate::domain::disk::relax_view(latest_relax.as_ref(), now.saturating_mul(1000));
     let graph = queue.graph_input()?;
+    let landing_queue = landing_queue_view(queue, &graph)?;
     let asks = queue
         .asks(AskQuery {
             open: true,
@@ -103,6 +104,7 @@ pub fn status(
         "supervisors": supervisors,
         "runs": runs,
         "waiting": waiting,
+        "landing_queue": landing_queue,
         "attention": attention(
             queue,
             &registrations,
@@ -1215,4 +1217,82 @@ pub fn recurring(
         Ok(items) if items.is_empty() => Ok(None),
         Ok(items) => Ok(Some(json!({"schedule": schedule(&items)?}))),
     }
+}
+
+/// Status's `landing_queue` is in domain priority/time order. `position`
+/// is one-based. Each row includes `priority` and `entered_at` for order,
+/// `basis` and `judgment` for authorization, and the `e2e` and `disk`
+/// requirements from [`crate::domain::landing_queue::Entry`]. `waiting_for`
+/// is the latest supervisor probe (null means eligible at that probe),
+/// or `lease` while an owner is still finishing review/e2e. An active
+/// landing stays visible with `integrating` until its completion; its
+/// provenance is reconstructed immediately before integration started.
+fn landing_queue_view(
+    queue: &(impl RunLog + TaskReads + SupervisorReads + CoordinationReads + ?Sized),
+    graph: &crate::application::GraphInput,
+) -> Result<Vec<Value>> {
+    use crate::domain::landing_queue::{Entry, LandingQueue, recorded_wait};
+    let effective: HashMap<_, _> = crate::application::dependency_graph(graph.clone(), None)
+        .tasks
+        .into_iter()
+        .map(|task| (task.id, task.effective_priority))
+        .collect();
+    let mut entries = Vec::new();
+    let mut waits = HashMap::new();
+    for status in [
+        RunStatus::AwaitingIntegration,
+        RunStatus::NeedsSession,
+        RunStatus::Integrating,
+    ] {
+        for run in queue.runs_with_status(status)? {
+            let all_events = queue.run_events(run.id())?;
+            if status != RunStatus::Integrating
+                && !RunHistory::from_events(&all_events).can_queue_landing(status)
+            {
+                continue;
+            }
+            // Keep the active landing visible alongside the waiting line.
+            let events = if status == RunStatus::Integrating {
+                let at = all_events
+                    .iter()
+                    .rposition(|e| e.kind == EventKind::IntegrationStarted)
+                    .unwrap_or(all_events.len());
+                &all_events[..at]
+            } else {
+                &all_events[..]
+            };
+            let priority = effective.get(&run.task_id()).copied().unwrap_or_default();
+            if let Some(entry) = Entry::from_events(
+                run.id().clone(),
+                run.task_id(),
+                events,
+                priority,
+                run.result_commit().map(|commit| commit.as_str()),
+            ) {
+                let waiting = if status == RunStatus::Integrating {
+                    json!("integrating")
+                } else if queue.run_lease(run.id())?.is_some() {
+                    json!("lease")
+                } else if !RunHistory::from_events(events).landing_ready() {
+                    json!("preparing")
+                } else {
+                    recorded_wait(events, entry.judgment)
+                        .map_or(Value::Null, |e| e.payload["waiting_for"].clone())
+                };
+                waits.insert(run.id().clone(), waiting);
+                entries.push(entry);
+            }
+        }
+    }
+    Ok(LandingQueue::new(entries)
+        .entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let mut view = json!(entry);
+            view["position"] = json!(index + 1);
+            view["waiting_for"] = waits.remove(&entry.run_id).unwrap_or(Value::Null);
+            view
+        })
+        .collect())
 }

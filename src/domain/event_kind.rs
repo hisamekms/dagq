@@ -286,6 +286,18 @@ event_kinds! {
     LandingBranchResolved => "landing_branch_resolved",
     LandingBranchUnresolved => "landing_branch_unresolved",
     LandingHeld => "landing_held",
+    /// A reconstructed landing entered the common order. Payload is
+    /// [`crate::domain::landing_queue::Entry`], whose judgment and timestamp
+    /// identify the authorization independently of this observation's time.
+    LandingQueueEntered => "landing_queue_entered",
+    /// A landing left the waiting order. `judgment` identifies its entry;
+    /// `reason` is `start` (atomic with integration_started) or `invalidated`
+    /// (authorization withdrawn, replaced, or the run ended).
+    LandingQueueLeft => "landing_queue_left",
+    /// A changed resource probe: `judgment` identifies the entry and
+    /// nullable `waiting_for` is [`crate::domain::landing_queue::Wait`].
+    /// Null selects this run; queue_order waits behind the selected entry.
+    LandingQueueWaiting => "landing_queue_waiting",
     LandingQueued => "landing_queued",
     LandingReleaseStuck => "landing_release_stuck",
     LandingReleaseWaiting => "landing_release_waiting",
@@ -1940,6 +1952,9 @@ mod tests {
                 "landing_branch_unresolved",
             ),
             (EventKind::LandingHeld, "landing_held"),
+            (EventKind::LandingQueueEntered, "landing_queue_entered"),
+            (EventKind::LandingQueueLeft, "landing_queue_left"),
+            (EventKind::LandingQueueWaiting, "landing_queue_waiting"),
             (EventKind::LandingQueued, "landing_queued"),
             (EventKind::LandingReleaseStuck, "landing_release_stuck"),
             (EventKind::LandingReleaseWaiting, "landing_release_waiting"),

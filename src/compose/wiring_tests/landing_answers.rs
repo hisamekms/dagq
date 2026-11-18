@@ -1,8 +1,8 @@
 //! The answers of `approve_landing` asks wired from the answer to what the
 //! supervisor does with the run: a pass applies the answer whatever the
 //! slots and closes the ask. A `land` queues the run for the serial
-//! landing, selecting eligible runs in approval order; claims can use
-//! worker room beside that lane. A
+//! landing, selecting eligible runs by effective priority and entry time;
+//! claims can use worker room beside that lane. A
 //! `retry_review` reviews a failed review's run again; a supervisor that
 //! drains applies the answers but starts no new work (ADR-t3330-1). Which
 //! answer applies, and when an approved run lands, is
@@ -1001,4 +1001,405 @@ fn a_resume_waits_once_for_an_occupied_slot_then_resumes() {
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
     assert_eq!(detail.runs.len(), 1);
     assert!(observed >= 3);
+}
+
+/// Answer first, pass later: both paths share one queue, and releasing the
+/// first verifier lets the next supervisor pass start the later run.
+#[test]
+fn an_earlier_land_answer_and_a_later_pass_share_one_visible_landing_order() {
+    let wiring = Wiring::new(
+        "an_earlier_land_answer_and_a_later_pass_share_one_visible_landing_order",
+        Script {
+            receipts: vec![succeeded, succeeded],
+            verdicts: vec![concern(), verdict("pass", "fine")],
+        },
+    )
+    .with_parallel(2)
+    .with_tick(std::time::Duration::from_millis(1))
+    .with_continuous_passes();
+    let first = wiring.ready_task(&["first-queue-check"]);
+    let (release, wait) = mpsc::channel();
+    wiring.verifier.on_command(
+        "first-queue-check",
+        Box::new(move || {
+            wait.recv_timeout(super::harness::LIMIT)
+                .expect("observer releases first landing");
+        }),
+    );
+    let mut release = Some(release);
+    let mut second = None;
+    let mut observed = None;
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        let first_detail = queue.show(first).unwrap();
+        let Some(second_id) = second else {
+            // Keep one supervisor alive across the answer and the later
+            // pass. The later task is created only after answering land.
+            let Some(run) = first_detail.runs.first() else {
+                return false;
+            };
+            let Some(ask) = queue
+                .asks(Default::default())
+                .unwrap()
+                .into_iter()
+                .find(|ask| {
+                    ask.kind == AskKind::ApproveLanding && ask.run_id.as_ref() == Some(run.id())
+                })
+            else {
+                return false;
+            };
+            queue.answer(ask.id, "land").unwrap();
+            second = Some(wiring.ready_task(&["second-queue-check"]));
+            return false;
+        };
+        let second_detail = queue.show(second_id).unwrap();
+        if observed.is_none() {
+            if payloads(&first_detail, "integration_started").is_empty()
+                || payloads(&second_detail, "landing_queue_entered").is_empty()
+                || queue
+                    .run_lease(second_detail.runs[0].id())
+                    .unwrap()
+                    .is_some()
+            {
+                return false;
+            }
+            observed = Some((first_detail, second_detail, wiring.status()));
+            if let Some(release) = release.take() {
+                let _ = release.send(());
+            }
+            return false;
+        }
+        if first_detail.task.status() == TaskStatus::Completed
+            && second_detail.task.status() == TaskStatus::Completed
+        {
+            stop();
+            return true;
+        }
+        false
+    });
+    // Assert only after the held landing and the supervisor were joined.
+    let second = second.expect("the answer enabled the later task");
+    let (first_detail, second_detail, status) =
+        observed.expect("both runs were observed in the queue");
+    assert!(payloads(&second_detail, "integration_started").is_empty());
+    assert_eq!(payloads(&first_detail, "landing_queue_entered").len(), 1);
+    let line = status["landing_queue"].as_array().unwrap();
+    assert_eq!(line.len(), 2, "{status}");
+    assert_eq!(line[0]["task_id"], json!(first));
+    assert_eq!(line[1]["task_id"], json!(second));
+    assert_eq!(line[0]["position"], 1);
+    assert_eq!(line[1]["position"], 2);
+    assert_eq!(line[1]["waiting_for"], "integrating");
+    let mut queue = wiring.queue();
+    assert!(
+        first_event(&mut queue, first, "integration_started")
+            < first_event(&mut queue, second, "integration_started")
+    );
+    for task in [first, second] {
+        let detail = queue.show(task).unwrap();
+        assert_eq!(detail.task.status(), TaskStatus::Completed);
+        assert_eq!(
+            payloads(&detail, "landing_queue_left")[0]["reason"],
+            "start"
+        );
+    }
+    let reported = outcome["runs"].as_array().unwrap();
+    assert_eq!(reported.len(), 2, "{outcome}");
+    for (run, task) in reported.iter().zip([first, second]) {
+        assert_eq!(run["task_id"], json!(task));
+        assert_eq!(run["status"], "integrated");
+    }
+    assert_eq!(wiring.status()["landing_queue"], json!([]));
+}
+
+/// Set up a run at the direct approval boundary without running a worker
+/// or supervisor. Each test supplies its own authorization history.
+fn direct_landing_fixture(
+    wiring: &Wiring,
+    queue: &mut SqliteQueue,
+    priority: crate::domain::Priority,
+    status: RunStatus,
+) -> crate::domain::TaskRun {
+    use crate::application::{Repository, TaskStore};
+    use crate::domain::ClaimOutcome;
+    use std::path::Path;
+
+    let task = wiring.ready_task(&[]);
+    queue.set_priority(task, Some(priority)).unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim(&wiring.git.main()).unwrap() else {
+        panic!("claim the fixture task");
+    };
+    assert_eq!(run.task_id(), task);
+    let connection = super::harness::connect(&wiring.db);
+    connection
+        .execute(
+            "UPDATE task_runs SET status=?2, worktree_path=?3, branch=?4, run_dir=?5, receipt_path=?6 WHERE id=?1",
+            rusqlite::params![
+                run.id().as_str(),
+                status.as_str(),
+                format!("/wiring/direct-{task}/worktree"),
+                format!("direct-{task}"),
+                format!("/wiring/direct-{task}/run"),
+                format!("/wiring/direct-{task}/run/receipt.json"),
+            ],
+        )
+        .unwrap();
+    let run = queue.run(run.id()).unwrap();
+    wiring.git.create_worktree(&run).unwrap();
+    wiring.files.put_dir(Path::new(run.run_dir().unwrap()));
+    let head = wiring
+        .git
+        .commit_in(Path::new(run.worktree_path().unwrap()))
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE task_runs SET result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id().as_str(), head.as_str()],
+        )
+        .unwrap();
+    queue.run(run.id()).unwrap()
+}
+
+fn authorize_resolved_resume(queue: &mut SqliteQueue, run: &crate::domain::TaskRun) {
+    use crate::domain::EventKind;
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::IntegrationApproved,
+            json!({"ask_id": 1}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ResumeFinished,
+            json!({"outcome": "resolved", "status": "needs_session", "approved": true}),
+        )
+        .unwrap();
+}
+
+/// A named approval is durable even when an earlier resolved resume
+/// owns the next turn in the shared order.
+#[test]
+fn a_named_integrate_queues_its_approval_behind_an_earlier_resolved_resume() {
+    use crate::application::integrate::IntegrateTarget;
+    use crate::domain::Priority;
+
+    let wiring = Wiring::new(
+        "a_named_integrate_queues_its_approval_behind_an_earlier_resolved_resume",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    let mut queue = wiring.queue();
+    queue.bind_repository("/wiring/repo/.git").unwrap();
+    let earlier = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::NeedsSession,
+    );
+    authorize_resolved_resume(&mut queue, &earlier);
+    let later = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::AwaitingIntegration,
+    );
+
+    let error = wiring
+        .approve_integration(IntegrateTarget::Task(later.task_id()))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("queued behind an earlier landing"),
+        "{error:#}"
+    );
+
+    let earlier_detail = queue.show(earlier.task_id()).unwrap();
+    let later_detail = queue.show(later.task_id()).unwrap();
+    assert_eq!(payloads(&later_detail, "integration_approved").len(), 1);
+    for (detail, run, basis) in [
+        (&earlier_detail, &earlier, "integration_approved"),
+        (&later_detail, &later, "integration_approved"),
+    ] {
+        let entries = payloads(detail, "landing_queue_entered");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["run_id"], json!(run.id()));
+        assert_eq!(entries[0]["basis"], basis);
+        assert!(payloads(detail, "integration_started").is_empty());
+    }
+}
+
+/// `--next` prefers a later high-priority authorization over an older
+/// normal one, then the earlier of two high-priority authorizations.
+#[test]
+fn integrate_next_uses_priority_then_entry_time_including_resolved_resumes() {
+    use crate::application::integrate::IntegrateTarget;
+    use crate::domain::{EventKind, Priority};
+
+    let wiring = Wiring::new(
+        "integrate_next_uses_priority_then_entry_time_including_resolved_resumes",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    let mut queue = wiring.queue();
+    queue.bind_repository("/wiring/repo/.git").unwrap();
+    let pending = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Urgent,
+        RunStatus::NeedsSession,
+    );
+    queue
+        .record_runtime_event(
+            pending.id(),
+            EventKind::IntegrationApproved,
+            json!({"ask_id": 1}),
+        )
+        .unwrap();
+    let normal = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::AwaitingIntegration,
+    );
+    let later_high = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::High,
+        RunStatus::AwaitingIntegration,
+    );
+    let earlier_high =
+        direct_landing_fixture(&wiring, &mut queue, Priority::High, RunStatus::NeedsSession);
+    queue
+        .record_runtime_event(
+            normal.id(),
+            EventKind::IntegrationApproved,
+            json!({"ask_id": 1}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            earlier_high.id(),
+            EventKind::IntegrationApproved,
+            json!({"ask_id": 1}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            later_high.id(),
+            EventKind::IntegrationApproved,
+            json!({"ask_id": 2}),
+        )
+        .unwrap();
+    // The first approval resolves after the second. Resolution enables
+    // the start without assigning a new arrival time.
+    queue
+        .record_runtime_event(
+            earlier_high.id(),
+            EventKind::ResumeFinished,
+            json!({"outcome": "resolved", "status": "needs_session", "approved": true}),
+        )
+        .unwrap();
+
+    let request = wiring
+        .approve_integration(IntegrateTarget::Next)
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.run.id(), earlier_high.id());
+    assert_eq!(request.previous, RunStatus::NeedsSession);
+    let pending_detail = queue.show(pending.task_id()).unwrap();
+    assert!(payloads(&pending_detail, "landing_queue_entered").is_empty());
+    assert!(payloads(&pending_detail, "integration_started").is_empty());
+    for run in [&normal, &later_high, &earlier_high] {
+        let detail = queue.show(run.task_id()).unwrap();
+        let entries = payloads(&detail, "landing_queue_entered");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["run_id"], json!(run.id()));
+        assert_eq!(
+            payloads(&detail, "integration_started").len(),
+            usize::from(run.id() == earlier_high.id())
+        );
+    }
+}
+
+/// A parked run keeps its approval when another landing holds the slot.
+/// The supervisor must resume it before putting it in the landing queue.
+#[test]
+fn an_approved_run_blocked_by_an_active_landing_still_resumes() {
+    use crate::application::integrate::IntegrateTarget;
+    use crate::domain::{EventKind, Priority};
+
+    let wiring = Wiring::new(
+        "an_approved_run_blocked_by_an_active_landing_still_resumes",
+        Script {
+            receipts: vec![succeeded_at_the_head],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1));
+    let mut queue = wiring.queue();
+    queue.bind_repository("/wiring/repo/.git").unwrap();
+    let active = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::AwaitingIntegration,
+    );
+    wiring
+        .approve_integration(IntegrateTarget::Task(active.task_id()))
+        .unwrap()
+        .unwrap();
+    let parked = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::NeedsSession,
+    );
+    wiring.files.put(
+        &std::path::Path::new(parked.run_dir().unwrap()).join("prompt.txt"),
+        std::time::SystemTime::UNIX_EPOCH,
+        "Resolve the conflict in the original worktree.",
+    );
+    queue
+        .record_runtime_event(
+            parked.id(),
+            EventKind::IntegrationDeferred,
+            json!({"reason": "resolve the conflict and continue"}),
+        )
+        .unwrap();
+
+    let error = wiring
+        .approve_integration(IntegrateTarget::Task(parked.task_id()))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("run {} is integrating", active.id())),
+        "{error:#}"
+    );
+    let detail = queue.show(parked.task_id()).unwrap();
+    assert_eq!(payloads(&detail, "integration_approved").len(), 1);
+    assert!(payloads(&detail, "landing_queue_entered").is_empty());
+    assert_eq!(
+        wiring.status()["landing_queue"].as_array().unwrap().len(),
+        1
+    );
+
+    wiring.supervise_once();
+
+    let detail = queue.show(parked.task_id()).unwrap();
+    assert_eq!(payloads(&detail, "resume_started").len(), 1);
+    let resumed = first_event(&mut queue, parked.task_id(), "resume_finished");
+    assert_eq!(payloads(&detail, "resume_finished")[0]["approved"], true);
+    assert_eq!(
+        payloads(&detail, "resume_finished")[0]["outcome"],
+        "resolved"
+    );
+    assert!(resumed < first_event(&mut queue, parked.task_id(), "landing_queue_entered"));
+    assert!(payloads(&detail, "integration_started").is_empty());
 }

@@ -216,8 +216,8 @@ pub fn operation(call: &ControlCall) -> Result<Operation> {
 /// an observation's and a throughput review's start and end, an agent's
 /// provider found again by its name and its telemetry's token, the image
 /// a landing's container verification built or failed to, the wall an
-/// observation stopped at (`auth_required`, `usage_limited`) and the phase
-/// of the run a landing begins. The approval to land is its own step
+/// observation stopped at (`auth_required`, `usage_limited`), and the
+/// landing order and phase a direct integration observes. The approval to land is its own step
 /// ([`APPROVE_INTEGRATION`]), and so is the hold an observation's wall
 /// opens or joins ([`own_hold`]).
 fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [EventKind]) {
@@ -227,7 +227,7 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
                 EventKind::ContainerImageBuilt,
                 EventKind::ContainerImageFailed,
             ],
-            &[EventKind::RunPhaseChanged],
+            &[EventKind::RunPhaseChanged, EventKind::LandingQueueEntered],
         ),
         ControlCommand::Review => (&[], &[]),
         ControlCommand::Observe => (
@@ -742,7 +742,11 @@ pub fn answer(
     }
     let store = queue.supervisor_store();
     if op == "record_runtime_event" {
-        let run: RunId = read(op, call.args.first().cloned().unwrap_or(Value::Null))?;
+        let (run, kind, payload): (RunId, EventKind, Value) = read(op, args.clone())?;
+        if kind == EventKind::LandingQueueEntered {
+            store.restore_request(None);
+            return reply(observe_landing_entry(store, &control, &run, &payload));
+        }
         landing_run(store, &control, &run)?;
     }
     store.restore_request(None);
@@ -770,6 +774,48 @@ pub fn answer(
         op,
         args,
     )
+}
+
+/// A direct integrate observes the whole queue, including other tasks.
+/// Its entry observation is rebuilt from stored events and never carries
+/// authority to approve, start or otherwise change another run.
+fn observe_landing_entry(
+    store: &mut dyn super::SupervisorStore,
+    call: &ControlCall,
+    id: &RunId,
+    requested: &Value,
+) -> Result<()> {
+    use crate::application::{EventStore, TaskReads, dependency_graph};
+    use crate::domain::RunHistory;
+    use crate::domain::landing_queue::{Entry, recorded_entry};
+
+    let run = RunReads::run(store, id)?;
+    let events = EventStore::run_events(store, id)?;
+    let history = RunHistory::from_events(&events);
+    if !(history.can_queue_landing(run.status())
+        || run.status() == RunStatus::NeedsSession
+            && call.task == Some(run.task_id())
+            && history.approved())
+    {
+        return Ok(());
+    }
+    let graph = dependency_graph(TaskReads::graph_input(store)?, None);
+    let priority = match graph.tasks.iter().find(|task| task.id == run.task_id()) {
+        Some(task) => task.effective_priority,
+        None => TaskReads::show(store, run.task_id())?.task.priority(),
+    };
+    if let Some(entry) = Entry::from_events(
+        id.clone(),
+        run.task_id(),
+        &events,
+        priority,
+        run.result_commit().map(|commit| commit.as_str()),
+    ) && requested["judgment"] == json!(entry.judgment)
+        && !recorded_entry(&events, &entry)
+    {
+        EventStore::record_runtime_event(store, id, EventKind::LandingQueueEntered, json!(entry))?;
+    }
+    Ok(())
 }
 
 /// Whether `run` is of the task `call` names (any task for `integrate
@@ -1080,6 +1126,9 @@ mod tests {
         assert!(scope(C::Observe, BEGIN_LANDING, &[]).is_err());
         assert!(scope(C::Integrate, APPROVE_INTEGRATION, &[]).is_ok());
         assert!(scope(C::Review, APPROVE_INTEGRATION, &[]).is_err());
+        let entered = run_event(EventKind::LandingQueueEntered);
+        assert!(scope(C::Integrate, "record_runtime_event", &entered).is_ok());
+        assert!(scope(C::Review, "record_runtime_event", &entered).is_err());
         // The approval goes only by its own step, which reads its
         // prerequisites in its write.
         assert!(

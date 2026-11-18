@@ -1168,7 +1168,7 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
         DRAIN_READS.load(Ordering::SeqCst) >= reads + 4
     });
     assert!(!supervisor.is_finished());
-    assert!(queue.run_lease(landing.id()).unwrap().is_some());
+    assert!(queue.run_lease(landing.id()).unwrap().is_none());
     assert_eq!(
         queue.run(landing.id()).unwrap().status(),
         RunStatus::AwaitingIntegration
@@ -1186,7 +1186,7 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
             assert_eq!(payloads_of(&queue, run, "build_outputs_removed").len(), 2);
         }
     }
-    // The stop gives the lease back, the landing not started.
+    // The stop leaves the disk-blocked entry waiting in the queue.
     assert!(queue.run_lease(landing.id()).unwrap().is_none());
     assert_eq!(
         queue.run(landing.id()).unwrap().status(),
@@ -1400,7 +1400,7 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
         rest_passes(&db, 4);
         let waits = |queue: &SqliteQueue| {
             assert!(!supervisor.is_finished(), "{drain:?}");
-            assert!(queue.run_lease(landing.id()).unwrap().is_some());
+            assert!(queue.run_lease(landing.id()).unwrap().is_none());
             assert_eq!(
                 queue.run(landing.id()).unwrap().status(),
                 RunStatus::AwaitingIntegration
@@ -1466,11 +1466,10 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
         assert_eq!(repaired[1]["repair"], "disk_cleanup");
         assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
         assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
-        // Handed over leased, its landing not started: the next process
-        // lands it.
+        // The next process can select the same unleased queue entry.
         assert_eq!(outcome["outcome"], "handoff", "{outcome}");
         assert!(
-            queue.run_lease(landing.id()).unwrap().is_some(),
+            queue.run_lease(landing.id()).unwrap().is_none(),
             "{drain:?}"
         );
         assert_eq!(
@@ -2391,7 +2390,10 @@ fn landing_held_by_the_cleanup(repo: &Path, db: &Path) -> LandingHeld {
     let target = Path::new(run.worktree_path().unwrap()).join("target");
     assert_eq!(held, target);
     assert_eq!(payloads_of(&queue, &run, "landing_queued").len(), 1);
-    assert!(queue.run_lease(run.id()).unwrap().is_some());
+    wait_until(db, common::STEP_LIMIT, |queue| {
+        queue.run_lease(run.id()).unwrap().is_none()
+            && !payloads_of(queue, &run, "landing_queue_entered").is_empty()
+    });
     LandingHeld {
         db: db.to_owned(),
         files,
@@ -2417,8 +2419,8 @@ impl LandingHeld {
     }
 }
 
-/// A run the supervisor leases whose review passed waits for the landing
-/// slot while the disk is short of what a landing needs, and loses its
+/// A run whose review passed waits in the landing queue while the disk
+/// is short of what a landing needs, and loses its
 /// build outputs in a cleanup for room: `build_outputs_removed`
 /// (`reason: disk_space`) on the run, its bytes and the run in
 /// `auto_repaired` (`disk_cleanup`); its sources and receipt stay. While
@@ -2470,10 +2472,8 @@ fn a_runs_build_outputs_go_for_room_while_it_waits_for_the_landing_slot() {
     assert_eq!(repaired[0]["detail"]["runs"], json!([run.id().as_str()]));
 }
 
-/// A person holds the task of a run whose build outputs a cleanup for
-/// room removes while it waits for the landing slot: the hold's park
-/// waits, the run keeping its lease, until the job passed the run; then
-/// it is parked.
+/// A task hold fences an unleased landing while cleanup works on its
+/// build outputs. The held run stays in the queue once cleanup ends.
 #[test]
 fn a_hold_parks_a_run_waiting_for_the_landing_slot_only_once_the_cleanup_passed_it() {
     let (_dir, repo, db) = fixture();
@@ -2486,22 +2486,23 @@ fn a_hold_parks_a_run_waiting_for_the_landing_slot_only_once_the_cleanup_passed_
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let parked = |queue: &SqliteQueue| {
-        queue
-            .all_events()
-            .unwrap()
-            .iter()
-            .any(|e| e.kind == EventKind::HoldParked)
-    };
     await_passes(&held.passes, SOME_PASSES);
-    assert!(!parked(&queue));
-    assert!(queue.run_lease(run.id()).unwrap().is_some());
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert!(payloads_of(&queue, &run, "integration_started").is_empty());
     assert!(held.target.join("debug/big").is_file());
 
     let outcome = held.finish(|queue| {
-        parked(queue) && !payloads_of(queue, &run, "build_outputs_removed").is_empty()
+        queue
+            .task_hold(run.task_id())
+            .unwrap()
+            .is_some_and(|hold| hold.settled_at.is_some())
+            && !payloads_of(queue, &run, "build_outputs_removed").is_empty()
     });
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
     assert!(payloads_of(&queue, &run, "integration_started").is_empty());
 }

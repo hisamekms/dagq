@@ -255,8 +255,8 @@ impl<'a> RunHistory<'a> {
     /// land (task 949): the latest `integration_approved` naming the ask
     /// (`ask_id`) when nothing after it started a landing, a review or a
     /// resume, decided the landing, or opened another `approve_landing`
-    /// ask. The supervisor lands the queued runs by this event, the oldest
-    /// first; `None` when the run is not queued so.
+    /// ask. This identifies an answer's approval; the common landing queue
+    /// uses [`Self::landing_judgment`] instead. `None` when not queued so.
     pub fn queued_approval(&self) -> Option<EventId> {
         let approved = self.events.iter().rev().find(|e| {
             e.kind == EventKind::IntegrationApproved
@@ -360,8 +360,7 @@ impl<'a> RunHistory<'a> {
         }
     }
 
-    /// The event that queues the run to land without a person, the oldest
-    /// first: a `land` answer ([`Self::queued_approval`]) or the recovery
+    /// Legacy answer/recovery provenance: a `land` answer ([`Self::queued_approval`]) or the recovery
     /// of a landing it may land again ([`Self::recovered_landing`]).
     pub fn queued_to_land(&self) -> Option<EventId> {
         self.queued_approval()
@@ -371,6 +370,152 @@ impl<'a> RunHistory<'a> {
             })
     }
 
+    /// Current queue authorization. Selection uses the judgment's timestamp,
+    /// not the session-close or resource probe time. Handoffs retain it.
+    pub fn landing_judgment(&self) -> Option<EventId> {
+        if !self.landable() {
+            return None;
+        }
+        let authorizes = |e: &&RunEvent| {
+            e.kind == EventKind::IntegrationApproved
+                || e.kind == EventKind::ReviewFinished
+                    && crate::domain::concern::lets_land(&e.payload)
+                || crate::domain::review_reason::judged_converged(e)
+        };
+        let recovered = match self.recovered_landing() {
+            Some(RecoveredLanding::Land(id)) => Some(id),
+            _ => None,
+        };
+        // A trusted take-up after a landing error (including a new build's
+        // one retry) restores the judgment without assigning a new time.
+        let taken_up = self.landing_take_up();
+        let recovery = recovered.into_iter().chain(taken_up).max();
+        let eligible = |judgment| {
+            // Recovery restores the prior judgment; a later park or abandoned
+            // lease withdraws eligibility until a new authorization follows.
+            let since = recovery.map_or(judgment, |id| id.max(judgment));
+            let eval_stopped = self
+                .events
+                .iter()
+                .rev()
+                .take_while(|event| event.id > since)
+                .find(|event| event.kind == EventKind::RunAgentEvalFinished)
+                .is_some_and(|event| event.payload["outcome"] != "passed");
+            !eval_stopped
+                && !self.events.iter().any(|event| {
+                    event.id > since
+                        && (event.kind.is_in(&PARKING)
+                            || event
+                                .kind
+                                .is_in(&[EventKind::IntegrationHeld, EventKind::IntegrationFailed])
+                            || crate::domain::recheck::parks(event)
+                            || event.kind == EventKind::RuntimeError
+                                && event.payload["lease_released"] == true)
+                })
+        };
+        self.queued_after_resume()
+            .filter(|id| eligible(*id))
+            .and_then(|resolved| {
+                self.since_fence_park()
+                    .iter()
+                    .rev()
+                    .find(|event| {
+                        event.id <= resolved && event.kind == EventKind::IntegrationApproved
+                    })
+                    .map(|event| event.id)
+            })
+            .or_else(|| {
+                self.since_fence_park()
+                    .iter()
+                    .filter(authorizes)
+                    .find(|event| !self.moved_on_after(event.id) && eligible(event.id))
+                    .map(|event| event.id)
+            })
+            .or_else(|| {
+                recovery.and_then(|_| {
+                    self.since_fence_park()
+                        .iter()
+                        .rev()
+                        .filter(authorizes)
+                        .find(|event| eligible(event.id))
+                        .map(|event| event.id)
+                })
+            })
+    }
+
+    fn landing_take_up(&self) -> Option<EventId> {
+        let taken_up = self.events.iter().rev().find(|event| {
+            event.kind == EventKind::LeaseAcquired
+                && event.payload["reason"] == "stranded_landing"
+                && !self.moved_on_after(event.id)
+        })?;
+        // A provisional take-up can restore preparation under its lease.
+        // Once that lease is released, it must have finished preparation
+        // for the restored entry to survive.
+        let prepared_or_released = self.events.iter().find(|event| {
+            event.id > taken_up.id
+                && event
+                    .kind
+                    .is_in(&[EventKind::LandingQueued, EventKind::LeaseReleased])
+        });
+        prepared_or_released
+            .is_none_or(|event| event.kind == EventKind::LandingQueued)
+            .then_some(taken_up.id)
+    }
+
+    /// An older landing answer cannot override a later standing judgment.
+    /// A partially applied answer whose judgment is current can still
+    /// finish closing its own ask.
+    pub fn supersedes_landing_ask(&self, ask_id: AskId) -> bool {
+        let Some(judgment) = self
+            .landing_judgment()
+            .and_then(|id| self.events.iter().find(|e| e.id == id))
+        else {
+            return false;
+        };
+        if judgment.kind == EventKind::IntegrationApproved
+            && restore::<IntegrationApproved>(&judgment.payload).ask_id() == Some(ask_id.as_i64())
+        {
+            return false;
+        }
+        self.events.iter().any(|e| {
+            e.id < judgment.id && e.kind == EventKind::AskOpened && {
+                let ask = restore::<AskOpened>(&e.payload);
+                ask.kind == Some("approve_landing") && ask.ask_id == Some(ask_id.as_i64())
+            }
+        })
+    }
+
+    /// Which statuses can wait in the shared landing queue. Approval alone
+    /// does not finish a run's required resume. A named integrate may try
+    /// such a run directly, but it otherwise still needs a session.
+    pub fn can_queue_landing(&self, status: RunStatus) -> bool {
+        match status {
+            RunStatus::AwaitingIntegration => true,
+            RunStatus::NeedsSession => self.queued_after_resume().is_some(),
+            _ => false,
+        }
+    }
+
+    /// Review authorization becomes runnable after session/eval cleanup.
+    /// Answers and recovered landings already have that boundary behind them.
+    pub fn landing_ready(&self) -> bool {
+        self.landing_judgment().is_some_and(|id| {
+            let taken_up = self.landing_take_up();
+            self.queued_after_resume().is_some()
+                || self.recovered_landing().is_some()
+                || self
+                    .events
+                    .iter()
+                    .any(|event| event.id == id && event.kind == EventKind::IntegrationApproved)
+                || self.events.iter().any(|e| {
+                    e.id >= id
+                        && taken_up.is_none_or(|taken| e.id > taken)
+                        && e.kind == EventKind::LandingQueued
+                })
+        })
+    }
+
     /// The `landing_queued` of an approved run whose resume resolved or
     /// was skipped (`via: resume`), or that resume's end itself (a
     /// `resume_finished` resolved or a `resume_skipped` approved, either
@@ -378,7 +523,7 @@ impl<'a> RunHistory<'a> {
     /// much as the `landing_queued` written after it: the latest of these,
     /// when nothing after it started a landing, a review or a resume,
     /// decided the landing, or opened an `approve_landing` ask. Such a run
-    /// waits for the landing slot `needs_session`, its resume done, even
+    /// waits in the landing queue `needs_session`, its resume done, even
     /// when its `landing_queued` was never written (the queue service did
     /// the resume's end without its answer reaching the supervisor).
     pub fn queued_after_resume(&self) -> Option<EventId> {
@@ -1333,6 +1478,37 @@ mod tests {
             queued(&[retry(1), event(2, "ask_opened", json!({"kind": "blocked"}))]),
             Some(EventId::new(1))
         );
+    }
+
+    #[test]
+    fn a_later_landing_judgment_supersedes_an_older_ask_but_not_its_own() {
+        let ask = AskId::new(9);
+        let opened = event(
+            1,
+            "ask_opened",
+            json!({"kind": "approve_landing", "ask_id": 9}),
+        );
+        let reviewed = [
+            opened.clone(),
+            event(2, "review_started", json!({})),
+            event(3, "review_finished", json!({"verdict": "pass"})),
+        ];
+        assert!(RunHistory::from_events(&reviewed).supersedes_landing_ask(ask));
+        let applying = [
+            opened,
+            event(2, "integration_approved", json!({"ask_id": 9})),
+        ];
+        assert!(!RunHistory::from_events(&applying).supersedes_landing_ask(ask));
+        let fresh = [
+            reviewed[1].clone(),
+            reviewed[2].clone(),
+            event(
+                4,
+                "ask_opened",
+                json!({"kind": "approve_landing", "ask_id": 9}),
+            ),
+        ];
+        assert!(!RunHistory::from_events(&fresh).supersedes_landing_ask(ask));
     }
 
     /// A run queued to land after its resume stays queued until a landing,
