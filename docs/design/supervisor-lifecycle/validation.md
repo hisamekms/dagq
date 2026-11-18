@@ -88,6 +88,8 @@ askやcontainerの知らせで休むrunを死んだrunとして回収しない�
 失敗の分類は`domain::verify_failure`と[Toolchain profiles](../toolchain-profiles.md)を入口にする。
 
 このrepositoryの検証はfmt・clippy・レイヤーの依存の検査・task固有の軽い検査・unit test（一覧に載ったものと、差分が当たらない組を除く全件）と影響範囲で絞ったITを含み、行カバレッジと全部のtestはmainのCIが見る。
+unitの段が通った後、そのログに差分で足した・本文を変えたlibとbinのunit testの時間の関門を当て、閾値を超えて許可の一覧に無ければITへ進まずcodeの失敗としてworkerに返す。
+testを流し増やさず、同じ関門をCIのmacOSのjobとworkerの手元にも置く（[testの制約](../../development/testing.md#判断と境界のtest)）。
 unitの段から外す一覧は[.config/landing-unit-skip.toml](../../../.config/landing-unit-skip.toml)で、載ったtestもCIのmacOS・Linuxのjobが流す（[ADR-t4979-1](../../adr/2026-11-15-t4979-1-landing-unit-stage-leaves-out-listed-heavy-unit-tests-and-ci-runs-them.md)）。
 [.config/landing-unit-path-groups.toml](../../../.config/landing-unit-path-groups.toml)のtestの組は、runの差分（`git diff $DAGQ_LANDING_BASE..HEAD`）が組のpathに1つも当たらないときだけunitの段から外し、当たるときと差分が取れないときは流す。
 組のtestもCIのmacOS・Linuxのjobが毎回流し、外したrunでの壊れは着地の後のmainのCIが拾う（[ADR-t4997-1](../../adr/2026-11-16-t4997-1-landing-unit-stage-leaves-out-path-groups-the-diff-misses-and-ci-runs-them.md)）。

@@ -31,7 +31,8 @@
 #                from), and the hand-over of --prepare's table to a run in
 #                the container, and the stages with a stub cargo (a failing
 #                unit stage ends the script before the IT stage runs).
-#                Needs only sh and python3.
+#                Also checks the lib time gate before IT, including its allow
+#                list, missing base and errors. Needs sh, python3 and git.
 #
 # Which IT (scripts/landing-it.py, choose()): over the files of
 # git diff $DAGQ_LANDING_BASE..HEAD, the union of
@@ -111,7 +112,14 @@
 # no network) nothing is fetched: the table is the one --prepare copied into
 # the materials, and without one every IT runs.
 #
-# Exit status: the unit stage's cargo nextest when it fails, else the IT
+# After a passing unit stage, its existing output is read by
+# scripts/check-lib-test-time.sh --base "$DAGQ_LANDING_BASE". Exit 1 or 2
+# stops before IT; the gate names the test and seconds and the diagnostic
+# points to the allow list and testing.md. No extra tests run. Without a
+# base (a manual run) the gate is skipped and says why. The same script,
+# git and base in the container's tree suffice there too.
+#
+# Exit status: the unit stage's cargo nextest or the lib gate when it fails, else the IT
 # stage's (0 when no IT is chosen); 2 when the run cannot be prepared.
 set -eu
 
@@ -288,12 +296,84 @@ EOF
   [ -n "$ok" ]
 }
 
+# A real diff and real gate, with only cargo stubbed. The isolated tree has
+# the scripts, git history and base just as the verification container does.
+self_test_lib_gate() (
+  t=$(mktemp -d "${TMPDIR:-/tmp}/landing-lib-self-test.XXXXXX")
+  trap 'rm -rf "$t"' EXIT
+  unset DAGQ_LOCAL_CHECKS_DIR DAGQ_CI_KNOWN_FAILURES DAGQ_CI_FIX_RUN
+  mkdir -p "$t/repo/scripts" "$t/repo/src" "$t/repo/.config" "$t/bin" "$t/materials"
+  cp "$root/scripts/landing-it.sh" "$root/scripts/landing-it.py" \
+    "$root/scripts/check-lib-test-time.sh" "$t/repo/scripts/"
+  g() { git -C "$t/repo" -c user.name=self-test -c user.email=self-test@example.invalid \
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
+  g init -q
+  echo '// base' >"$t/repo/src/lib.rs"
+  echo '# empty' >"$t/repo/.config/lib-slow-allow.toml"
+  g add -A; g commit -qm base
+  base=$(g rev-parse HEAD)
+  printf '#[cfg(test)]\nmod tests {\n    #[test]\n    fn slow() {}\n}\n' >"$t/repo/src/lib.rs"
+  g add -A; g commit -qm test
+  cat >"$t/bin/cargo" <<'STUB'
+#!/bin/sh
+echo "$*" >>"$STUB_RUNS"
+case "$*" in
+  *"kind(lib)"*) echo '        PASS [   6.250s] dagq tests::slow' >&2 ;;
+esac
+STUB
+  chmod +x "$t/bin/cargo"
+  for c in denied allowed no_base bad_allow bad_base; do
+    : >"$t/runs"
+    echo '# empty' >"$t/repo/.config/lib-slow-allow.toml"
+    rm -rf "$t/repo/.config/lib-slow-allow.d"
+    want=0 runs=2
+    case "$c" in
+      denied) want=1 runs=1 ;;
+      allowed)
+        mkdir -p "$t/repo/.config/lib-slow-allow.d"
+        printf '[[test]]\nname = "tests::slow"\nreason = "SQLite adapter boundary"\ntask = 4949\n' \
+          >"$t/repo/.config/lib-slow-allow.d/t4949.toml" ;;
+      bad_allow) echo 'bad' >"$t/repo/.config/lib-slow-allow.toml"; want=2 runs=1 ;;
+      bad_base) want=2 runs=1 ;;
+    esac
+    status=0
+    (
+      cd "$t/repo"
+      export DAGQ_LANDING_BASE="$base"
+      [ "$c" != no_base ] || unset DAGQ_LANDING_BASE
+      [ "$c" != bad_base ] || export DAGQ_LANDING_BASE=missing-base
+      PATH="$t/bin:$PATH" STUB_RUNS="$t/runs" DAGQ_VERIFICATION_MATERIALS="$t/materials" \
+        sh scripts/landing-it.sh
+    ) >"$t/out" 2>&1 || status=$?
+    got_runs=$(grep -c '^nextest run ' "$t/runs" || true)
+    if [ "$status" -ne "$want" ] || [ "$got_runs" -ne "$runs" ]; then
+      echo "$me: self-test: lib gate $c: exit $status/$want, stages $got_runs/$runs" >&2
+      cat "$t/out" >&2
+      exit 1
+    fi
+    case "$c" in
+      denied)
+        grep -qF 'check-lib-test-time: dagq tests::slow took 6.250s, over 5s' "$t/out"
+        grep -qF '.config/lib-slow-allow.d/t<task ID>.toml' "$t/out"
+        grep -qF 'docs/development/testing.md section 判断と境界のtest' "$t/out"
+        # Optional hand-over to landing-it-fixtures/contracts.rs, which calls the
+        # runtime classifier on this actual output, never a copied baseline.
+        if [ -n "${LANDING_IT_SELF_TEST_FAILURE_LOG:-}" ]; then
+          cp "$t/out" "$LANDING_IT_SELF_TEST_FAILURE_LOG"
+        fi ;;
+      no_base) grep -qF 'lib test time gate skipped: DAGQ_LANDING_BASE is not set' "$t/out" ;;
+    esac
+    echo "$me: self-test: lib gate $c holds"
+  done
+)
+
 if [ "${1:-}" = "--self-test" ]; then
   python3 "$py" self-test "$root/scripts/landing-it-fixtures" \
     --unit-skip "$root/.config/landing-unit-skip.toml" \
     --path-groups "$root/.config/landing-unit-path-groups.toml" || exit 1
   self_test_handover
   self_test_stages
+  self_test_lib_gate
   exit $?
 fi
 prepare=
@@ -450,20 +530,36 @@ it_filter=$(sed -n 2p "$work/filters")
 # The landing's variables are for this script, not for the tests: the tests
 # of the landing verification itself check who gets them.
 unset DAGQ_LANDING_BASE DAGQ_CI_KNOWN_FAILURES DAGQ_CI_FIX_RUN
-rm -rf "$work"
-trap - EXIT INT TERM
-
 # Two stages, each one cargo nextest run with .config/nextest.toml's
 # fail-fast, retries and flaky-result as they are: the unit tests first, and
 # the IT only when they pass, so a failing unit test ends the landing in
 # seconds instead of after every IT.
 echo "$me: unit stage: cargo nextest run --locked --workspace --no-tests=pass -E '$unit_filter'"
-status=0
-cargo nextest run --locked --workspace --no-tests=pass -E "$unit_filter" || status=$?
+# A status file preserves cargo's exit across POSIX sh's tee pipeline.
+# Keep stderr too: nextest writes its per-test times there.
+(
+  status=0
+  cargo nextest run --locked --workspace --no-tests=pass -E "$unit_filter" || status=$?
+  echo "$status" >"$work/unit-status"
+) 2>&1 | tee "$work/unit.log"
+status=$(cat "$work/unit-status")
 if [ "$status" -ne 0 ]; then
   echo "$me: the unit stage failed (exit $status); the IT stage did not run" >&2
   exit "$status"
 fi
+if [ -n "$base" ]; then
+  status=0
+  sh "$root/scripts/check-lib-test-time.sh" --base "$base" "$work/unit.log" || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "$me: lib test time gate failed (exit $status); the IT stage did not run" >&2
+    echo "$me: allow list: .config/lib-slow-allow.d/t<task ID>.toml (.config/lib-slow-allow.toml); docs/development/testing.md section 判断と境界のtest" >&2
+    exit "$status"
+  fi
+else
+  echo "$me: lib test time gate skipped: DAGQ_LANDING_BASE is not set"
+fi
+rm -rf "$work"
+trap - EXIT INT TERM
 if [ -z "$it_filter" ]; then
   echo "$me: no IT chosen; the IT stage does not run"
   exit 0

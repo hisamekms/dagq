@@ -1,9 +1,9 @@
 #!/bin/sh
 # Before the receipt, tell a worker which records of the local gates
-# (docs/development/local-checks.md, sections "stress" and "itのtestの時間の
-# 関門") the tree it is about to commit still lacks: the stress of a test the
+# (docs/development/local-checks.md, sections "stress", "itのtestの時間の関門" and
+# "libのtestの時間の関門") the tree it is about to commit still lacks: the stress of a test the
 # diff added or changed that no stress record names, a changed test file that
-# names no test and has no record of a gate, and an it-test-time the diff
+# names no test and has no record of a gate, and a test-time gate the diff
 # requires and has no record of. The runtime judges the same from the
 # receipt's commit (ADR-t2589-1 decision 6) and passes it only to the review;
 # this script lets the worker see it first. It is the project's script
@@ -88,7 +88,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 # spaces.
 decl_tests='tests/** src/** crates/**'
 decl_gates='stress|stress|tests/it/** src/** crates/**
-it-test-time|it-test-time|tests/it/**'
+it-test-time|it-test-time|tests/it/**
+lib-test-time|lib-test-time|src/**'
 
 usage() {
   echo "usage: sh scripts/check-local-gates.sh [--base REV] | --self-test" >&2
@@ -420,7 +421,7 @@ check_declaration() {
       for (k in t) if (!(k in c)) printf "%s\t(無い)\t%s\n", k, t[k]
     }' "$tmp/decl-copy" "$tmp/decl-toml" | sort |
   while IFS='	' read -r item copy toml; do
-    echo "$me: dagq.toml の [local_checks] が script の写しと違う: $item（dagq.toml: $toml、script: $copy）。同じ変更で scripts/check-local-gates.sh の写しを直す" >&2
+    echo "$me: dagq.toml の [local_checks] が script の写しと違う: ${item}（dagq.toml: ${toml}、script: ${copy}）。同じ変更で scripts/check-local-gates.sh の写しを直す" >&2
   done
   return 1
 }
@@ -551,7 +552,7 @@ main() {
   done < "$tmp/candidates"
 
   if [ ! -s "$tmp/counted" ]; then
-    echo "$me: $from からの差分に変えた test は無いので、stress と it の時間の関門は要らない"
+    echo "$me: $from からの差分に変えた test は無いので、stress と test の時間の関門は要らない"
     exit 0
   fi
 
@@ -643,7 +644,7 @@ main() {
     echo "$me: 名指した stress・関門を最終 tree で流す（test を名指せない file は、その file を使う変えた test か、その gate の対象の test を選ぶ）か、流せない理由を receipt の evidence に書く（docs/development/local-checks.md）" >&2
     exit 1
   }
-  echo "$me: 最終 tree（$tree）に、差分が要る stress と it の時間の関門の記録がそろっている"
+  echo "$me: 最終 tree（$tree）に、差分が要る stress と test の時間の関門の記録がそろっている"
 }
 
 # self_test builds small git histories from the fixtures and checks each
@@ -752,7 +753,13 @@ self_test() {
   fresh; put lib_production.rs src/lib.rs; commit
   check src_production_only 0 "変えた test は無い"
   fresh; put lib_test.rs src/lib.rs; commit
-  check src_test_changed 1 "src/lib.rs: tests::checks_answer を名指す stress"
+  check src_test_changed 1 "src/lib.rs: tests::checks_answer を名指す stress" "lib-test-time（kind lib-test-time）"
+  t=$(tree)
+  record stress 0 "$t" "cargo nextest run --locked --lib --stress-count 5 -E 'test(=tests::checks_answer)'"
+  check src_missing_lib_time 1 "lib-test-time（kind lib-test-time）" "!を名指す stress"
+  t=$(tree)
+  record lib-test-time 0 "$t" "sh scripts/check-lib-test-time.sh --base main lib.log"
+  check src_with_lib_time 0
 
   # A char literal of one multibyte character does not end the test early.
   fresh; put chars_test.rs src/chars.rs; commit

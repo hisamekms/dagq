@@ -7,6 +7,10 @@ tests = ["tests/**", "src/**", "crates/**"]
 paths = ["tests/it/**", "src/**", "crates/**"]
 kind = "stress"
 
+[local_checks.gates.lib-test-time]
+paths = ["src/**"]
+kind = "lib-test-time"
+
 [local_checks.gates.it-test-time]
 paths = ["tests/it/**"]
 kind = "it-test-time"

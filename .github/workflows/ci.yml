@@ -502,6 +502,21 @@ jobs:
             sh scripts/check-it-test-time.sh --base "$BASE" "$RUNNER_TEMP/nextest.log"
           fi
 
+      - name: lib test time gate
+        if: ${{ !cancelled() }}
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ ! -s "$RUNNER_TEMP/nextest.log" ]; then
+            echo "skipped: no nextest output to read"
+          elif [ -z "$BASE" ] || ! printf '%s' "$BASE" | grep -q '[^0]'; then
+            echo "skipped: no base commit (the first push of a new branch: before is $BASE)"
+          elif ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "skipped: the base commit $BASE is not in the history (a force push)"
+          else
+            sh scripts/check-lib-test-time.sh --base "$BASE" "$RUNNER_TEMP/nextest.log"
+          fi
+
       # The same directories again before rust-cache's post step saves the
       # cache: an if: always() step at the end of the job runs before the post
       # steps, and rust-cache has no input to leave out a directory inside

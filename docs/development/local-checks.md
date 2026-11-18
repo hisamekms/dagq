@@ -50,6 +50,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
   programに無いverifyと、差分が`paths`に当たらず流れなかったverifyは今どおり手元で流す。どれが当たるかは、mainの`dagq.toml`の`[review.programs]`とrunの差分のpathで判じる。差分がそのprogramの設定かscriptを変えたrunでは、programはmainの変える前のscriptを流すので当たらないとし、手元で流す。
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
+- `src/`の`#[cfg(test)]`の`#[test]`を足した・変えたら、そのnextestの全文のログに時間の関門のscript（下の「libのtestの時間の関門」）
 - testを足した・変えたら、receiptの前に下の「testの規則の点検」
 - receiptの前に、receiptにするtreeで`sh scripts/check-local-gates.sh --base <runのbase commit>`（下の「実行の記録とreceiptのevidence」）
 
@@ -74,8 +75,8 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
 ### 実行の記録とreceiptのevidence
 
 workerのturnには、runtimeが手元の検証の記録のdirをenvで渡す。
-`scripts/cargo-brief.sh`は流したコマンドを、`scripts/check-it-test-time.sh`は自分の実行を、そのdirに1回ごとに記録する（コマンド・exit status・その時点の作業treeのtree hash・ログなど。stressと時間の関門には種類の名前を付ける。形はscriptの冒頭）。
-runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料に載せ、`dagq.toml`の`[local_checks]`の宣言と差分から、下の「stress」と「itのtestの時間の関門」が要るか（変えたtestが無ければ要らない）を決めて資料に載せる（[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)、仕組みは[review](../design/supervisor-lifecycle/review.md)）。
+`scripts/cargo-brief.sh`は流したコマンドを、`scripts/check-it-test-time.sh`と`scripts/check-lib-test-time.sh`は自分の実行を、そのdirに1回ごとに記録する（コマンド・exit status・その時点の作業treeのtree hash・ログなど。stressと時間の関門には種類の名前を付ける。形はscriptの冒頭）。
+runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料に載せ、`dagq.toml`の`[local_checks]`の宣言と差分から、下の「stress」と「itのtestの時間の関門」と「libのtestの時間の関門」が要るか（変えたtestが無ければ要らない）を決めて資料に載せる（[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)、仕組みは[review](../design/supervisor-lifecycle/review.md)）。
 
 - 記録と判定で示せること（流したコマンド・exit status・stressの周回と結果・時間の関門の結果・変えたtestが無いので関門を省いたこと）は、receiptの`tests`のevidenceに書かない。
 - evidenceには記録で示せないことだけを書く: testの範囲を選んだ理由と着地の検証・CIに任せた範囲、流したtestの件数（記録の項目に無く、ログの本文はreviewに渡らない）、流せなかった理由、許可の一覧に足した項目の名前と理由。
@@ -154,6 +155,15 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 - exit 1なら、名指されたtestを直すか、testing.mdの条件に当たる理由で許可の一覧に項目を足し、もう一度当てる。どちらもできなければ`failed`のreceiptに理由を書く。
 - 当てたこととexit statusは記録が示すので、receiptの`tests`のevidenceに書かない。許可の一覧に項目を足したら、その名前と理由をevidenceに書く。
 - `tests/it`のtestを変えていないrunはscriptを当てず、evidenceにも書かない（要らないことはruntimeが判定する）。stressをしなかったrun（cargo-nextestが無いなど）もscriptを当てず、その理由をevidenceに書く。
+
+## libのtestの時間の関門
+
+足した・本文を変えた`src/`の`#[cfg(test)]`の`#[test]`の時間を閾値と比べる（規則は[testの制約](testing.md)の「判断と境界のtest」、値と書式は`scripts/check-lib-test-time.sh`の冒頭のコメント）。
+
+- testを流し増やさず、上の「stress」か手元で流したnextestの全文のログ（`sh scripts/cargo-brief.sh`が残したもの）に`sh scripts/check-lib-test-time.sh --base <runのbase commit> <ログ>`を当てる。端末の短い表示には各testの時間が無いので当てない。
+- exit 1なら、名指されたtestを直すか、testing.mdの条件に当たる理由で許可の一覧に項目を足し、もう一度当てる。どちらもできなければ`failed`のreceiptに理由を書く。exit 2はログ・一覧・gitの誤りを直す。
+- 当てたこととexit statusは記録が示すので、receiptの`tests`のevidenceに書かない。許可の一覧に項目を足したら、その名前と理由をevidenceに書く。
+- 対象のtestを変えていないrunはscriptを当てず、evidenceにも書かない。nextestを流せずログが無いときは、その理由をevidenceに書く。
 
 ## testの規則の点検
 

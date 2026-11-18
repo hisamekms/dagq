@@ -288,6 +288,10 @@ tests = ["tests/**", "src/**", "crates/**"]
 paths = ["tests/it/**", "src/**", "crates/**"]
 kind = "stress"
 
+[local_checks.gates.lib-test-time]
+paths = ["src/**"]
+kind = "lib-test-time"
+
 [local_checks.gates.it-test-time]
 paths = ["tests/it/**"]
 kind = "it-test-time"
@@ -492,7 +496,7 @@ revise_limit = 5
 enabled = false
 
 [review.subagents.test-rules]
-paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml", ".config/it-slow-allow.d/**", ".config/it-boundaries.d/**", ".config/it-boundary.d/**"]
+paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml", ".config/it-slow-allow.d/**", ".config/lib-slow-allow.toml", ".config/lib-slow-allow.d/**", ".config/it-boundaries.d/**", ".config/it-boundary.d/**"]
 
 # migration か schema を変える差分にだけ当てる。test の書き方の規則（A-140）は、migration を足す差分で同じ差分の test と一緒に見る。
 [review.subagents.migration-rules]
