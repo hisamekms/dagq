@@ -196,6 +196,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 着地中と、review・e2eを終えて着地の順番だけを待つrunは着地の列に属し、workerのslotに数えない。
 順番待ちを外に数える上限はworkerの並列度までで、超過分はworkerのslotに数えて背圧にする。
 review・e2e・revise・resumeの途中はworkerのslotに残す。
+承認された着地でworkerの空きを待つのはe2eの開始だけで、e2eの要らない後続の着地を止めない。
 軽い枠は無く、claimの可否はchangeによらずworkerのslotの空きで決まり、人の待ちからの戻りを新しいclaimより先にする。
 load・ディスク・claimの間隔の関門はすべてのclaimに効き、着地はloadで止めない。
 `stats`の空きslotと`kpi`のslotの使用率は着地待ちを含めて数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。

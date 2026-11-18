@@ -25,5 +25,5 @@ task = 5064
 
 [[test]]
 name = "compose::wiring_tests::landing_answers::a_land_answer_waits_unleased_and_does_not_hold_worker_claims_behind_a_landing"
-reason = "境界: 実際の supervisor・queue service・SQLite を通し、worker が slot を使う間に land 回答が適用され、その run が lease を持たず計測されることと、着地を verifier の hook で待たせても次の worker が claim されることを確かめる。承認済みの run・worker から着地へ移る run・次に claim する run の3本で、着地の直列性と worker 容量の分離を観測する。容量の判断自体は domain::disk と domain::light_slots の unit test に分離済み。"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、別の run が着地の lane を使う間に land 回答が適用され、その run が lease を持たず計測されることと、着地を verifier の hook で待たせても次の worker が claim されることを確かめる。承認済みの run・worker から着地へ移る run・次に claim する run の3本で、着地の直列性と worker 容量の分離を観測する。容量の判断自体は domain::disk と domain::light_slots の unit test に分離済み。"
 task = 5064

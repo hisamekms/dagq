@@ -85,6 +85,9 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## 承認とslot
 
+承認されたrunのうちe2eの要らない着地はworkerの空きを待たず、e2eの開始だけがworkerの空きを待つ。
+承認順でe2eが空きを待つrunを飛ばして後続の着地を進めるが、着地はqueue全体で1本ずつとし、着地のほかの控えは保つ。
+
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
 - 人とinboxの`integrate`の承認は、その時のrunの差分の組に結んで記録する（`integrate::binding::of_run`）。
   承認が立っていても差分の組が変わっていれば、打ち直しは今の組で承認し直す（`approved_as_bound`）。

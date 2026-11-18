@@ -121,7 +121,8 @@ validationを通ったrun（awaiting_integration）
    衝突の事前判定（ADR-0027決定4）で衝突すれば解消を生きたsessionに依頼して4と同じ待ちに入り、衝突だけの試行に数える（[Needs session](needs-session.md)の「試行の数え方」）。
    落とし穴: askの前に前の`approve_landing`を閉じないと、開いたaskに畳まれて新しい理由が届かず古い答えが適用されうる（`ask_approve_landing`）。
 6. **askの回答**: 答えはslotの空きに依らずその場で適用し、`retry_review`はresumeせず同じreceiptを再reviewする（[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)、`apply_landing_answers`）。
-   `land`は承認の古い順に着地し、着地せずに終わったrunの閉じていない`approve_landing`はruntimeが閉じる。
+   `land`は承認の古い順に候補を選ぶ（[承認とslot](integrate.md#承認とslot)）。
+   着地せずに終わったrunの閉じていない`approve_landing`はruntimeが閉じる。
 7. **引き継ぎ**: 他のsupervisorがadoptして最後の段のeventから続きを決め、途中のerrorはrunをabandonして`review and integrate`のattentionにする。
 8. **reviseの間のask**: `worker_question`の答えを次のturnに届け、待つrunはslotから外れる（[人の答えを待つrun](waiting.md)の「差し戻しと解消依頼の段」）。
 

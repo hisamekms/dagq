@@ -13,6 +13,8 @@ amends:
   - adr-t1591-1 decision 4
   - adr-t1591-1 decision 7
   - adr-0071 decision 5
+amended_by:
+  - adr-t5265-1
 owners:
   - hisamekms
 tags:

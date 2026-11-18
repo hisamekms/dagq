@@ -895,9 +895,14 @@ mod tests {
         assert_eq!(claim.slots.used(3), 1);
         assert_eq!(claim.room(3), ClaimRoom::Any);
         assert!(
-            !super::super::landing::approved_landing_waits(false, claim.slots.used(3), 3, || Ok(
-                false
-            ))
+            !super::super::landing::approved_landing_waits(
+                false,
+                claim.slots.used(3),
+                3,
+                true,
+                || Ok(false),
+                || Ok(false)
+            )
             .unwrap()
         );
         // A landing failure's needs_session is no longer a landing phase.
@@ -923,6 +928,19 @@ mod tests {
                     false,
                     claim.slots.used(3),
                     3,
+                    true,
+                    || Ok(false),
+                    || Ok(false)
+                )
+                .unwrap()
+            );
+            assert!(
+                !super::super::landing::approved_landing_waits(
+                    false,
+                    claim.slots.used(3),
+                    3,
+                    false,
+                    || Ok(false),
                     || Ok(false)
                 )
                 .unwrap()

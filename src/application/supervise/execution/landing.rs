@@ -3092,11 +3092,11 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
-    /// Start the landing of the oldest run queued by a `land` answer
+    /// Start the landing or e2e of the oldest eligible run queued by a `land` answer
     /// ([`RunHistory::queued_approval`]) or by the recovery of a landing
     /// it may land again (task 1118, [`RunHistory::recovered_landing`]):
     /// awaiting integration, nobody
-    /// leasing it, once worker capacity is free, no run integrates, and the landing
+    /// leasing it, no run integrates, and the landing
     /// would not fail on a missing program (ADR-0049 decision 9), an
     /// unresolved landing branch (ADR-t615-1) or short free disk space
     /// (task 377). Called before new claims, so an eligible run starts
@@ -3106,9 +3106,11 @@ impl Supervisor<'_> {
     /// supervisor is landed once, with its ask left closed (task 949).
     /// A landing that fails to start is only noted by the caller, which goes on,
     /// and the run stays queued for a later pass.
-    /// Worker capacity is checked before leasing: this run may still need
-    /// e2e, which enters the worker stage before the serial landing lane.
-    /// Existing landing-lane runs do not consume that capacity.
+    /// Only runs still due e2e wait for worker capacity before leasing.
+    /// When capacity is full, skip those in approval order to find a run
+    /// that can land without e2e. With capacity free, the oldest run gets
+    /// its e2e lease first. Landing-lane runs do not consume that capacity.
+    /// Both the e2e lease and direct landing wait for the landing turn.
     /// `approved_only` leaves recovered landings out: only the runs a `land` answer queued
     /// ([`RunHistory::queued_approval`]).
     pub(super) fn start_approved_landings(
@@ -3120,12 +3122,19 @@ impl Supervisor<'_> {
             || self.verification_container_held()
             || self.observation.ci().held()
             || self.landing.unresolved;
-        if approved_landing_waits(held, self.used_slots(), parallel, || {
-            Ok(!self
-                .queue
-                .runs_with_status(RunStatus::Integrating)?
-                .is_empty())
-        })? {
+        if approved_landing_waits(
+            held,
+            self.used_slots(),
+            parallel,
+            false,
+            || {
+                Ok(!self
+                    .queue
+                    .runs_with_status(RunStatus::Integrating)?
+                    .is_empty())
+            },
+            || Ok(false),
+        )? {
             return Ok(());
         }
         let mut queued = Vec::new();
@@ -3153,17 +3162,23 @@ impl Supervisor<'_> {
                 queued.push((approval, run));
             }
         }
-        let Some(run) = first_to_land(queued) else {
+        let Some((run, e2e)) = first_to_land(queued, self.used_slots(), parallel, |run| {
+            Ok(self.e2e_due(run)?.is_some())
+        })?
+        else {
             return Ok(());
         };
-        if self.host.landing_short_for(run.id()) {
-            return Ok(());
-        }
-        let e2e = self.e2e_due(&run)?.is_some();
         // Its verification takes turns with the automatic update's build
         // and e2e (ADR-t2719-1); its e2e has a lock of its own. Only looked
         // at here: the landing takes the turn itself before its commands.
-        if !e2e && self.landing_waits_its_turn(&run)? {
+        if approved_landing_waits(
+            self.host.landing_short_for(run.id()),
+            self.used_slots(),
+            parallel,
+            e2e,
+            || Ok(false),
+            || self.landing_waits_its_turn(&run),
+        )? {
             return Ok(());
         }
         let main = if e2e {
@@ -3618,17 +3633,21 @@ pub(super) fn landing_answer_to_apply(
 }
 
 /// Whether a run queued to land waits on this pass: a hold of the landing
-/// (`held`: a missing `[run.env]` program, the CI hold, an unresolved
-/// landing branch or short disk space), no free worker slot (`used` of
-/// `parallel`), or another run integrating (`integrating`, read only when
-/// nothing before it waits).
+/// (`held`: a missing `[run.env]` program, verification container, CI hold,
+/// unresolved landing branch or disk shortage), no free worker slot
+/// (`used` of `parallel`) when `e2e` is due, another run integrating, or an
+/// occupied landing turn. `integrating` and `landing_turn` are read only
+/// when no earlier gate waits. The turn blocks both e2e leasing and direct
+/// landing; only e2e waits for a worker slot.
 pub(super) fn approved_landing_waits(
     held: bool,
     used: usize,
     parallel: usize,
+    e2e: bool,
     integrating: impl FnOnce() -> Result<bool>,
+    landing_turn: impl FnOnce() -> Result<bool>,
 ) -> Result<bool> {
-    Ok(held || used >= parallel || integrating()?)
+    Ok(held || (e2e && used >= parallel) || integrating()? || landing_turn()?)
 }
 
 /// Whether a drain that stops starts the landing of a run a `land` answer
@@ -3646,11 +3665,25 @@ pub(super) fn drain_starts_approved_landing(
     !owner_gone && !own_landing_waits && held.iter().any(|run| !started.contains(run))
 }
 
-/// The run of the oldest of `queued`, each with the event that queued it
-/// to land: approved runs land in the order they were approved.
-pub(super) fn first_to_land<R>(mut queued: Vec<(EventId, R)>) -> Option<R> {
+/// The oldest queued run eligible for a worker e2e lease or direct landing,
+/// together with whether e2e is due. Read e2e in approval order and skip
+/// only runs whose e2e needs a worker slot that is not free. Common landing
+/// holds are checked by the caller before selecting, and disk, turn and
+/// cleanup holds still apply to the selected run before it starts.
+pub(super) fn first_to_land<R>(
+    mut queued: Vec<(EventId, R)>,
+    used: usize,
+    parallel: usize,
+    mut e2e_due: impl FnMut(&R) -> Result<bool>,
+) -> Result<Option<(R, bool)>> {
     queued.sort_by_key(|(approval, _)| *approval);
-    queued.into_iter().next().map(|(_, run)| run)
+    for (_, run) in queued {
+        let e2e = e2e_due(&run)?;
+        if !approved_landing_waits(false, used, parallel, e2e, || Ok(false), || Ok(false))? {
+            return Ok(Some((run, e2e)));
+        }
+    }
+    Ok(None)
 }
 
 /// The `approve_landing` ask `verdict` leads to once the session exited,
@@ -4519,21 +4552,53 @@ mod tests {
         );
     }
 
-    /// A run a `land` answer queued waits while the only slot runs
-    /// another task, while another run integrates, or under a hold of the
-    /// landing; it starts once a slot is free and nothing integrates.
+    /// Worker capacity limits e2e only; landing holds and the serial lane
+    /// block both kinds of candidate even with worker capacity free.
     #[test]
-    fn an_approved_run_waits_for_a_slot_and_the_integration_slot() {
-        let waits = |held: bool, used: usize, integrating: bool| {
-            approved_landing_waits(held, used, 1, || Ok(integrating)).unwrap()
-        };
-        assert!(!waits(false, 0, false));
-        assert!(waits(false, 1, false));
-        assert!(waits(false, 0, true));
-        assert!(waits(true, 0, false));
+    fn an_approved_run_waits_for_capacity_only_when_e2e_is_due() {
+        for e2e in [false, true] {
+            let waits = |held, used, integrating| {
+                approved_landing_waits(held, used, 3, e2e, || Ok(integrating), || Ok(false))
+                    .unwrap()
+            };
+            assert!(!waits(false, 2, false));
+            assert_eq!(waits(false, 3, false), e2e);
+            assert!(waits(false, 2, true));
+            assert!(waits(false, 3, true));
+            assert!(waits(true, 2, false));
+            assert!(waits(true, 3, false));
+        }
         let unread = || -> Result<bool> { panic!("the integrating runs are read") };
-        assert!(approved_landing_waits(true, 0, 1, unread).unwrap());
-        assert!(approved_landing_waits(false, 4, 4, unread).unwrap());
+        assert!(approved_landing_waits(true, 0, 3, false, unread, unread).unwrap());
+        assert!(approved_landing_waits(false, 3, 3, true, unread, unread).unwrap());
+    }
+
+    /// The real candidate gate consults the landing turn even before an
+    /// e2e lease; a held turn blocks both candidates without a generic hold.
+    #[test]
+    fn a_landing_turn_blocks_approved_runs_with_or_without_e2e() {
+        for (e2e, used) in [(false, 2), (false, 3), (true, 2)] {
+            for turn_held in [false, true] {
+                let mut checked = false;
+                let waits = approved_landing_waits(
+                    false,
+                    used,
+                    3,
+                    e2e,
+                    || Ok(false),
+                    || {
+                        checked = true;
+                        Ok(turn_held)
+                    },
+                )
+                .unwrap();
+                assert!(
+                    checked,
+                    "the landing turn was checked: e2e={e2e}, used={used}"
+                );
+                assert_eq!(waits, turn_held, "e2e={e2e}, used={used}");
+            }
+        }
     }
 
     /// A drain that stops starts an approved landing only while a run it
@@ -4575,8 +4640,43 @@ mod tests {
             (EventId::new(3), "approved first"),
             (EventId::new(5), "approved second"),
         ];
-        assert_eq!(first_to_land(queued), Some("approved first"));
-        assert_eq!(first_to_land::<&str>(Vec::new()), None);
+        assert_eq!(
+            first_to_land(queued, 3, 3, |_| Ok(false)).unwrap(),
+            Some(("approved first", false))
+        );
+        assert_eq!(
+            first_to_land::<&str>(Vec::new(), 0, 3, |_| unreachable!()).unwrap(),
+            None
+        );
+    }
+
+    /// A blocked e2e does not hold up later direct landings; free worker
+    /// capacity goes to the oldest approval before any later candidate.
+    #[test]
+    fn e2e_waits_without_blocking_later_approved_landings() {
+        let queued = vec![
+            (EventId::new(9), "last"),
+            (EventId::new(3), "e2e"),
+            (EventId::new(5), "next"),
+        ];
+        assert_eq!(
+            first_to_land(queued.clone(), 3, 3, |run| Ok(*run == "e2e")).unwrap(),
+            Some(("next", false))
+        );
+        let mut read = Vec::new();
+        assert_eq!(
+            first_to_land(queued, 2, 3, |run| {
+                read.push(*run);
+                Ok(*run == "e2e")
+            })
+            .unwrap(),
+            Some(("e2e", true))
+        );
+        assert_eq!(read, ["e2e"]);
+        assert_eq!(
+            first_to_land(vec![(EventId::new(3), true)], 3, 3, |e2e| Ok(*e2e)).unwrap(),
+            None
+        );
     }
 
     /// The tail every failed review's ask ends with.
