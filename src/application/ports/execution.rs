@@ -3138,3 +3138,39 @@ pub trait ImageStore {
     /// Each architecture's main digest now.
     fn current_images(&self) -> Result<Vec<crate::domain::image_publish::ImageDigest>>;
 }
+
+/// Control-side GitHub ref effects. Create and delete must be idempotent:
+/// create leaves an existing ref untouched, delete accepts absence. `read`
+/// reads GitHub again, without a cache; only the successor tip is ever read.
+pub trait RunnerRefs {
+    fn create(&self, run: &str, generation: i64, head: &str) -> Result<()>;
+    fn read(&self, run: &str, generation: i64) -> Result<Option<String>>;
+    fn delete(&self, run: &str, generation: i64) -> Result<()>;
+    fn exists(&self, run: &str, generation: i64) -> Result<bool>;
+}
+
+/// Snapshot and recovery seam of the team control loop. A lost lease stays
+/// recorded at its generation; recovery is the existing orphan-run transition,
+/// independent of host pids. The local run_leases path never uses this port.
+pub trait RunnerTakeoverStore: RunnerLeaseStore {
+    fn runner_takeovers(&self) -> Result<Vec<crate::domain::runner_takeover::Takeover>>;
+    fn runner_registration(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::domain::runner_registration::Runner>>;
+    fn runner_owner(
+        &self,
+        runner: &crate::domain::runner_registration::Runner,
+    ) -> Result<Option<crate::domain::queue_service::Member>>;
+    /// Rejudge loss in the write transaction, including renewal and revocation
+    /// races. A snapshot alone cannot take a renewed lease away.
+    fn lose_runner_if_due(
+        &self,
+        run: &str,
+        generation: i64,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::runner_lease::LossReason>>;
+    /// Recheck the lost generation before recovering. A stale attempt never
+    /// interrupts a newly granted generation; the loop skips recovered runs.
+    fn recover_runner(&mut self, lease: &crate::domain::runner_lease::RunnerLease) -> Result<()>;
+}

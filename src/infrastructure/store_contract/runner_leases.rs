@@ -6,7 +6,7 @@ use super::ContractStore;
 use crate::domain::runner_lease::{
     AcceptedHead, Grant, LEASE, LeaseState, Report, Verdict, VerifiedRef,
 };
-use crate::infrastructure::runner_leases::extend_held;
+use crate::infrastructure::runner_leases::{extend_held, recorded_runner};
 use anyhow::{Context, Result, ensure};
 
 const RUN: &str = "contract-lease-run";
@@ -98,6 +98,15 @@ pub fn runner_leases<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result
     ));
     ensure!(open()?.runner_lease(RUN)?.context("lost")?.state == LeaseState::Lost);
     ensure!(store.accepted_head(RUN)? == head(2, "h2"));
+    // Reopening the store preserves exact generation ownership, independently
+    // of accepted heads, ref marks, release and loss.
+    let reopened = open()?;
+    let tx = reopened.read_entry("contract_runner_owners")?;
+    for (generation, runner) in [(1, "runner-a"), (2, "runner-b"), (3, "runner-a")] {
+        ensure!(recorded_runner(&tx, RUN, generation)?.as_deref() == Some(runner));
+    }
+    ensure!(recorded_runner(&tx, RUN, 0)?.is_none());
+    drop(tx);
     // Verified refs: a generation's record without the mark is not one.
     ensure!(store.verified_ref(RUN)?.is_none());
     store.verify_runner_ref(RUN, 1, "h1", after + 7)?;

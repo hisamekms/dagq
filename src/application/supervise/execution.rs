@@ -64,6 +64,7 @@ mod queue_hold;
 pub(super) mod recheck;
 mod reconcile;
 mod recovery;
+pub use recovery::runner_recovery_pass;
 mod reopen;
 mod replan_diagnosis;
 mod replan_park;

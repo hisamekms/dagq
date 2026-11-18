@@ -1357,6 +1357,7 @@ pub mod runner_assignment;
 pub mod runner_lease;
 pub mod runner_process;
 pub mod runner_registration;
+pub mod runner_takeover;
 pub mod satisfied;
 pub mod satisfied_judgment;
 pub mod sccache;

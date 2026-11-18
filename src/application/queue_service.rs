@@ -5398,6 +5398,14 @@ pub(crate) mod tests {
                     self.log.lock().unwrap().push(json!({"runner_poll": true}));
                     Ok(Outcome::Assignment(None))
                 }
+                Operation::Heartbeat(r) | Operation::Release(r)
+                    if r.run_id == "foreign" || r.run_id == "missing" =>
+                {
+                    Ok(Outcome::Denied)
+                }
+                Operation::Report(r) if r.run_id == "foreign" || r.run_id == "missing" => {
+                    Ok(Outcome::Denied)
+                }
                 _ => Ok(Outcome::LeaseLost),
             }
         }
@@ -10719,6 +10727,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn foreign_runner_work_reports_are_denied_and_audited_even_if_audit_fails() {
+        for fail_denials in [false, true] {
+            let backend = backend(RunStatus::Running);
+            backend.human.lock().unwrap().fail_denials = fail_denials;
+            for id in ["foreign", "missing"] {
+                for (use_case, capability) in [
+                    (UseCase::RunnerHeartbeat, "runner.heartbeat"),
+                    (UseCase::RunnerRelease, "runner.heartbeat"),
+                    (UseCase::RunnerReport, "runner.report"),
+                ] {
+                    let mut params = json!({"run_id":id,"generation":0});
+                    if use_case == UseCase::RunnerReport {
+                        params["head"] = json!("b".repeat(40));
+                        params["state"] = json!({"head":"b".repeat(40),"branch":"dagq/run/1"});
+                    }
+                    let response =
+                        runner_work_http(&backend, &request(Some("runner"), use_case, params));
+                    assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
+                    let log: Vec<Value> = backend.log.lock().unwrap().drain(..).collect();
+                    if fail_denials {
+                        assert!(log.is_empty());
+                    } else {
+                        assert_eq!(log.len(), 1);
+                        assert_eq!(log[0]["event"], "authorization_denied");
+                        assert_eq!(log[0]["role"], "runner");
+                        assert_eq!(log[0]["capability"], capability);
+                        assert_eq!(log[0]["use_case"], json!(use_case));
+                        assert_eq!(log[0]["reason"], "not on this resource");
+                        assert_eq!(log[0]["resource"]["id"], id);
+                        assert!(log[0]["resource"]["runner_id"].is_null());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn runner_pull_reads_the_main_head_port_and_reports_transport_lease_lost() {
         let backend = backend(RunStatus::Running);
         let pull = request(Some("runner"), UseCase::RunnerPoll, json!({}));
@@ -10891,10 +10936,33 @@ pub fn runner_work_http(backend: &dyn ServiceBackend, request: &ServiceRequest) 
             }
             Outcome::Released => ServiceResponse::success(json!({"released": true})),
             Outcome::Denied => {
-                let payload = json!({"use_case": request.use_case, "capability": capability, "reason": "not_assigned", "resource": {"kind": "runner_assignment"}});
-                if let Err(error) = log.record_denial(payload) {
-                    warn!("could not record runner assignment refusal: {error:#}");
+                let actor = principal.actor();
+                let id = match &operation {
+                    Operation::Heartbeat(r) | Operation::Release(r) => Some(&r.run_id),
+                    Operation::Report(r) => Some(&r.run_id),
+                    Operation::Poll(_) => None,
+                };
+                // A refusal exposes no stored owner or generation. Record it
+                // as the authenticated caller even when recording fails.
+                let resource =
+                    id.and_then(|id| RunId::new(id.clone()).ok())
+                        .map_or(Resource::Queue, |id| Resource::RunnerRun {
+                            id,
+                            runner_id: None,
+                        });
+                let _ = Gate {
+                    actor: &actor,
+                    authorizer: &StaticPolicy,
                 }
+                .authorize(
+                    &OwnDenials {
+                        backend,
+                        actor: &actor,
+                        use_case: request.use_case,
+                    },
+                    capability,
+                    &resource,
+                );
                 ServiceResponse::failure(
                     ServiceErrorCode::AuthorizationDenied,
                     "run is not assigned to this runner",

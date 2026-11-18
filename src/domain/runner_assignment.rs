@@ -93,15 +93,15 @@ pub fn remaining_seconds(expires_at_ms: i64, now_ms: i64) -> i64 {
     expires_at_ms.saturating_sub(now_ms).max(0) / 1000
 }
 
-/// Ownership is checked before generation: another runner gets
-/// authorization_denied, while a former generation of the same runner gets
-/// lease_lost. No supplied id can establish ownership.
-pub fn owns(runner_id: &str, lease: Option<&super::runner_lease::RunnerLease>) -> bool {
+/// Ownership is authorized before fencing is judged. A prior generation's
+/// resource names only its recorded holder, never the current holder as a
+/// substitute. Unknown history therefore grants no information about the run.
+pub fn owns(runner_id: &str, run_id: Option<&str>, owner: Option<&str>) -> bool {
     use super::authorization::{Authorizer, Capability, Resource, StaticPolicy};
-    let Some(lease) = lease else {
+    let Some(run_id) = run_id else {
         return false;
     };
-    let Ok(id) = super::RunId::new(lease.run_id.clone()) else {
+    let Ok(id) = super::RunId::new(run_id) else {
         return false;
     };
     StaticPolicy
@@ -110,7 +110,7 @@ pub fn owns(runner_id: &str, lease: Option<&super::runner_lease::RunnerLease>) -
             Capability::RunnerReport,
             &Resource::RunnerRun {
                 id,
-                runner_id: Some(lease.runner_id.clone()),
+                runner_id: owner.map(str::to_owned),
             },
         )
         .is_ok()
@@ -227,6 +227,9 @@ pub enum Outcome {
 /// The remote run uses logical paths within its runner clone; the control side
 /// never opens them. They are chosen by the control side, not by report data.
 pub fn start(run: super::TaskRun, generation: i64) -> Result<super::TaskRun, super::DomainError> {
+    if run.status() == super::RunStatus::NeedsSession {
+        return super::run::resume_on_runner(run, generation);
+    }
     if run.status() != super::RunStatus::Claimed {
         return super::run::assign_runner_branch(run, generation);
     }
@@ -277,10 +280,20 @@ pub enum ReportRefusal {
 pub fn check_report(
     runner: &str,
     lease: Option<&super::runner_lease::RunnerLease>,
+    previous_owner: Option<&str>,
     generation: i64,
     now_ms: i64,
 ) -> Result<i64, ReportRefusal> {
-    if !owns(runner, lease) {
+    // The store supplies previous_owner for exactly the requested generation.
+    // Select the stored ownership resource, then ask policy before fencing.
+    let owner = lease.and_then(|l| {
+        if generation < l.generation {
+            previous_owner
+        } else {
+            Some(l.runner_id.as_str())
+        }
+    });
+    if !owns(runner, lease.map(|l| l.run_id.as_str()), owner) {
         return Err(ReportRefusal::AuthorizationDenied);
     }
     match super::runner_lease::judge(
@@ -337,25 +350,58 @@ mod report_tests {
         .unwrap()
     }
     #[test]
+    fn only_the_recorded_holder_of_a_passed_generation_gets_lease_lost() {
+        let lease = current(); // generation 3 belongs to a now; b held 2.
+        for runner in ["a", "c"] {
+            assert_eq!(
+                check_report(runner, Some(&lease), Some("b"), 2, 20_000),
+                Err(ReportRefusal::AuthorizationDenied)
+            );
+        }
+        assert_eq!(
+            check_report("b", Some(&lease), Some("b"), 2, 20_000),
+            Err(ReportRefusal::LeaseLost)
+        );
+        for runner in ["a", "b", "c"] {
+            assert_eq!(
+                check_report(runner, Some(&lease), None, 1, 20_000),
+                Err(ReportRefusal::AuthorizationDenied)
+            );
+            assert_eq!(
+                check_report(runner, None, None, 1, 20_000),
+                Err(ReportRefusal::AuthorizationDenied)
+            );
+        }
+        assert_eq!(
+            check_report("b", Some(&lease), Some("b"), 3, 20_000),
+            Err(ReportRefusal::AuthorizationDenied)
+        );
+        assert!(check_report("a", Some(&lease), None, 3, 20_000).is_ok());
+    }
+
+    #[test]
     fn current_heartbeat_renews_and_stale_reports_or_foreign_runs_are_refused() {
         let lease = current();
-        assert_eq!(check_report("a", Some(&lease), 3, 20_000), Ok(110_000));
+        assert_eq!(
+            check_report("a", Some(&lease), Some("a"), 3, 20_000),
+            Ok(110_000)
+        );
         for generation in [2, 4] {
             assert_eq!(
-                check_report("a", Some(&lease), generation, 20_000),
+                check_report("a", Some(&lease), Some("a"), generation, 20_000),
                 Err(ReportRefusal::LeaseLost)
             );
         }
         assert_eq!(
-            check_report("b", Some(&lease), 3, 20_000),
+            check_report("b", Some(&lease), Some("a"), 3, 20_000),
             Err(ReportRefusal::AuthorizationDenied)
         );
         assert_eq!(
-            check_report("a", None, 3, 20_000),
+            check_report("a", None, None, 3, 20_000),
             Err(ReportRefusal::AuthorizationDenied)
         );
         assert_eq!(
-            check_report("a", Some(&lease), 3, 90_000),
+            check_report("a", Some(&lease), Some("a"), 3, 90_000),
             Err(ReportRefusal::LeaseLost)
         );
         let returned = RunnerLease {
@@ -363,7 +409,7 @@ mod report_tests {
             ..lease
         };
         assert_eq!(
-            check_report("a", Some(&returned), 3, 20_000),
+            check_report("a", Some(&returned), Some("a"), 3, 20_000),
             Err(ReportRefusal::LeaseLost)
         );
         assert!(matches!(

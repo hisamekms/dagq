@@ -639,6 +639,8 @@ pub(super) const PORTS: &[Port] = &[
     port("RecordingQueue", Internal),
     port("RunnerStore", Internal),
     port("RunnerLeaseStore", Internal),
+    port("RunnerRefs", Internal),
+    port("RunnerTakeoverStore", Internal),
     port("ImageStore", Internal),
     port("RunFiles", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("AgentProvider", Public(All)), // not classified by architecture.md; public to the contexts that use it today

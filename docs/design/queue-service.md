@@ -33,7 +33,7 @@ related:
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。
 決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側・APIと認可・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止・tokenの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-ADR-t3102-2の境界: queue DBを開くのはserviceと[その例外](#dbを開く経路)だけで、serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
+serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
 session wrapperとhookはwrapperのprincipalでserviceを通り（plannerとinboxのhookは例外、[クライアントモード](#クライアントモード)）、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
 supervisorとそれが起動する`observe`・`throughput-review`もserviceを通る（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
@@ -107,6 +107,8 @@ hostではtokenは誤りを止めるもので、security boundaryではない（
 runnerの割り当てと報告の入口は`application::queue_service::runner_work_http`。
 runnerの仕事は制御側が選んで渡し、runnerはrunを指定できない。
 チームの版の割り当ては、rulesetの規則・対象・enforcementと全てのactorのbypassを確かめられた間だけ行い、その読みは書き込みの列の外で行う（[ADR-t4332-1](../adr/2026-11-10-t4332-1-ruleset-gate-checks-rules-targets-enforcement-and-every-bypass.md)、入口は`application::queue_service::RulesetGate`）。
+runnerのleaseの喪失と引き継ぎの入口は`application::supervise::runner_recovery_pass`。
+受け入れたheadは、mainに入るかrunが取り消されるまで、いつも少なくとも1つの確かめたrefから届く。
 
 検査の順と拒否の記録・応答は`application::queue_service::QueueService::handle`、storeの型付き拒否の応答は同moduleの`respond`が持つ。
 認可はCLIと同じapplicationの境界をprincipalのactorでservice側で通す。
@@ -217,7 +219,7 @@ attentionの次の手は`dagq service status`。
 
 ## statusとdoctor
 
-`status`・`doctor`・`dagq service status`はserviceの状態を出す（`application::queue_service::view`。欄の意味は`ServiceProbe`と`view`、`status`の節は`StatusSections`のdoc comment）。
+`status`・`doctor`・`dagq service status`はserviceの状態を出す（`application::queue_service::view`）。
 `doctor`はserviceが作り、PATHで探すものだけをクライアントが足す（`doctor_on_this_host`）。
 見るだけで、serviceを起動も停止もしない（socketへ`hello`を打つ）。
 

@@ -5,7 +5,7 @@ use crate::application::RunnerStore;
 use crate::domain::{oidc::OidcIdentity, runner_registration::*};
 use anyhow::Result;
 
-fn runner(tx: &impl SqlRead, id: &str) -> Result<Option<Runner>> {
+pub(super) fn runner(tx: &impl SqlRead, id: &str) -> Result<Option<Runner>> {
     let row = tx.query_row(
         "SELECT owner_issuer, owner_subject, created_at, revoked_at, declaration, shared, approved_by FROM runners WHERE id = ?1",
         sql_params![id],

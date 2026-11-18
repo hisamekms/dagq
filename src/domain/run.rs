@@ -386,6 +386,16 @@ pub fn assign_runner_branch(mut run: TaskRun, generation: i64) -> Result<TaskRun
     Ok(run)
 }
 
+/// Resume on a fresh runner after recovery chose a new session. Only queue
+/// state and accepted Git history carry over; the old session is never adopted.
+pub fn resume_on_runner(mut run: TaskRun, generation: i64) -> Result<TaskRun, DomainError> {
+    check_resumable(&run)?;
+    run.status = RunStatus::Running;
+    run.workspace_id = None;
+    run.workspace_closed_at = None;
+    assign_runner_branch(run, generation)
+}
+
 /// A starting run gets its session's handle (its background wrapper's)
 /// once.
 pub fn attach_workspace(mut run: TaskRun, workspace_id: String) -> Result<TaskRun, DomainError> {

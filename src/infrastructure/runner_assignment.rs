@@ -103,7 +103,15 @@ impl<E: TransactionEntries> StoreQueue<E> {
             }
             Operation::Heartbeat(report) | Operation::Release(report) => {
                 let current = runner_leases::lease(&tx, &report.run_id)?;
-                match decision::check_report(&runner.id, current.as_ref(), report.generation, now) {
+                let previous_owner =
+                    runner_leases::recorded_runner(&tx, &report.run_id, report.generation)?;
+                match decision::check_report(
+                    &runner.id,
+                    current.as_ref(),
+                    previous_owner.as_deref(),
+                    report.generation,
+                    now,
+                ) {
                     Ok(_) => {}
                     Err(decision::ReportRefusal::AuthorizationDenied) => {
                         return Ok(Outcome::Denied);
@@ -132,7 +140,15 @@ impl<E: TransactionEntries> StoreQueue<E> {
             }
             Operation::Report(report) => {
                 let current = runner_leases::lease(&tx, &report.run_id)?;
-                match decision::check_report(&runner.id, current.as_ref(), report.generation, now) {
+                let previous_owner =
+                    runner_leases::recorded_runner(&tx, &report.run_id, report.generation)?;
+                match decision::check_report(
+                    &runner.id,
+                    current.as_ref(),
+                    previous_owner.as_deref(),
+                    report.generation,
+                    now,
+                ) {
                     Ok(_) => {}
                     Err(decision::ReportRefusal::AuthorizationDenied) => {
                         return Ok(Outcome::Denied);
@@ -180,11 +196,17 @@ impl<E: TransactionEntries> StoreQueue<E> {
         held: &crate::domain::claim_order::ClaimHolds,
         now: i64,
     ) -> Result<Option<TaskRun>> {
+        let run_order = tx.dialect().insertion_order("r");
+        let insertion_order = tx.dialect().insertion_order("");
         let ids: Vec<String> = tx.query_map(
-        "SELECT l.run_id FROM runner_leases l JOIN task_runs r ON r.id=l.run_id \
-         WHERE (l.state <> 'held' OR l.expires_at_ms <= ?1) AND r.status IN ('claimed','starting','running') \
-         AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=r.task_id AND h.released_at IS NULL) \
-         ORDER BY r.created_at, r.id", sql_params![now], |r| r.get(0))?;
+            &format!("SELECT l.run_id FROM runner_leases l JOIN task_runs r ON r.id=l.run_id \
+             WHERE ((l.state='released' AND r.status IN ('claimed','starting','running')) \
+             OR (l.state='lost' AND r.status='needs_session')) \
+             AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=r.task_id AND t.status='in_progress') \
+             AND {run_order}=(SELECT MAX({insertion_order}) FROM task_runs WHERE task_id=r.task_id) \
+             AND NOT EXISTS (SELECT 1 FROM run_leases owned WHERE owned.run_id=r.id) \
+             AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=r.task_id AND h.released_at IS NULL) \
+             ORDER BY r.created_at, r.id"), sql_params![], |r| r.get(0))?;
         let investigations = if held.investigations.max.is_some() {
             // Reuse the same live investigation projection as fresh claims.
             super::investigations::refresh(tx, now / 1000)?
@@ -397,6 +419,82 @@ mod tests {
     }
 
     #[test]
+    fn reports_authorize_the_exact_generation_holder_before_fencing() {
+        let (_, queue) = setup();
+        let Outcome::Assignment(Some(first)) = poll(&queue, "a").unwrap() else {
+            panic!("first grant")
+        };
+        let id = first.run.id().as_str();
+        let check = |who: &str, run: &str, generation, lost| {
+            let before = queue.runner_lease(id).unwrap();
+            let report = || decision::LeaseReport {
+                run_id: run.into(),
+                generation,
+            };
+            let result = serde_json::from_value(serde_json::json!({"run_id":run,"generation":generation,
+                "head":"b".repeat(40),"state":{"head":"b".repeat(40),"branch":"dagq/run/1"},"receipt":null,"exit_code":null})).unwrap();
+            for operation in [
+                Operation::Heartbeat(report()),
+                Operation::Release(report()),
+                Operation::Report(result),
+            ] {
+                let answer = queue
+                    .runner_operation(who, &operation, None, &queue.generators)
+                    .unwrap();
+                assert!(
+                    if lost {
+                        matches!(answer, Outcome::LeaseLost)
+                    } else {
+                        matches!(answer, Outcome::Denied)
+                    },
+                    "{who} {generation}"
+                );
+                assert_eq!(queue.runner_lease(id).unwrap(), before);
+                assert!(queue.accepted_head(id).unwrap().is_none());
+            }
+        };
+        for generation in [0, 1, 2] {
+            check("b", id, generation, false);
+            check("b", "missing", generation, false);
+        }
+        queue
+            .release_runner_lease(
+                id,
+                runner_lease::Report {
+                    runner_id: "a",
+                    generation: 1,
+                },
+                1_000_000_000,
+            )
+            .unwrap();
+        let Outcome::Assignment(Some(second)) = poll(&queue, "b").unwrap() else {
+            panic!("second grant")
+        };
+        assert_eq!(second.generation, 2);
+        check("a", id, 1, true);
+        check("a", id, 2, false);
+        check("b", id, 1, false);
+        queue
+            .release_runner_lease(
+                id,
+                runner_lease::Report {
+                    runner_id: "b",
+                    generation: 2,
+                },
+                1_000_000_000,
+            )
+            .unwrap();
+        let Outcome::Assignment(Some(third)) = poll(&queue, "a").unwrap() else {
+            panic!("third grant")
+        };
+        assert_eq!(third.generation, 3);
+        check("a", id, 1, true);
+        check("a", id, 2, false);
+        check("b", id, 1, false);
+        check("b", id, 2, true);
+    }
+
+    #[test]
     fn concurrent_pulls_never_duplicate_and_failed_grant_rolls_claim_back() {
         let (uri, queue) = setup();
         // Abort after claim, at the lease write: both run and task roll back.
@@ -407,6 +505,16 @@ mod tests {
             .query_row("SELECT count(*) FROM task_runs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+        let recorded: i64 = queue
+            .conn
+            .query_row("SELECT count(*) FROM runner_lease_records", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            recorded, 0,
+            "a failed grant must not leave ownership evidence"
+        );
         queue.conn.execute_batch("DROP TRIGGER fail_grant").unwrap();
         let (send, receive) = mpsc::channel();
         let mut handles = Vec::new();

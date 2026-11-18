@@ -113,9 +113,40 @@ pub fn judge(current: Option<&RunnerLease>, report: Report<'_>, now_ms: i64) -> 
     }
 }
 
+/// Why the control side permanently takes away a held generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LossReason {
+    Expired,
+    Revoked,
+}
+
+/// Loss uses only stored registry facts and the control clock. A missing runner
+/// or owner fails closed. Already lost/released generations are never revived.
+pub fn loss(
+    lease: &RunnerLease,
+    runner: Option<&super::runner_registration::Runner>,
+    owner: Option<&super::queue_service::Member>,
+    now_ms: i64,
+) -> Option<LossReason> {
+    if lease.state != LeaseState::Held {
+        return None;
+    }
+    if !runner.is_some_and(|r| {
+        r.id == lease.runner_id && super::runner_registration::runner_live(r, owner)
+    }) {
+        Some(LossReason::Revoked)
+    } else if now_ms >= lease.expires_at_ms {
+        Some(LossReason::Expired)
+    } else {
+        None
+    }
+}
+
 /// Whether the control side may grant the run to a runner now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
+    /// There is no representable successor. Never reuse the last generation.
+    Exhausted,
     /// Grant `generation`, one above the current one (1 for a run never
     /// granted), whose lease ends at `expires_at_ms`.
     Grant { generation: i64, expires_at_ms: i64 },
@@ -134,10 +165,21 @@ pub fn grant(current: Option<&RunnerLease>, now_ms: i64) -> Grant {
                 until_ms: lease.expires_at_ms,
             }
         }
-        _ => Grant::Grant {
-            generation: current.map_or(1, |lease| lease.generation.saturating_add(1)),
-            expires_at_ms: lease_end(now_ms),
-        },
+        _ => {
+            let generation = match current {
+                None => 1,
+                Some(lease) => {
+                    let Some(next) = lease.generation.checked_add(1) else {
+                        return Grant::Exhausted;
+                    };
+                    next
+                }
+            };
+            Grant::Grant {
+                generation,
+                expires_at_ms: lease_end(now_ms),
+            }
+        }
     }
 }
 
@@ -417,5 +459,98 @@ mod tests {
             assert!(ref_generation_allowed(Some(&current), 4));
             assert!(!ref_generation_allowed(Some(&current), 5));
         }
+    }
+}
+
+#[cfg(test)]
+mod loss_tests {
+    use super::*;
+    use crate::domain::{
+        oidc::OidcIdentity,
+        queue_service::{Member, TeamRole},
+        runner_registration::Runner,
+    };
+    #[test]
+    fn loss_uses_registry_and_control_time_and_never_restores_a_generation() {
+        let owner = Member {
+            identity: OidcIdentity {
+                issuer: "i".into(),
+                subject: "s".into(),
+            },
+            role: TeamRole::Member,
+            on_call: false,
+            display_name: None,
+            created_at: 0,
+            disabled_at: None,
+        };
+        let mut runner = Runner {
+            id: "a".into(),
+            owner: owner.identity.clone(),
+            created_at: 0,
+            revoked_at: None,
+            declaration: None,
+            shared: false,
+            approved_by: None,
+        };
+        let mut lease = RunnerLease {
+            run_id: "r".into(),
+            generation: 1,
+            runner_id: "a".into(),
+            expires_at_ms: 100,
+            state: LeaseState::Held,
+        };
+        assert_eq!(loss(&lease, Some(&runner), Some(&owner), 99), None);
+        for now in [100, 101] {
+            assert_eq!(
+                loss(&lease, Some(&runner), Some(&owner), now),
+                Some(LossReason::Expired)
+            );
+        }
+        runner.revoked_at = Some(0);
+        assert_eq!(
+            loss(&lease, Some(&runner), Some(&owner), 1),
+            Some(LossReason::Revoked)
+        );
+        runner.revoked_at = None;
+        let disabled = Member {
+            disabled_at: Some(0),
+            ..owner.clone()
+        };
+        for member in [None, Some(&disabled)] {
+            assert_eq!(
+                loss(&lease, Some(&runner), member, 1),
+                Some(LossReason::Revoked)
+            );
+        }
+        assert_eq!(
+            loss(&lease, None, Some(&owner), 1),
+            Some(LossReason::Revoked)
+        );
+        lease.state = LeaseState::Lost;
+        assert_eq!(loss(&lease, Some(&runner), Some(&owner), 1), None);
+        assert_eq!(
+            judge(
+                Some(&lease),
+                Report {
+                    runner_id: "a",
+                    generation: 1
+                },
+                1
+            ),
+            Verdict::LeaseLost
+        );
+        assert!(matches!(
+            grant(Some(&lease), 1),
+            Grant::Grant { generation: 2, .. }
+        ));
+        lease.generation = i64::MAX;
+        assert_eq!(grant(Some(&lease), 1), Grant::Exhausted);
+        lease.generation = 2;
+        lease.runner_id = "b".into();
+        lease.state = LeaseState::Held;
+        assert_eq!(
+            super::super::runner_assignment::check_report("a", Some(&lease), Some("a"), 1, 1),
+            Err(super::super::runner_assignment::ReportRefusal::LeaseLost)
+        );
     }
 }

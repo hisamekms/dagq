@@ -3,11 +3,12 @@
 //! committed fixtures also compose with the other contracts on one database.
 use super::ContractStore;
 use crate::{
-    application::{Clock, Generators},
+    application::{Clock, Generators, RunnerLeaseStore, RunnerTakeoverStore, TriageAction},
     domain::{
-        CommitSha,
+        CommitSha, LeaseToken,
+        actor_model::{ActorLaunch, ModelRole},
         runner_assignment::{Assignment, ClaimInputs, LeaseReport, Operation, Outcome, Poll},
-        runner_lease::LEASE,
+        runner_lease::{LEASE, LossReason},
     },
     infrastructure::{
         event_actor::{EventActors, process_actor},
@@ -133,7 +134,16 @@ pub fn assignment_stale_report<S: ContractStore, F: Fn() -> Result<S>>(open: &F)
     let name = "contract-assignment-stale";
     let queue = fixture(open()?, name)?;
     let first = pull(&queue, name, NOW)?;
-    let now = NOW + LEASE.as_millis() as i64;
+    let now = NOW + 1_000;
+    ensure!(matches!(
+        queue.runner_operation(
+            name,
+            &Operation::Release(lease_report(&first)),
+            None,
+            &generators(now)
+        )?,
+        Outcome::Released
+    ));
     let second = pull(&queue, name, now)?;
     let id = second.run.id().as_str();
     let before = queue.entries.runner_lease(id)?;
@@ -177,14 +187,54 @@ pub fn assignment_stale_report<S: ContractStore, F: Fn() -> Result<S>>(open: &F)
     Ok(())
 }
 
-/// A different runner receives the same expired run with a new generation,
-/// rather than claiming a new run or retaining the old runner's lease.
+/// A different runner receives the same expired run with a new generation
+/// after loss and recovery allow a new session. Expiry alone cannot reassign it.
 pub fn assignment_expired_takeover<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
     let name = "contract-assignment-takeover";
-    let queue = fixture(open()?, name)?;
+    let mut queue = fixture(open()?, name)?;
     let first = pull(&queue, name, NOW)?;
     let token = format!("{name}-other");
     let now = NOW + LEASE.as_millis() as i64;
+    let poll = || Operation::Poll(Poll {});
+    let claim = ClaimInputs {
+        base: CommitSha::parse("a".repeat(40), "contract base")?,
+        limits: Default::default(),
+    };
+    ensure!(matches!(
+        queue.runner_operation(&token, &poll(), Some(&claim), &generators(now))?,
+        Outcome::Assignment(None)
+    ));
+    let id = first.run.id();
+    ensure!(
+        queue.lose_runner_if_due(id.as_str(), first.generation, now)? == Some(LossReason::Expired)
+    );
+    let lost = queue.runner_lease(id.as_str())?.context("lost lease")?;
+    queue.recover_runner(&lost)?;
+    let recovery = LeaseToken::new("contract-runner-recovery");
+    ensure!(
+        queue
+            .begin_triage(
+                id,
+                &recovery,
+                None,
+                &ActorLaunch::default_of(ModelRole::Recovery)
+            )?
+            .is_some()
+    );
+    queue.finish_triage(
+        id,
+        &recovery,
+        &TriageAction::Resume {
+            instruction: "resume on the successor".into(),
+        },
+        serde_json::json!({}),
+        vec![],
+    )?;
+    ensure!(matches!(
+        queue.runner_operation(&token, &poll(), Some(&claim), &generators(now))?,
+        Outcome::Assignment(None)
+    ));
+    queue.release_lease(id, &recovery)?;
     let second = pull(&queue, &token, now)?;
     ensure!(second.run.id() == first.run.id());
     ensure!(second.generation == first.generation + 1);

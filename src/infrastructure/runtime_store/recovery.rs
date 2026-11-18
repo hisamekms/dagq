@@ -704,11 +704,39 @@ impl<E: TransactionEntries> StoreQueue<E> {
         &mut self,
         id: &RunId,
         checked_processes: usize,
-        mut report: serde_json::Value,
+        report: serde_json::Value,
     ) -> Result<TaskRun> {
-        // The spans it closes read their transcripts first (task 543).
-        let _read = self.read_before(Closing::Run(id, &[EventKind::RunRecovered]))?;
+        self.recover_checked(id, checked_processes, report, None)
+    }
+
+    pub(crate) fn recover_checked(
+        &mut self,
+        id: &RunId,
+        checked_processes: usize,
+        mut report: serde_json::Value,
+        runner: Option<&crate::domain::runner_lease::RunnerLease>,
+    ) -> Result<TaskRun> {
+        // Local recovery reads closing spans first. A remote runner's session
+        // and host transcripts are not inputs to its successor's recovery.
+        let _read = if runner.is_none() {
+            Some(self.read_before(Closing::Run(id, &[EventKind::RunRecovered]))?)
+        } else {
+            None
+        };
         let tx = self.write_entry("recover_run")?;
+        if let Some(expected) = runner {
+            let current = crate::infrastructure::runner_leases::lease(&tx, id.as_str())?;
+            ensure!(
+                current.as_ref() == Some(expected)
+                    && expected.state == crate::domain::runner_lease::LeaseState::Lost,
+                "runner lease changed during recovery"
+            );
+        } else {
+            ensure!(
+                crate::infrastructure::runner_leases::lease(&tx, id.as_str())?.is_none(),
+                "runner recovery requires its lease judgment, not host process health"
+            );
+        }
         let fresh: bool = SqlRead::query_row(
             &tx,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND heartbeat_at >= ?2-?3)",

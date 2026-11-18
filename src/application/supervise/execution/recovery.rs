@@ -2000,6 +2000,103 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
     Ok(stopped)
 }
 
+/// One bounded pass of the team control loop, before runner selection. There
+/// are no host process, session, filesystem or build ports here. GitHub effects
+/// and their durable marks are deliberately separate: after any failed call
+/// the next pass repeats creation/read-back from the newest recorded ref.
+/// Assignment stays in the atomic pull use case; cleanup follows its grant on
+/// a subsequent pass. The deployment supplies RunnerRefs (no host Git fallback).
+pub fn runner_recovery_pass(
+    queue: &mut dyn crate::application::RunnerTakeoverStore,
+    refs: &dyn crate::application::RunnerRefs,
+    now_ms: i64,
+) -> Result<()> {
+    let mut failure = None;
+    for facts in queue.runner_takeovers()? {
+        // An unavailable ref must not keep other runners' expiries unobserved.
+        if let Err(error) = runner_takeover_one(queue, refs, now_ms, facts) {
+            failure.get_or_insert(error);
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn runner_takeover_one(
+    queue: &mut dyn crate::application::RunnerTakeoverStore,
+    refs: &dyn crate::application::RunnerRefs,
+    now_ms: i64,
+    mut facts: crate::domain::runner_takeover::Takeover,
+) -> Result<()> {
+    use crate::domain::{
+        runner_lease,
+        runner_takeover::{self, RefLook, Step},
+    };
+    let id = facts.lease.run_id.clone();
+    let runner = queue.runner_registration(&facts.lease.runner_id)?;
+    let owner = runner
+        .as_ref()
+        .map(|r| queue.runner_owner(r))
+        .transpose()?
+        .flatten();
+    if runner_lease::loss(&facts.lease, runner.as_ref(), owner.as_ref(), now_ms).is_some() {
+        queue.lose_runner_if_due(&id, facts.lease.generation, now_ms)?;
+        // Refresh the lease: another pass may already have advanced it.
+        let Some(lease) = queue.runner_lease(&id)? else {
+            return Ok(());
+        };
+        if lease.generation != facts.lease.generation {
+            return Ok(());
+        }
+        facts.lease = lease;
+    }
+    let mut look = RefLook::Missing;
+    // Create, read and mark are at most three effects in a pass. A durable
+    // mark is consumed on the next pass/pull, so no in-memory promise can
+    // make a run assignable. Errors leave every earlier verified ref kept.
+    for _ in 0..3 {
+        let mut old = Vec::new();
+        if facts.lease.state == runner_lease::LeaseState::Held {
+            for record in &facts.records {
+                if record.generation < facts.lease.generation
+                    && refs.exists(&id, record.generation)?
+                {
+                    old.push(record.generation);
+                }
+            }
+        }
+        match runner_takeover::next(&facts, &look, &old) {
+            Step::Recover => {
+                queue.recover_runner(&facts.lease)?;
+                break;
+            }
+            Step::Create { generation, head } => {
+                refs.create(&id, generation, &head)?;
+                look = RefLook::Present;
+            }
+            Step::Read { generation } => {
+                let Some(head) = refs.read(&id, generation)? else {
+                    break;
+                };
+                look = RefLook::ReadBack(head);
+            }
+            Step::Mark { generation, head } => {
+                queue.verify_runner_ref(&id, generation, &head, now_ms)?;
+                break;
+            }
+            Step::Delete { generation } => {
+                if refs.exists(&id, generation)? {
+                    refs.delete(&id, generation)?;
+                }
+                // Attempt each old record, including ones a previous pass
+                // already removed; existence is never treated as a tip.
+                facts.records.retain(|r| r.generation != generation);
+            }
+            Step::Assign | Step::Wait | Step::WaitRecovery | Step::RefMismatch => break,
+        }
+    }
+    Ok(())
+}
+
 /// A run of task 1 in `/runs/r1` with `status` and `last_error`, for the
 /// unit tests of an escalation's ask here and in `triage.rs`.
 #[cfg(test)]
