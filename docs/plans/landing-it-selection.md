@@ -275,6 +275,80 @@ goal 237 の task 3761。`tests/common/**` を共通のファイルから外し�
 - 多いかの上限は広い項目と同じ 25% にする。二山の間（10.3〜94.0%）のどこに置いても結果は変わらないので、新しい値を足さない。
 - `mod.rs` が出し直す名（`WithoutActor` など）は、その名を使う module を数える。数えた結果 `actor.rs` は 94.1% に当たり、全部流す側になる。
 
+## 範囲の広い変更の着地の検証の秒（2026-11-18）
+
+本番の着地の検証の既存ログを 2026-11-18T05:18:54Z に読み、各段の nextest Summary の壁時計の秒を集計した。
+この測定で build・test・`scripts/landing-it.sh` は実行していない。
+
+### 対象の選び方と出典
+
+`git log main` の trailer で、4979 は `dc73f467e8d695e838cd506ba85fb25dab6ebac5`、4984 は `95c933e3383df011ce980925a48e94cb8af5a875`、4985 は `42330d6602bbc4e59e0cf57ce299ca53ab41fd49` の着地を確認した。
+4986 は着地 commit を作らず、run `0e244456-5abf-47a2-b767-ea64e5f971ee` の `receipt.json` が `already_satisfied` として `2527e501339d971b69e93b7b2a5ded5d5da5f999` を結果の commit にしている。
+そのため、4 つ目の trailer を待つ代わりに、この結果の commit より後の main の着地を対象にした。
+
+結果の commit より後から採取時の main `df9cba7898e1b34e087cf7a997f792af9af43976` までを新しい順に調べ、各 run の最大の integrate 試行番号だけを読んだ。
+4139 の試行 2 は全 IT、5039 の試行 1 は unit stage のログなし、5152 の試行 1 は IT 選択なし（unit 382.501 秒）、4949 の試行 1 は unit stage のログなしで、条件に合うのは次の 1 件だった。
+実際の段の印は `landing-it: unit stage:`・`landing-it: IT stage:`（依頼文の `landing-it.sh:` と異なる）だった。
+全 IT を流す選択の印 `landing-it: every IT runs:` と、共通ファイル `migrations-postgres/runner_generation_owners.sql`・`migrations/0123_runner_generation_owners.sql` を確認した。
+IT の skipped は 16 本で、ほぼ全件の条件も満たす。
+CI の JUnit による代替は使っていない。
+
+| 記録 | 値 |
+| --- | --- |
+| 種類 | 本番の着地の検証の nextest ログ（最新の試行 2） |
+| path（queue dir からの相対） | `runs/15ecdf54-89db-4a5c-bd7d-55cd2c521689/integrate-2-verify-3.log` |
+| queue dir | `/Users/shinnosukeooyama/.local/share/dagq/77067154921b9014` |
+| 着地 commit | `df9cba7898e1b34e087cf7a997f792af9af43976` |
+| Dagq-Task | 4139 |
+| Dagq-Run | `15ecdf54-89db-4a5c-bd7d-55cd2c521689` |
+| 記録の UTC 時刻 | 2026-11-18T04:42:17.037358Z（ログの filesystem mtime。本文に開始・終了の UTC 時刻はない） |
+| 着地 commit の UTC 時刻 | 2026-11-18T04:42:27Z（committer date） |
+| 並列度 | 当該 commit の `dagq.toml` の `[run.env] NEXTEST_TEST_THREADS = "6"`（ログに並列度の明示なし） |
+
+### 両段の秒と上限の余裕
+
+| 記録 | 段 | Summary 秒 | 実行本数 | passed | 失敗 | skipped |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 4139 / 試行 2 | unit | 930.387 | 6102 | 6102 | 0 | 0 |
+| 4139 / 試行 2 | IT | 1440.143 | 1831 | 1831 | 0 | 16 |
+| 4139 / 試行 2 | 両段の和 | 2370.530 | 7933 | 7933 | 0 | 16 |
+
+両段の和は 39 分 30.530 秒で、2,700 秒まで 329.470 秒、3,600 秒の上限まで 1,229.470 秒（20 分 29.470 秒）の余裕あり。
+ただしこれは両段の Summary の和であり、build・clippy・段の間の時間の関門などを含む verify 全体の実時間ではない。
+この記録の unit の段では `ledger_range` の組も選ばれていた。
+IT の選択は全件だが、既知の失敗は filter から除かれているので、除いた test の所要時間や成功をこの結果で確かめたことにはならない。
+
+### IT の段の秒の上位 20 本
+
+同じログの IT stage より後の PASS 行 1,831 本を秒の降順に並べた。
+全て binary は `dagq::it` で、秒は個々の test の実時間（並列実行のため和は段の壁時計と一致しない）。
+
+| 順位 | test | 秒 |
+| ---: | --- | ---: |
+| 1 | `runtime_handoff::a_resume_taken_over_after_a_handoff_keeps_its_recorded_exit_request` | 107.395 |
+| 2 | `runtime_handoff::an_adopted_resume_keeps_its_recorded_exit_request` | 106.178 |
+| 3 | `supervisor_service_ledger::what_builds_the_ledger_crosses_the_services_limits_in_parts` | 90.281 |
+| 4 | `cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back` | 76.308 |
+| 5 | `cli_install_release::install_release_installs_with_cargo_and_puts_the_binary_in_place` | 54.163 |
+| 6 | `cli_version::a_supervisor_handed_over_by_an_exec_keeps_its_owner` | 50.312 |
+| 7 | `runtime_cleanup::a_withdrawn_handoff_resumes_the_cleanup` | 46.280 |
+| 8 | `queue_binary::install_lets_its_new_build_migrate_and_names_it_the_queues_binary` | 38.875 |
+| 9 | `runtime_cleanup::draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing` | 37.325 |
+| 10 | `runtime_spike_replan::the_investigation_limit_holds_a_new_goal_s_spike_until_an_investigation_ends` | 35.638 |
+| 11 | `runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch` | 30.663 |
+| 12 | `cli_version::install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox` | 30.528 |
+| 13 | `runtime_claim_defer::a_changed_conflicts_table_is_read_again_without_a_restart` | 27.149 |
+| 14 | `verification_container::a_run_held_in_its_slot_whose_recheck_command_fails_in_its_container_is_parked_before_it_lands` | 26.561 |
+| 15 | `runtime_waiting_stages::a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped` | 26.522 |
+| 16 | `runtime_light_slots::a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes` | 26.432 |
+| 17 | `runtime_claim_defer::a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed` | 26.349 |
+| 18 | `runtime_light_slots::a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it` | 25.373 |
+| 19 | `runtime_cleanup::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done` | 23.990 |
+| 20 | `runtime_integrate::prompt_describes_landed_predecessors_and_sibling_tasks_in_progress` | 23.627 |
+
+この表は元ログから作り直せるビューで、元ログと 4986 の receipt は材料とする。
+run dir の保存期間が切れた後は同じ記録からの再集計はできないため、出典・Summary・上位の値をこの節に残す。
+
 ## 決めたこと（段 3b の ADR と design が使う）
 
 2 と 4 は、切り替えの後 7 日の記録に代替案を当てた[代替案の比較](landing-it-alternatives.md)の結果に拠る（[ADR-t2892-1](../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。2 の `tests/common` の helper の扱いは「tests/commonのhelperの選び方の測定」に拠る（[ADR-t3761-1](../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)）。
