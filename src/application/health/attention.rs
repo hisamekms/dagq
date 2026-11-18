@@ -448,6 +448,8 @@ pub fn attention(
         {
             next = AttentionNext::RecoverByHand;
         }
+        let fenced = next == AttentionNext::Resuming && queue.task_fenced(run.task_id())?;
+        let (next, kind) = resume_slot_attention(next, kind, &events, fenced);
         let kind = kind.unwrap_or(run.status().as_str()).to_owned();
         attention.push(Attention {
             run_id: Some(run.id().clone()),
@@ -1305,11 +1307,70 @@ pub fn rulesets_attention(
         }))
 }
 
+/// A slot wait is only the next step of an otherwise resumable run. A
+/// current hold or replan fence wins even before another fill pass runs;
+/// provider waits and new parks supersede the record in `slot_wait`.
+fn resume_slot_attention<'a>(
+    next: AttentionNext,
+    kind: Option<&'a str>,
+    events: &'a [RunEvent],
+    fenced: bool,
+) -> (AttentionNext, Option<&'a str>) {
+    if next == AttentionNext::Resuming
+        && !fenced
+        && let Some(wait) = crate::domain::resume::slot_wait(events)
+    {
+        return (
+            AttentionNext::WaitingForResumeSlot,
+            Some(wait.kind.as_str()),
+        );
+    }
+    (next, kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::stranded_landing::Seen;
     use crate::domain::{EventId, TaskId};
+
+    #[test]
+    fn a_resume_slot_wait_is_distinct_from_a_fence_provider_or_started_resume() {
+        let wait = event(
+            1,
+            EventKind::ResumeSlotWaitStarted,
+            json!({"reason": "slots_full"}),
+        );
+        let shown = |events: &[RunEvent], fenced| {
+            resume_slot_attention(AttentionNext::Resuming, None, events, fenced).0
+        };
+        assert_eq!(
+            shown(std::slice::from_ref(&wait), false),
+            AttentionNext::WaitingForResumeSlot
+        );
+        assert_eq!(
+            AttentionNext::WaitingForResumeSlot.to_string(),
+            "waiting for a slot behind earlier work (runtime)"
+        );
+        assert_eq!(
+            shown(std::slice::from_ref(&wait), true),
+            AttentionNext::Resuming
+        );
+        for kind in [
+            EventKind::HoldParked,
+            EventKind::ReplanParked,
+            EventKind::ProviderWaiting,
+            EventKind::ResumeSlotWaitEnded,
+            EventKind::ResumeStarted,
+        ] {
+            assert_eq!(
+                shown(&[wait.clone(), event(2, kind, json!({}))], false),
+                AttentionNext::Resuming,
+                "{kind}"
+            );
+        }
+        assert_eq!(shown(&[], false), AttentionNext::Resuming);
+    }
 
     fn event(id: i64, kind: EventKind, payload: Value) -> RunEvent {
         RunEvent {

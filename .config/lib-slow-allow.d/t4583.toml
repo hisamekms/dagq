@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_resume_waits_once_for_an_occupied_slot_then_resumes"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、urgent の claim が通常優先度の resume より先に slot を取り、満杯の pass が続いても待ちの event が1件だけ残り、status に届き、slot 解放後に同じ run が再開することを確かめる。2 task・各1 run と1 msの待ち間隔で、待ちの重複抑止と終了・表示の判断は domain::resume と application::health::attention の副作用のない unit test に分離済み。"
+task = 4583

@@ -2436,6 +2436,8 @@ pub enum AttentionNext {
     /// `needs_session` run itself (ADR-0019 decision 1), or hands it to a
     /// person as an ask once its resumes are used up.
     Resuming,
+    /// An eligible resume is behind work occupying the worker slots.
+    WaitingForResumeSlot,
     AnswerAsk {
         ask_id: AskId,
     },
@@ -2760,6 +2762,9 @@ impl fmt::Display for AttentionNext {
             Self::PushMain => f.write_str("push main"),
             Self::RecoverRun => f.write_str("recover run"),
             Self::Resuming => f.write_str("resuming (runtime)"),
+            Self::WaitingForResumeSlot => {
+                f.write_str("waiting for a slot behind earlier work (runtime)")
+            }
             Self::AnswerAsk { ask_id } => write!(f, "answer ask {ask_id}"),
             Self::ReadAnswer { ask_id } => {
                 write!(f, "read the answer of ask {ask_id} and close it")

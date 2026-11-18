@@ -433,6 +433,35 @@ pub fn resume_wait_recorded(events: &[RunEvent]) -> bool {
         })
 }
 
+/// The open slot wait, reconstructed across supervisor restarts. A new
+/// park, provider wait or resume supersedes it; unrelated events do not.
+pub fn slot_wait(events: &[RunEvent]) -> Option<&RunEvent> {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind.is_in(&[
+                EventKind::ResumeSlotWaitStarted,
+                EventKind::ResumeSlotWaitEnded,
+                EventKind::ResumeStarted,
+                EventKind::ResumeSkipped,
+                EventKind::ProviderWaiting,
+                EventKind::HoldParked,
+                EventKind::TaskHeld,
+            ]) || parks(event)
+        })
+        .filter(|event| event.kind == EventKind::ResumeSlotWaitStarted)
+}
+
+/// The event to record for a change in slot availability, once per wait.
+pub fn slot_wait_change(events: &[RunEvent], waiting: bool) -> Option<EventKind> {
+    match (slot_wait(events).is_some(), waiting) {
+        (false, true) => Some(EventKind::ResumeSlotWaitStarted),
+        (true, false) => Some(EventKind::ResumeSlotWaitEnded),
+        _ => None,
+    }
+}
+
 /// Whether a conflict-only attempt, or a resume after a provider-only one
 /// (`gated`, [`ResumeCount::waits_on_a_held_provider`]), waits for the
 /// run's provider (ADR-t3255-1 decisions 1 and 3): its provider is held
@@ -855,6 +884,45 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    /// Repeated full passes and restarts keep one wait; a slot or a new
+    /// resume closes it, and a later park may start a new wait.
+    #[test]
+    fn slot_wait_is_recorded_once_until_a_slot_or_resume_ends_it() {
+        let mut events = vec![];
+        assert_eq!(
+            slot_wait_change(&events, true),
+            Some(EventKind::ResumeSlotWaitStarted)
+        );
+        events.push(event(
+            "resume_slot_wait_started",
+            json!({"reason": "slots_full"}),
+        ));
+        events.push(event("observation", json!({})));
+        assert_eq!(slot_wait_change(&events, true), None);
+        assert_eq!(
+            slot_wait_change(&events, false),
+            Some(EventKind::ResumeSlotWaitEnded)
+        );
+        for end in [
+            "resume_slot_wait_ended",
+            "resume_started",
+            "resume_skipped",
+            "hold_parked",
+            "replan_parked",
+            "provider_waiting",
+        ] {
+            let mut ended = events.clone();
+            ended.push(event(end, json!({})));
+            assert!(slot_wait(&ended).is_none(), "{end}");
+        }
+        events.push(event("resume_started", json!({})));
+        events.push(conflict());
+        assert_eq!(
+            slot_wait_change(&events, true),
+            Some(EventKind::ResumeSlotWaitStarted)
+        );
     }
 
     fn conflict() -> RunEvent {

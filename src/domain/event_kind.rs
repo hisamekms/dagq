@@ -402,6 +402,14 @@ event_kinds! {
     ResumeFinished => "resume_finished",
     ResumeRequestSent => "resume_request_sent",
     ResumeSkipped => "resume_skipped",
+    /// The slot wait ended: `reason` names the newly available slot or
+    /// the other gate that now prevents this resume.
+    ResumeSlotWaitEnded => "resume_slot_wait_ended",
+    /// A resume eligible for the fill line waits for occupied worker slots.
+    /// Payload: `reason`, `used_slots`, `parallel`, `priority`,
+    /// `preceding_priority` (last earlier line entry, if any), and
+    /// `resumes` (attempts used and their conflict-only limit).
+    ResumeSlotWaitStarted => "resume_slot_wait_started",
     ResumeStarted => "resume_started",
     ReviewBypassed => "review_bypassed",
     ReviewFailed => "review_failed",
@@ -2087,6 +2095,8 @@ mod tests {
             (EventKind::ResumeFinished, "resume_finished"),
             (EventKind::ResumeRequestSent, "resume_request_sent"),
             (EventKind::ResumeSkipped, "resume_skipped"),
+            (EventKind::ResumeSlotWaitEnded, "resume_slot_wait_ended"),
+            (EventKind::ResumeSlotWaitStarted, "resume_slot_wait_started"),
             (EventKind::ResumeStarted, "resume_started"),
             (EventKind::ReviewBypassed, "review_bypassed"),
             (EventKind::ReviewFailed, "review_failed"),

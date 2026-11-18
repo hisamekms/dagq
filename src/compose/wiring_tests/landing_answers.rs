@@ -932,3 +932,67 @@ fn a_drain_with_no_run_of_its_own_leaves_the_approved_run_to_the_next_supervisor
     assert_eq!(payloads(&detail, "ask_opened").len(), 1);
     assert_eq!(wiring.agent.review_prompts().len(), 1);
 }
+
+/// A higher-priority worker keeps the only slot while a send-back parks
+/// an otherwise resumable run. Full passes persist one wait, status reads
+/// it, and releasing the worker lets the same run resume and end the wait.
+#[test]
+fn a_resume_waits_once_for_an_occupied_slot_then_resumes() {
+    use crate::application::TaskStore;
+    use crate::domain::{AttentionNext, Priority};
+    let wiring = Wiring::new(
+        "a_resume_waits_once_for_an_occupied_slot_then_resumes",
+        Script {
+            receipts: vec![succeeded, succeeded, succeeded_at_the_head],
+            verdicts: vec![concern(), verdict("pass", "fine")],
+        },
+    )
+    .with_parallel(1)
+    .with_tick(std::time::Duration::from_millis(1));
+    let first = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let mut queue = wiring.queue();
+    let ask = landing_ask(&mut queue, first);
+    let second = wiring.ready_task(&["true"]);
+    queue.set_priority(second, Some(Priority::Urgent)).unwrap();
+    let (release, held) = mpsc::channel();
+    wiring.agent.hold_next_turn(held);
+    let mut release = Some(release);
+    // Both candidates enter the same fill line: the urgent claim takes
+    // the slot before the normal-priority resume.
+    queue
+        .answer(ask.id, "send_back: add the missing check")
+        .unwrap();
+    let mut observed = 0;
+    wiring.supervise_once_while(|queue| {
+        let detail = queue.show(first).unwrap();
+        let waits = payloads(&detail, "resume_slot_wait_started");
+        if waits.is_empty() {
+            return false;
+        }
+        assert_eq!(waits.len(), 1);
+        assert_eq!(waits[0]["reason"], "slots_full");
+        assert_eq!(waits[0]["used_slots"], 1);
+        assert_eq!(waits[0]["resumes"]["counted_limit"], 3);
+        let status = wiring.status();
+        assert!(
+            status["attention"].as_array().unwrap().iter().any(|row| {
+                row["task_id"] == json!(first)
+                    && row["next"] == AttentionNext::WaitingForResumeSlot.to_string()
+            }),
+            "{status}"
+        );
+        observed += 1;
+        if observed < 3 {
+            return false;
+        }
+        release.take().unwrap().send(()).unwrap();
+        true
+    });
+    let detail = wiring.queue().show(first).unwrap();
+    assert_eq!(payloads(&detail, "resume_slot_wait_started").len(), 1);
+    assert_eq!(payloads(&detail, "resume_slot_wait_ended").len(), 1);
+    assert_eq!(payloads(&detail, "resume_started").len(), 1);
+    assert_eq!(detail.runs.len(), 1);
+    assert!(observed >= 3);
+}

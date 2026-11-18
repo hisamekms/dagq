@@ -43,12 +43,14 @@ impl Supervisor<'_> {
     /// its PID and recorded exit, not heartbeat freshness. Holds and replan
     /// guards also prevent exhaustion cleanup; container deferral prevents
     /// starting a resume, but does not prevent handing an exhausted run on.
-    pub(super) fn resume_candidates(&mut self) -> Result<Vec<ResumeCandidate>> {
+    /// Without `room`, only observe eligible slot waits; do not perform the
+    /// exhaustion handoff or close stuck-exit asks earlier than before.
+    pub(super) fn resume_candidates(&mut self, room: bool) -> Result<Vec<ResumeCandidate>> {
         let candidates = self.queue.runs_needing_session()?;
         // A resumed session let go after the exit timeout raised a
-        // stuck_exit ask; once it ended nobody needs to answer it, whether
-        // or not a slot is free.
-        for candidate in &candidates {
+        // stuck_exit ask; once it ended nobody needs to answer it. Keep
+        // closing these asks at the existing free-slot pass boundary.
+        for candidate in candidates.iter().filter(|_| room) {
             let alive = candidate
                 .wrapper
                 .as_ref()
@@ -94,18 +96,26 @@ impl Supervisor<'_> {
                 Some(run.id()),
                 crate::domain::task_replan::GuardedStep::Resume,
             )? {
+                self.end_resume_slot_wait(run, "task_hold")?;
                 continue;
             }
             // Nor while a replanning guards its task (ADR-t1521-2): the
             // run waits for the operation's outcome, its resumes kept.
             if self.queue.replan_guard(run.task_id())?.is_some() {
+                self.end_resume_slot_wait(run, "replan")?;
                 continue;
             }
             // Out of attempts: the run is retried with its branch carried
-            // over, or goes to its recovery job, whether or not a slot is
-            // free; the work a replanning saved comes back first, as before
-            // a resume.
+            // over, or goes to its recovery job at the existing free-slot
+            // pass boundary; the work a replanning saved comes back first,
+            // as before a resume.
             if candidate.resumes.exhausted(self.resume.config) {
+                self.end_resume_slot_wait(run, "resume_exhausted")?;
+                // A full pass only observes eligible waits; exhaustion's
+                // handoff keeps its existing free-slot boundary.
+                if !room {
+                    continue;
+                }
                 match self.restore_parked(run, false) {
                     Ok(true) => {}
                     Ok(false) => continue,
@@ -123,17 +133,73 @@ impl Supervisor<'_> {
             // one, while the run's provider is held and it cannot move
             // (ADR-t3255-1 decision 1): it waits, no attempt spent.
             if self.resume_waits_for_provider(run, candidate.resumes)? {
+                self.end_resume_slot_wait(run, "provider")?;
                 continue;
             }
             // Nor on a container that cannot be used or does not reach its
             // provider: it waits, never on the host (goal 38).
             if self.container_deferral(run.actual_provider()).is_some() {
+                self.end_resume_slot_wait(run, "container")?;
                 continue;
             }
             ready.push(candidate);
         }
         Ok(ready)
     }
+    /// Persist availability changes from the ordered fill line. Reading
+    /// the history deduplicates across full passes and supervisor restarts.
+    pub(super) fn note_resume_slot_wait(
+        &mut self,
+        candidate: &ResumeCandidate,
+        waiting: bool,
+        parallel: usize,
+        priority: Priority,
+        preceding_priority: Option<Priority>,
+    ) -> Result<()> {
+        // Observe cleanup without calling `may_lease`, which also clears
+        // its settled/pruned state. The actual resume keeps its lease lock.
+        let cleaning = self.host.cleanup().cleaning();
+        if waiting && cleanup::lock_cleaning(&cleaning).reserved(candidate.run.id()) {
+            return self.end_resume_slot_wait(&candidate.run, "cleanup");
+        }
+        let events = self.queue.run_events(candidate.run.id())?;
+        if let Some(kind) = crate::domain::resume::slot_wait_change(&events, waiting) {
+            self.queue.record_runtime_event_now(
+                candidate.run.id(),
+                kind,
+                json!({
+                    "reason": if waiting { "slots_full" } else { "slot_available" },
+                    "used_slots": self.used_slots(), "parallel": parallel,
+                    "priority": priority, "preceding_priority": preceding_priority,
+                    "resumes": {
+                        "counted": candidate.resumes.counted,
+                        "counted_limit": MAX_RESUME_ATTEMPTS,
+                        "remaining_counted": MAX_RESUME_ATTEMPTS.saturating_sub(candidate.resumes.counted),
+                        "conflict_only": candidate.resumes.conflict_only,
+                        "conflict_requests": candidate.resumes.conflict_requests,
+                        "conflict_only_limit": self.resume.config.conflict_only_limit,
+                        "kill_only": candidate.resumes.kill_only,
+                        "provider_only": candidate.resumes.provider_only,
+                    },
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn end_resume_slot_wait(&mut self, run: &TaskRun, reason: &str) -> Result<()> {
+        if crate::domain::resume::slot_wait_change(&self.queue.run_events(run.id())?, false)
+            .is_some()
+        {
+            self.queue.record_runtime_event_now(
+                run.id(),
+                EventKind::ResumeSlotWaitEnded,
+                json!({"reason": reason}),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Resume `candidate`, one of [`Self::resume_candidates`], in a free
     /// slot: the fill pass calls it in the order of its line (ADR-t1850-1).
     /// Close recorded wrappers left by earlier attempts before testing

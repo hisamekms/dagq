@@ -121,13 +121,15 @@ impl Supervisor<'_> {
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
         // missing program too (task 303).
-        let resumes = if self.used_slots() < parallel
-            && !self.landing.unresolved
+        let resumes = if !self.landing.unresolved
             && !self.landing.run_env_missing
             && !self.observation.ci().held()
         {
-            self.resume_candidates()?
+            self.resume_candidates(self.used_slots() < parallel)?
         } else {
+            for candidate in self.queue.runs_needing_session()? {
+                self.end_resume_slot_wait(&candidate.run, "resume_gate")?;
+            }
             Vec::new()
         };
         let recoveries = if self.used_slots() < parallel && !self.landing.unresolved {
@@ -247,11 +249,20 @@ impl Supervisor<'_> {
         // The claims of one priority run together: the claim loop takes
         // every candidate of that priority or higher, in its own order.
         let mut claimed_down_to: Option<Priority> = None;
+        let mut preceding_priority = None;
         for candidate in slot_order(line) {
             match candidate.item {
                 // A resume and a recovery job use the normal room only.
                 LineItem::Resume(resume) => {
-                    if self.used_slots() < parallel {
+                    let waiting = self.used_slots() >= parallel;
+                    self.note_resume_slot_wait(
+                        &resume,
+                        waiting,
+                        parallel,
+                        candidate.priority,
+                        preceding_priority,
+                    )?;
+                    if !waiting {
                         self.resume_run(*resume)?;
                     }
                 }
@@ -273,6 +284,7 @@ impl Supervisor<'_> {
                     }
                 }
             }
+            preceding_priority = Some(candidate.priority);
         }
         // The slots as the pass leaves them.
         self.claim

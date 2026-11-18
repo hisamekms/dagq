@@ -51,6 +51,7 @@ providerが使えない間の待ちで試行を費やさない。
 supervisorだけがresumeのwrapperを起動する。
 再開の候補は復旧job・claimと同じ列でslotを受ける（[supervise](supervise.md#slotを渡す順とclaim)、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
 人とinboxはtaskの優先度で再開待ちの順を変えられるが、走っている再開は止めない。
+slotの空きを待つ再開は待ちの間に一度だけ記録し、`status`のattentionでも他の保留と区別する（入口は`domain::resume::slot_wait`）。
 同じworktreeで2つ目のsessionを始めず、同じrunを2つのslotで進めない柵は`Supervisor::resume_candidates`が持つ。
 containerが使えなければhostで代行しない（[Container runtime](../container-runtime.md#fail-closedの境界)）。
 
@@ -76,7 +77,7 @@ containerが使えなければhostで代行しない（[Container runtime](../co
 開いたままの着地のaskがあるrunは、解消しても人の答えを待つ。
 大きなcontextから新しいsessionへ渡す境界は[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)、依頼文の切り方は[Prompt](prompt.md#次のturnの文の上限)が持つ。
 
-[放棄](background-recovery-job.md#1-runの放棄abandon)の例外を除き、この状態のrunはruntimeが再開を担い、`status`のattentionは`next: resuming (runtime)`を示す。
+[放棄](background-recovery-job.md#1-runの放棄abandon)の例外を除き、この状態のrunはruntimeが再開を担い、`status`のattentionは再開かslot待ちを示す。
 attentionの理由の入口は`application::health::attention`。
 sessionが変更不要と判断した場合はreceiptを`result: failed`と理由で書き直す。
 そのrunのintegrateはmainに触れず失敗し、worktreeは残り、[Triage](triage.md#triage-supervisor)へ渡る。
