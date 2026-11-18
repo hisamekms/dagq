@@ -7,6 +7,8 @@ created: 2026-09-22
 updated: 2026-09-22
 accepted_on: 2026-09-22
 amended_by:
+  - adr-t5283-3
+  - adr-t5283-1
   - adr-t615-1
 owners:
   - hisamekms
