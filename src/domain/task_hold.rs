@@ -468,6 +468,14 @@ pub struct HoldGuard {
     pub hold: HoldId,
 }
 
+/// Whether a run otherwise waiting to land counts as landing work: an
+/// open task hold excludes it from both rechecks and disk's landing-first
+/// gate. Read the existing hold guard each pass so release restores it;
+/// this neither interrupts a step already running nor discards its work.
+pub const fn waiting_to_land(waiting: bool, hold: Option<HoldGuard>) -> bool {
+    waiting && hold.is_none()
+}
+
 /// Whether an open hold refuses `step`: the claim, the resume, the start
 /// of a recovery job, the revise a review asks for and the start of a
 /// landing. A hold changes no plan, so `ready`, `edit`, `cancel` and the
@@ -954,6 +962,18 @@ mod tests {
     use crate::domain::event_kind::TASK_RELEASED;
     use crate::domain::event_kind::WORKSPACE_CLOSED;
     use serde_json::json;
+
+    #[test]
+    fn landing_work_leaves_on_hold_and_returns_on_release() {
+        let held = Some(HoldGuard {
+            task: TaskId::new(7),
+            hold: HoldId::new(4),
+        });
+        for (guard, expected) in [(None, true), (held, false), (None, true)] {
+            assert_eq!(waiting_to_land(true, guard), expected);
+            assert!(!waiting_to_land(false, guard));
+        }
+    }
 
     fn hold(settled: bool) -> TaskHold {
         TaskHold {

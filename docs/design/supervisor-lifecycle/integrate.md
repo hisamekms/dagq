@@ -195,6 +195,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## landing recheck
 
+taskがholdされているrunは再確認から除き、解除後のpassから再び対象にする。
+
 - `main`が最後のrecheckから動けば（dagqの外のpushも）、次のpassで着地待ちのrunを先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、ADR-t1310-1）。
 - 確かめ方、着地しなくなったrunのresumeとpark、結果の記録（ADR-t1311-1）、hostの分類の失敗とcontainerが無いときに判定しないこと（ADR-t639-1、ADR-t2424-1）、build outputの書き込みの確認（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9）は、`application::supervise::execution::recheck`のmodule docと`domain::recheck::TargetCheck`が持つ。
 - コードの分類で落ちたrunは、mainの木だけでも落ちればresumeせず着地を待ち続け、inboxに1回だけ知らせる（[ADR-t2141-1](../../adr/2026-10-20-t2141-1-recheck-checks-main-alone-before-resuming-runs-whose-command-failed.md)、`domain::recheck::MainCheck`・`kept_by_main`）。

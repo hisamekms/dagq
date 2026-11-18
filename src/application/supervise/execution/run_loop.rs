@@ -579,10 +579,13 @@ impl Supervisor<'_> {
                 // starts. Its slot already waits to land after resolution,
                 // so status alone must not exclude it from this pass's gate.
                 let awaiting_slot = slot.is_some_and(|s| matches!(s.phase, Phase::AwaitingSlot));
-                let waiting = awaiting_slot
-                    || (run.status() == RunStatus::AwaitingIntegration
-                        && slot.is_none()
-                        && RunHistory::from_events(&events).queued_to_land().is_some());
+                let waiting = crate::domain::task_hold::waiting_to_land(
+                    awaiting_slot
+                        || (run.status() == RunStatus::AwaitingIntegration
+                            && slot.is_none()
+                            && RunHistory::from_events(&events).queued_to_land().is_some()),
+                    self.queue.hold_guard(run.task_id())?,
+                );
                 moving.push(super::super::host_ops::disk::DiskTarget {
                     target: super::super::host_ops::moving_sizes::MovingTarget::of(
                         &run,

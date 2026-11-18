@@ -547,3 +547,135 @@ fn a_run_held_after_its_wrapper_started_and_before_its_first_turn_is_released_to
     );
     assert_inherit_by_the_person(&detail, &run, &head);
 }
+
+/// The same task hold excludes a queued landing from disk's waiting
+/// candidates and from recheck, without discarding its reviewed work.
+/// Release in the same supervisor restores both even on an unchanged main
+/// whose other waiting run has already been rechecked.
+#[test]
+fn a_task_hold_excludes_landing_work_and_release_restores_it_on_the_same_main() {
+    use crate::application::TaskStore;
+    use crate::domain::{ClaimOutcome, EventKind};
+    use std::sync::atomic::Ordering;
+    let wiring = Wiring::new(
+        "a_task_hold_excludes_landing_work_and_release_restores_it_on_the_same_main",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1));
+    wiring.git.allow_clean_merges();
+    // Restore two reviewed, unleased runs. The regression is the next
+    // supervisor pass, not the workers and reviews that produced them.
+    let mut queue = wiring.queue();
+    let mut runs = Vec::new();
+    for name in ["held", "other"] {
+        let task = wiring.ready_task(&[]);
+        let ClaimOutcome::Claimed { run } = queue.claim(&wiring.git.main()).unwrap() else {
+            panic!("claim the fixture task")
+        };
+        assert_eq!(run.task_id(), task);
+        let connection = super::harness::connect(&wiring.db);
+        connection.execute(
+            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2, worktree_path=?3, branch=?4, run_dir=?5 WHERE id=?1",
+            rusqlite::params![run.id().as_str(), wiring.git.main().as_str(), format!("/{name}/worktree"), name, format!("/{name}/run")],
+        ).unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::TurnFinished,
+                json!({"turn":1,"session_created":true}),
+            )
+            .unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ReviewFinished,
+                json!({"verdict":"concern"}),
+            )
+            .unwrap();
+        runs.push(queue.show(task).unwrap().runs[0].clone());
+    }
+    let run = &runs[0];
+    let other_run = &runs[1];
+    let task = run.task_id();
+    let other = other_run.task_id();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::IntegrationApproved,
+            json!({"ask_id":1}),
+        )
+        .unwrap();
+    Holds::new(&mut queue, &ActorContext::user(), &StaticPolicy)
+        .hold(&HoldTarget::Task(task), "wait for the person", None)
+        .unwrap();
+    wiring
+        .verifier
+        .set_config("[recheck]\ncommand = 'recheck-probe'\n");
+    wiring.git.move_main();
+    wiring.free.store(4 * (1 << 30), Ordering::SeqCst);
+    let mut released = false;
+    let mut observed = false;
+    wiring.supervise_once_while_stoppable(|queue, stop| {
+        let events = queue.all_events().unwrap();
+        if !released {
+            if !events
+                .iter()
+                .any(|e| e.kind.as_str() == "landing_recheck_finished")
+            {
+                return false;
+            }
+            let detail = queue.show(task).unwrap();
+            assert!(payloads(&detail, "landing_recheck_clean").is_empty());
+            assert_eq!(detail.runs[0].result_commit(), run.result_commit());
+            assert_eq!(detail.runs[0].worktree_path(), run.worktree_path());
+            assert_eq!(detail.runs[0].branch(), run.branch());
+            assert!(
+                queue
+                    .show(other)
+                    .unwrap()
+                    .events
+                    .iter()
+                    .any(|e| e.kind.as_str() == "landing_recheck_clean")
+            );
+            let held = events
+                .iter()
+                .find(|e| e.kind.as_str() == "claim_held")
+                .unwrap();
+            assert_eq!(held.payload["disk"]["moving"], 0);
+            assert_eq!(held.payload["disk"]["landing_waiting"], false);
+            assert!(!events.iter().any(|e| e.kind.as_str() == "landing_held"));
+            release(&wiring, queue, task, ReleaseChoice::default()).unwrap();
+            released = true;
+            return false;
+        }
+        let detail = queue.show(task).unwrap();
+        if !detail
+            .events
+            .iter()
+            .any(|e| e.kind.as_str() == "landing_recheck_clean")
+        {
+            return false;
+        }
+        let held = events
+            .iter()
+            .rev()
+            .find(|e| e.kind.as_str() == "landing_held")
+            .unwrap();
+        assert_eq!(held.payload["disk"]["landing_waiting"], true);
+        assert!(
+            held.payload["landing_candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["run"] == json!(run.id()) && c["waiting"] == true)
+        );
+        assert_eq!(queue.show(other).unwrap().runs[0].id(), other_run.id());
+        observed = true;
+        stop();
+        true
+    });
+    assert!(released && observed);
+}

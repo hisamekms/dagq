@@ -2538,6 +2538,30 @@ mod tests {
     }
 
     #[test]
+    fn task_hold_removes_landing_first_and_release_restores_it() {
+        use crate::domain::{
+            HoldId, TaskId,
+            task_hold::{HoldGuard, waiting_to_land},
+        };
+        let mut state = staged_state();
+        state.runs = vec![staged(DiskStage::Waiting, None)];
+        state.moving = 0;
+        let held = Some(HoldGuard {
+            task: TaskId::new(7),
+            hold: HoldId::new(4),
+        });
+        for (guard, expected) in [(held, None), (None, Some(ClaimsWaitReason::LandingFirst))] {
+            state.landing_waiting = waiting_to_land(true, guard);
+            assert_eq!(state.landing_waiting, guard.is_none());
+            assert_eq!(state.needs(0.05).claims_wait_reason, expected);
+            assert_eq!(
+                state.claims(0.05),
+                if guard.is_some() { Some(3) } else { Some(0) }
+            );
+        }
+    }
+
+    #[test]
     fn stage_claims_use_the_floor_and_keep_progress_order_and_no_samples() {
         let mut state = staged_state();
         let reserve = (228 * GIB).div_ceil(20);

@@ -141,8 +141,8 @@ enum Look {
     Check(Vec<Target>),
 }
 
-/// Whether main is the one this process last checked, and no landing of
-/// its own made a recheck `due`: an unmoved main costs no query.
+/// Whether main is the one this process last checked, with no landing or
+/// task release making a recheck `due`: an unmoved main costs no target query.
 fn unmoved(due: bool, rechecks: &Rechecks, main: &CommitSha) -> bool {
     !due && rechecks.checked.as_ref() == Some(main)
 }
@@ -472,7 +472,7 @@ pub(super) struct RecheckWatch {
 /// supervisor's waits for the next (landings during a recheck are checked
 /// after it, against the newest main, once), and what this process knows
 /// already (ADR-t1310-1): a main with a finished recheck, so an unmoved
-/// main costs no query, and a main with nothing to check for the runs that
+/// main costs no target query, and a main with nothing to check for the runs that
 /// waited then (`idle`), so a run that starts waiting later is looked at.
 #[derive(Default)]
 pub(super) struct Rechecks {
@@ -482,9 +482,42 @@ pub(super) struct Rechecks {
     locked_out: bool,
     checked: Option<CommitSha>,
     idle: Option<(CommitSha, Vec<(RunId, CommitSha)>)>,
+    /// Latest task release accounted for by an idle or finished recheck.
+    handled_release: Option<EventId>,
 }
 
 impl Rechecks {
+    /// A newer release can restore omitted landing work on the same main.
+    /// After a restart, a later finish in the queue accounts for the release.
+    fn release_to_check(
+        &mut self,
+        latest: Option<EventId>,
+        finished: impl FnOnce() -> Result<Option<EventId>>,
+    ) -> Result<Option<EventId>> {
+        let Some(release) = latest.filter(|id| Some(*id) > self.handled_release) else {
+            return Ok(None);
+        };
+        if finished()?.is_some_and(|id| id > release) {
+            self.handled_release = Some(release);
+            return Ok(None);
+        }
+        Ok(Some(release))
+    }
+
+    /// An idle pass has accounted for the release it saw even though it
+    /// writes no finished event. A pass blocked before deciding stays due.
+    fn remember_idle(
+        &mut self,
+        main: CommitSha,
+        seen: Vec<(RunId, CommitSha)>,
+        release: Option<EventId>,
+    ) {
+        self.idle = Some((main, seen));
+        if let Some(release) = release {
+            self.handled_release = Some(release);
+        }
+    }
+
     /// Whether a recheck runs, or a due one waits for the lock another
     /// supervisor's holds: the loop waits for it like a job.
     pub(super) const fn running(&self) -> bool {
@@ -600,6 +633,20 @@ impl Supervisor<'_> {
     /// they land as they are.
     fn try_recheck(&mut self, due: bool) -> Result<Start> {
         let main = self.repository.main_head()?;
+        let latest_release = self
+            .queue
+            .latest_event_of(EventKind::TaskReleased.as_str())?
+            .map(|event| event.id);
+        let queue = &self.queue;
+        let finished = || queue.latest_event_of(recheck::LANDING_RECHECK_FINISHED);
+        let release = self
+            .landing
+            .rechecks
+            .release_to_check(latest_release, || Ok(finished()?.map(|event| event.id)))?;
+        let due = due || release.is_some();
+        if release.is_some() {
+            self.landing.rechecks.idle = None;
+        }
         if unmoved(due, &self.landing.rechecks, &main) {
             return Ok(Start::Nothing);
         }
@@ -608,8 +655,10 @@ impl Supervisor<'_> {
             .iter()
             .map(|target| (target.run_id.clone(), target.head.clone()))
             .collect();
-        let queue = &self.queue;
-        let finished = || queue.latest_event_of(recheck::LANDING_RECHECK_FINISHED);
+        let finished = || {
+            self.queue
+                .latest_event_of(recheck::LANDING_RECHECK_FINISHED)
+        };
         let targets = match look_before_lock(
             due,
             &self.landing.rechecks,
@@ -623,7 +672,7 @@ impl Supervisor<'_> {
                 return Ok(Start::Nothing);
             }
             Look::Idle => {
-                self.landing.rechecks.idle = Some((main, seen));
+                self.landing.rechecks.remember_idle(main, seen, release);
                 return Ok(Start::Nothing);
             }
             Look::Check(targets) => targets,
@@ -672,11 +721,14 @@ impl Supervisor<'_> {
         let finished = self
             .queue
             .latest_events_of(recheck::LANDING_RECHECK_FINISHED, CHECKED_LOOKBACK)?;
-        let checked =
-            recheck::checked_by(&finished, main.as_str(), self.registration.token().as_str());
+        let checked = if release.is_some() {
+            CheckedBy::No
+        } else {
+            recheck::checked_by(&finished, main.as_str(), self.registration.token().as_str())
+        };
         let targets = left_to_check(judged, checked);
         if targets.is_empty() {
-            self.landing.rechecks.idle = Some((main, seen));
+            self.landing.rechecks.remember_idle(main, seen, release);
             return Ok(Start::Nothing);
         }
         let landed = self.landing_at(&main)?;
@@ -707,7 +759,9 @@ impl Supervisor<'_> {
     /// integration with a reviewed head that nobody leases (waiting for an
     /// ask's answer or for a recover), and those this supervisor holds in
     /// a slot to land. Runs in review or revise, and runs another process
-    /// leases, are left to their own checks.
+    /// leases, are left to their own checks. Task-held runs are omitted
+    /// without changing their work or reviewed head; release makes them
+    /// eligible again even against a main already checked.
     fn recheck_targets(&mut self) -> Result<Vec<Target>> {
         let mut targets = Vec::new();
         for run in self
@@ -729,6 +783,12 @@ impl Supervisor<'_> {
                 }
                 Some(_) => continue,
             };
+            if !crate::domain::task_hold::waiting_to_land(
+                true,
+                self.queue.hold_guard(run.task_id())?,
+            ) {
+                continue;
+            }
             targets.push(Target {
                 run_id: run.id().clone(),
                 head: head.clone(),
@@ -1909,6 +1969,104 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn a_release_after_the_last_check_invalidates_the_same_main_cache() {
+        let mut rechecks = Rechecks::default();
+        let release = Some(EventId::new(2));
+        assert_eq!(
+            rechecks.release_to_check(None, || unreachable!()).unwrap(),
+            None
+        );
+        assert_eq!(
+            rechecks.release_to_check(release, || Ok(None)).unwrap(),
+            release
+        );
+        assert_eq!(
+            rechecks
+                .release_to_check(release, || Ok(Some(EventId::new(1))))
+                .unwrap(),
+            release
+        );
+        assert_eq!(
+            rechecks
+                .release_to_check(release, || Ok(Some(EventId::new(3))))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            rechecks
+                .release_to_check(release, || unreachable!())
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_release_with_no_targets_is_handled_without_a_finished_event() {
+        let main = sha('a');
+        let mut rechecks = Rechecks {
+            checked: Some(main.clone()),
+            ..Rechecks::default()
+        };
+        let release = Some(EventId::new(2));
+        let pending = rechecks.release_to_check(release, || Ok(None)).unwrap();
+        assert!(!unmoved(pending.is_some(), &rechecks, &main));
+        assert!(matches!(
+            look_before_lock(
+                pending.is_some(),
+                &rechecks,
+                &main,
+                vec![],
+                || unreachable!(),
+                "me"
+            )
+            .unwrap(),
+            Look::Idle
+        ));
+        rechecks.remember_idle(main.clone(), vec![], pending);
+
+        let pending = rechecks
+            .release_to_check(release, || unreachable!())
+            .unwrap();
+        assert!(unmoved(pending.is_some(), &rechecks, &main));
+        let newer = Some(EventId::new(3));
+        assert_eq!(
+            rechecks.release_to_check(newer, || Ok(None)).unwrap(),
+            newer
+        );
+    }
+
+    #[test]
+    fn a_release_with_only_settled_targets_returns_to_the_idle_shortcut() {
+        let main = sha('a');
+        let mut rechecks = Rechecks::default();
+        let release = Some(EventId::new(2));
+        let pending = rechecks.release_to_check(release, || Ok(None)).unwrap();
+        let run = target("settled", 'b', false);
+        assert!(left_to_check(vec![(run.clone(), true)], CheckedBy::No).is_empty());
+        rechecks.remember_idle(
+            main.clone(),
+            vec![(run.run_id.clone(), run.head.clone())],
+            pending,
+        );
+
+        let pending = rechecks
+            .release_to_check(release, || unreachable!())
+            .unwrap();
+        assert!(matches!(
+            look_before_lock(
+                pending.is_some(),
+                &rechecks,
+                &main,
+                vec![run],
+                || unreachable!(),
+                "me"
+            )
+            .unwrap(),
+            Look::Idle
+        ));
     }
 
     /// The write check makes the build output, creates its file in it and

@@ -108,6 +108,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
   段ごとのピークは方式によらず記録する（`domain::disk::StagePeaks`）。
 - 動くrunが0本なら最低ラインだけで進め、着地待ちがあればclaimより着地が先に進む。
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
+  taskがholdされているrunはこの着地待ちから除き、解除後のpassから再び数える。
 - 予約はbuildするか・着地のレーンにいるかで付け替え、残りは予約量から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いて数える。
   待ちのrunは予約を持たず今の大きさだけを占め、INTEGRATORの枠は着地待ちの有無によらず常に取る。
   信頼できない今の大きさ（量れない・古い・別のrun）は予約量のまま数える。
