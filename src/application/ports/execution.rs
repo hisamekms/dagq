@@ -3147,12 +3147,18 @@ pub trait RunnerRefs {
     fn read(&self, run: &str, generation: i64) -> Result<Option<String>>;
     fn delete(&self, run: &str, generation: i64) -> Result<()>;
     fn exists(&self, run: &str, generation: i64) -> Result<bool>;
+    /// Delete landing candidates only after the run's retention decision.
+    fn delete_landing(&self, run: &str, generation: i64) -> Result<()>;
 }
 
 /// Snapshot and recovery seam of the team control loop. A lost lease stays
 /// recorded at its generation; recovery is the existing orphan-run transition,
 /// independent of host pids. The local run_leases path never uses this port.
 pub trait RunnerTakeoverStore: RunnerLeaseStore {
+    /// Terminal retention facts, read afresh on each pass. The control loop
+    /// remembers successful cleanup in memory; a failed deletion retries, and
+    /// a restart may safely reconfirm absence through idempotent DELETEs.
+    fn runner_ref_ends(&self) -> Result<Vec<crate::domain::run_refs::End>>;
     fn runner_takeovers(&self) -> Result<Vec<crate::domain::runner_takeover::Takeover>>;
     fn runner_registration(
         &self,

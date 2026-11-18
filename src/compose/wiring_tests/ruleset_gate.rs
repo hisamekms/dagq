@@ -68,6 +68,7 @@ fn backend(wiring: &Wiring, gate: Option<Arc<RulesetGate>>) -> SqliteServiceBack
         write_line: None,
         heavy_reads: None,
         ruleset_gate: gate,
+        github_refs: None,
     }
 }
 

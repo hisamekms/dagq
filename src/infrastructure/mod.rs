@@ -38,6 +38,7 @@ mod findings;
 mod follow_up_membership;
 pub mod git_binary;
 pub mod github_app;
+pub mod github_refs;
 pub mod github_rulesets;
 mod goal_reviews;
 mod headless_jobs;

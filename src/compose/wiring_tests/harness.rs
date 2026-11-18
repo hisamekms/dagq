@@ -817,6 +817,7 @@ impl Wiring {
                 write_line: None,
                 heavy_reads: None,
                 ruleset_gate: None,
+                github_refs: None,
             },
             tokens: self.tokens.clone(),
             processes: self.processes.clone(),

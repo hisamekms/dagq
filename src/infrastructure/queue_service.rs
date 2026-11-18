@@ -4088,6 +4088,9 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         .transpose()?;
     let oidc_configured = config.value("DAGQ_OIDC_ISSUER").is_some();
     let rulesets = super::github_rulesets::ruleset_gate(&config, options.generators.clock.clone())?;
+    let refs =
+        super::github_refs::GithubRefs::from_deployment(&config, options.generators.clock.clone())?
+            .map(Arc::new);
     let http = config.http.map(HttpStart::Deployment);
     serve_on(
         options,
@@ -4097,6 +4100,7 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
             actions,
             images,
             rulesets,
+            refs,
         },
         oidc_configured,
     )
@@ -4214,6 +4218,7 @@ struct Exchanges {
     images: Option<ImageExchange>,
     /// The ruleset gate of a deployment with a runner App.
     rulesets: Option<Arc<crate::application::queue_service::RulesetGate>>,
+    refs: Option<Arc<super::github_refs::GithubRefs>>,
 }
 
 /// How often the ruleset watch looks at the gate and records its hold.
@@ -4249,6 +4254,40 @@ fn watch_rulesets(
         .spawn(watch)
     {
         warn!("the ruleset watch did not start, so runners get no work: {error}");
+    }
+}
+
+/// Retention and hand-over retry independently of runner polls: a finished
+/// run still gets cleaned when no runner asks for more work. Each pass uses
+/// fenced queue entries; local deployments never start this watch.
+fn watch_runner_refs(
+    refs: Arc<super::github_refs::GithubRefs>,
+    backend: Arc<SqliteServiceBackend>,
+    stop: Arc<AtomicBool>,
+) {
+    let watch = move || {
+        let mut cleanup = crate::application::supervise::RunnerRefCleanup::default();
+        while !stop.load(Ordering::SeqCst) {
+            if backend.is_write_leader() {
+                let mut queue = runner_refs::RefQueue(backend.clone());
+                let result = crate::application::supervise::runner_recovery_pass(
+                    &mut queue,
+                    &*refs,
+                    backend.now_ms(),
+                    &mut cleanup,
+                );
+                if let Err(error) = result {
+                    warn!("runner refs will retry: {error:#}");
+                }
+            }
+            thread::sleep(RULESET_WATCH_EVERY);
+        }
+    };
+    if let Err(error) = thread::Builder::new()
+        .name("runner-refs-watch".into())
+        .spawn(watch)
+    {
+        warn!("runner refs watch did not start: {error}");
     }
 }
 
@@ -4416,11 +4455,15 @@ accepts: schema {} to {}",
         doctor: Some(options.doctor.clone()),
         write_line: Some(write_line.clone()),
         ruleset_gate: exchanges.rulesets.clone(),
+        github_refs: exchanges.refs.clone(),
     });
     // The rulesets are read on their own thread from the start, never on
     // the write line; only the hold's record goes on the line.
     if let Some(gate) = exchanges.rulesets.clone() {
         watch_rulesets(gate, backend.clone(), options.stop.clone());
+    }
+    if let Some(refs) = exchanges.refs.clone() {
+        watch_runner_refs(refs, backend.clone(), options.stop.clone());
     }
     // Before the first request is accepted when the service leads at
     // once; else at the turn of the loop below that first finds it leads.
@@ -5442,6 +5485,8 @@ pub struct SqliteServiceBackend<B: QueueStorage = SqliteStorage> {
     /// starts with a runner App ([`super::github_rulesets::ruleset_gate`]);
     /// `None` elsewhere, where a runner's pull gets no work.
     pub ruleset_gate: Option<Arc<crate::application::queue_service::RulesetGate>>,
+    /// Deployment-only refs and trusted main-head reader; absent for local queues.
+    pub github_refs: Option<Arc<super::github_refs::GithubRefs>>,
 }
 
 /// The keys ([`Principal::credential_key`]) of the tokens a service
@@ -5563,6 +5608,12 @@ where
     }
     fn runner_hash(&self, value: &str) -> Result<String> {
         Ok(sha256_hex(value.as_bytes()))
+    }
+    fn runner_main_head(&self) -> Result<crate::domain::CommitSha> {
+        self.github_refs
+            .as_ref()
+            .context("main head port is not configured")?
+            .main_head()
     }
     fn runner_rulesets(&self) -> std::result::Result<(), crate::domain::ruleset_gate::Unverified> {
         self.ruleset_gate.as_ref().map_or(
@@ -6388,6 +6439,7 @@ impl InProcessCaller {
                 write_line: None,
                 heavy_reads: None,
                 ruleset_gate: None,
+                github_refs: None,
             }),
             queue_dir,
             Arc::new(read_token),
@@ -6778,6 +6830,7 @@ impl InProcessControlCaller {
                 write_line: None,
                 heavy_reads: None,
                 ruleset_gate: None,
+                github_refs: None,
             },
             control,
         }
@@ -7892,6 +7945,7 @@ again once it ends"
     }
 }
 
+mod runner_refs;
 mod storage;
 mod write_line;
 pub use storage::{QueueStorage, SqliteStorage};
@@ -8552,6 +8606,7 @@ mod tests {
             write_line: None,
             heavy_reads: None,
             ruleset_gate: None,
+            github_refs: None,
         };
         let backend = Arc::new(backend);
         let hello = serde_json::to_vec(&ServiceRequest {

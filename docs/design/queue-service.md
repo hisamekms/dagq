@@ -47,7 +47,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 
 ファイルの配置と排他、生存の判定は`infrastructure::queue_service`のmodule doc、socketの実pathの決め方は同moduleの`socket_path`。
 止めるsignalはserviceが答えたpidか、同moduleの`serves`が確かめた記録のpidにだけ送る。
-hostのtokenはworktreeとrun dirの外に置き、呼び出し元にはfileのpathを渡し、値はenvにもargvにも置かない（ADR-t1233-4決定4）。
+hostのtokenはworktreeとrun dirの外に置き、呼び出し元にはfileのpathを渡し、値はenvにもargvにも置かない。
 
 tokenの記録`tokens/<値のsha256>.json`の欄と、人のtokenの期限は同moduleの`TokenRecord`のdoc comment。
 
@@ -59,7 +59,7 @@ tokenの記録`tokens/<値のsha256>.json`の欄と、人のtokenの期限は同
 上限を超えてもsupervisorのpassは止めず、育つ読み取りは区切る。
 重い読み取りの同時実行の制限は`application::heavy_reads`が持ち、書き込みとsupervisorの周期の転送を妨げない。
 
-transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
+transactionはserviceの中で完結し、クライアントとの往復で分けない。
 書き込みの列への入口は`on_write_line`と`ServiceWriteLine`。
 serviceの書き込みは1本の列で1つずつ確定し、読み取りは列を待たない。
 書き込みはprincipalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
@@ -109,6 +109,7 @@ runnerの仕事は制御側が選んで渡し、runnerはrunを指定できな�
 チームの版の割り当ては、rulesetの規則・対象・enforcementと全てのactorのbypassを確かめられた間だけ行い、その読みは書き込みの列の外で行う（[ADR-t4332-1](../adr/2026-11-10-t4332-1-ruleset-gate-checks-rules-targets-enforcement-and-every-bypass.md)、入口は`application::queue_service::RulesetGate`）。
 runnerのleaseの喪失と引き継ぎの入口は`application::supervise::runner_recovery_pass`。
 受け入れたheadは、mainに入るかrunが取り消されるまで、いつも少なくとも1つの確かめたrefから届く。
+世代のrefの作成と削除は制御側がmain用のAppで行う。
 
 検査の順と拒否の記録・応答は`application::queue_service::QueueService::handle`、storeの型付き拒否の応答は同moduleの`respond`が持つ。
 認可はCLIと同じapplicationの境界をprincipalのactorでservice側で通す。

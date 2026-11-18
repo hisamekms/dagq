@@ -27,6 +27,18 @@ pub trait GithubApi: Send + Sync {
         body: Option<&Value>,
         raw: bool,
     ) -> Result<String, ConfigUnavailable>;
+    /// Status-preserving mutations for ref adapters. Legacy fakes may keep the
+    /// success-only implementation; production retains GitHub's refusal status.
+    fn request_status(
+        &self,
+        method: &str,
+        url: &str,
+        bearer: &AppToken,
+        body: Option<&Value>,
+    ) -> Result<(u16, String), ConfigUnavailable> {
+        self.request(method, url, bearer, body, false)
+            .map(|text| (200, text))
+    }
     /// A JSON GET answered with any HTTP status and its body (bounded as
     /// [`Self::request`]'s), for a reader that tells refusals apart. Only a
     /// transport failure is an error. A fake without statuses answers 200.
@@ -90,6 +102,31 @@ impl GithubApi for HttpsGithub {
         }
         bounded_body(response)
     }
+    fn request_status(
+        &self,
+        method: &str,
+        url: &str,
+        bearer: &AppToken,
+        body: Option<&Value>,
+    ) -> Result<(u16, String), ConfigUnavailable> {
+        let request = match method {
+            "POST" => self.0.post(url),
+            "DELETE" => self.0.delete(url).force_send_body(),
+            _ => return Err(ConfigUnavailable),
+        };
+        let response = request
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("Authorization", bearer_header(bearer)?)
+            .header("User-Agent", "dagq")
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Type", "application/json")
+            .send(body.map_or_else(String::new, Value::to_string))
+            .map_err(|_| ConfigUnavailable)?;
+        let status = response.status().as_u16();
+        Ok((status, bounded_body(response)?))
+    }
     fn get_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
         let response = self
             .0
@@ -132,7 +169,9 @@ fn bearer_header(token: &AppToken) -> Result<ureq::http::HeaderValue, ConfigUnav
     Ok(value)
 }
 
-/// Owns only the runner App's signing key. The main App settings are never read.
+/// Runner-facing App authentication. `from_deployment` selects only the runner
+/// settings; the private MainApp reuses its signing/issuance primitive while
+/// exposing no repository-read methods.
 /// The installation is discovered for this repository using an App JWT; issuing
 /// a token is a separate port so lease issuance can supply its own reduced scope.
 pub struct RunnerApp {
@@ -346,4 +385,34 @@ pub fn repository_startup_file(
             },
         ))
     })
+}
+
+/// Main App credentials never implement the runner token port. They are kept
+/// behind the ref writer, scoped to one repository and the main App's
+/// contents/workflows write permissions. Reads use RunnerApp.
+pub(super) struct MainApp(RunnerApp);
+impl MainApp {
+    pub(super) fn from_deployment(
+        config: &DeploymentConfig,
+        api: Arc<dyn GithubApi>,
+    ) -> Result<Self, ConfigUnavailable> {
+        Ok(Self(RunnerApp::new(
+            config
+                .value("DAGQ_GITHUB_MAIN_APP_ID")
+                .ok_or(ConfigUnavailable)?,
+            config
+                .value("DAGQ_GITHUB_MAIN_APP_KEY")
+                .ok_or(ConfigUnavailable)?,
+            config
+                .value("DAGQ_GITHUB_REPOSITORY")
+                .ok_or(ConfigUnavailable)?,
+            config
+                .value("DAGQ_GITHUB_API_BASE_URL")
+                .unwrap_or("https://api.github.com"),
+            api,
+        )?))
+    }
+    pub(super) fn issue(&self, scope: &Value, now: i64) -> Result<AppToken, ConfigUnavailable> {
+        self.0.issue(scope, now)
+    }
 }

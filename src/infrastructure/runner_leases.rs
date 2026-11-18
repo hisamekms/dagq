@@ -289,6 +289,14 @@ impl<E: TransactionEntries> crate::application::RunnerTakeoverStore
 where
     Self: RunnerLeaseStore,
 {
+    fn runner_ref_ends(&self) -> Result<Vec<crate::domain::run_refs::End>> {
+        let tx = self.read_entry("runner_ref_ends")?;
+        tx.query_map(
+            "SELECT r.id, r.status, t.status, l.generation FROM runner_leases l JOIN task_runs r ON r.id=l.run_id JOIN tasks t ON t.id=r.task_id ORDER BY r.id",
+            sql_params![],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)),
+        )?.into_iter().map(|(id, status, task, generation)| Ok(crate::domain::run_refs::End {run: id, status: status.parse()?, task_canceled: task == "canceled", generation})).collect()
+    }
     fn runner_takeovers(&self) -> Result<Vec<crate::domain::runner_takeover::Takeover>> {
         let tx = self.read_entry("runner_takeovers")?;
         let ids: Vec<String> = tx.query_map(

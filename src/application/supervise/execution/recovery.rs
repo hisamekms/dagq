@@ -2000,6 +2000,15 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
     Ok(stopped)
 }
 
+/// Successful terminal cleanup confirmations for one control loop. A completed
+/// run/generation is skipped until process restart; failed or partial deletion
+/// is never remembered. Restart may repeat idempotent DELETEs once, but normal
+/// polling does not spend API quota on runs whose refs are already absent.
+#[derive(Default)]
+pub struct RunnerRefCleanup {
+    completed: std::collections::BTreeSet<(String, i64)>,
+}
+
 /// One bounded pass of the team control loop, before runner selection. There
 /// are no host process, session, filesystem or build ports here. GitHub effects
 /// and their durable marks are deliberately separate: after any failed call
@@ -2010,9 +2019,42 @@ pub fn runner_recovery_pass(
     queue: &mut dyn crate::application::RunnerTakeoverStore,
     refs: &dyn crate::application::RunnerRefs,
     now_ms: i64,
+    cleanup: &mut RunnerRefCleanup,
 ) -> Result<()> {
     let mut failure = None;
+    let ends = queue.runner_ref_ends()?;
+    for end in &ends {
+        if crate::domain::run_refs::may_cleanup(end.status, end.task_canceled) {
+            let key = (end.run.clone(), end.generation);
+            if cleanup.completed.contains(&key) {
+                continue;
+            }
+            let mut complete = true;
+            // Include an unmarked successor created before a crash. Remember
+            // completion only when both namespaces are confirmed absent.
+            for generation in 1..=end.generation.saturating_add(1) {
+                for result in [
+                    refs.delete(&end.run, generation),
+                    refs.delete_landing(&end.run, generation),
+                ] {
+                    if let Err(error) = result {
+                        complete = false;
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+            if complete {
+                cleanup.completed.insert(key);
+            }
+        }
+    }
     for facts in queue.runner_takeovers()? {
+        if ends.iter().any(|end| {
+            end.run == facts.lease.run_id
+                && crate::domain::run_refs::may_cleanup(end.status, end.task_canceled)
+        }) {
+            continue;
+        }
         // An unavailable ref must not keep other runners' expiries unobserved.
         if let Err(error) = runner_takeover_one(queue, refs, now_ms, facts) {
             failure.get_or_insert(error);
@@ -2031,6 +2073,9 @@ fn runner_takeover_one(
         runner_lease,
         runner_takeover::{self, RefLook, Step},
     };
+    if facts.status == crate::domain::RunStatus::Integrated {
+        return Ok(());
+    }
     let id = facts.lease.run_id.clone();
     let runner = queue.runner_registration(&facts.lease.runner_id)?;
     let owner = runner

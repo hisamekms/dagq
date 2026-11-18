@@ -6,7 +6,7 @@ use crate::{
     application::{
         runner_enroll::{Credential, RunnerCredentialStore, RunnerExchange},
         runner_process::{RunnerPorts, run},
-        supervise::runner_recovery_pass,
+        supervise::{RunnerRefCleanup, runner_recovery_pass},
         *,
     },
     domain::{
@@ -112,15 +112,29 @@ struct Refs {
     calls: RefCell<Vec<String>>,
     wrong: Cell<bool>,
     fail: Cell<Option<&'static str>>,
+    failure_kind: Cell<Option<crate::infrastructure::github_refs::RefFailure>>,
+    landing: RefCell<BTreeMap<i64, String>>,
 }
 impl Refs {
     fn call(&self, verb: &str, generation: i64) -> Result<()> {
         self.calls.borrow_mut().push(format!("{verb}{generation}"));
-        anyhow::ensure!(self.fail.get() != Some(verb), "injected {verb} failure");
+        if self.fail.get() == Some(verb) {
+            return Err(self
+                .failure_kind
+                .get()
+                .unwrap_or(crate::infrastructure::github_refs::RefFailure::Temporary)
+                .into());
+        }
         Ok(())
     }
 }
 impl RunnerRefs for Refs {
+    fn delete_landing(&self, _run: &str, generation: i64) -> Result<()> {
+        self.call("delete_landing", generation)?;
+        self.landing.borrow_mut().remove(&generation);
+        Ok(())
+    }
+
     fn create(&self, _: &str, g: i64, head: &str) -> Result<()> {
         self.call("create", g)?;
         self.heads.borrow_mut().entry(g).or_insert(head.into());
@@ -276,6 +290,7 @@ impl RunnerWork for Work {
 #[test]
 fn expiry_recovers_then_verified_successor_assigns_elsewhere_and_old_runner_discards() {
     let (mut q, clock) = fixture();
+    let mut cleanup = RunnerRefCleanup::default();
     let Outcome::Assignment(Some(first)) = poll(&q, "a") else {
         panic!("first grant")
     };
@@ -295,13 +310,13 @@ fn expiry_recovers_then_verified_successor_assigns_elsewhere_and_old_runner_disc
     q.verify_runner_ref(id.as_str(), 1, &h, 1_000_000).unwrap();
     // The old ref may have advanced beyond the accepted H: never read its tip.
     refs.heads.borrow_mut().insert(1, "unaccepted".into());
-    runner_recovery_pass(&mut q, &refs, 1_089_999).unwrap();
+    runner_recovery_pass(&mut q, &refs, 1_089_999, &mut cleanup).unwrap();
     assert_eq!(
         q.runner_lease(id.as_str()).unwrap().unwrap().state,
         LeaseState::Held
     );
     clock.0.store(1_090_000, Ordering::SeqCst);
-    runner_recovery_pass(&mut q, &refs, 1_090_000).unwrap();
+    runner_recovery_pass(&mut q, &refs, 1_090_000, &mut cleanup).unwrap();
     assert_eq!(
         q.runner_lease(id.as_str()).unwrap().unwrap().state,
         LeaseState::Lost
@@ -316,13 +331,13 @@ fn expiry_recovers_then_verified_successor_assigns_elsewhere_and_old_runner_disc
     assert!(matches!(poll(&q, "b"), Outcome::Assignment(None)));
     resume(&mut q, &id);
     refs.wrong.set(true);
-    runner_recovery_pass(&mut q, &refs, 1_090_001).unwrap();
+    runner_recovery_pass(&mut q, &refs, 1_090_001, &mut cleanup).unwrap();
     assert_eq!(q.verified_ref(id.as_str()).unwrap().unwrap().generation, 1);
     assert!(matches!(poll(&q, "b"), Outcome::Assignment(None)));
     assert!(refs.heads.borrow().contains_key(&1));
     refs.wrong.set(false);
     refs.calls.borrow_mut().clear();
-    runner_recovery_pass(&mut q, &refs, 1_090_002).unwrap();
+    runner_recovery_pass(&mut q, &refs, 1_090_002, &mut cleanup).unwrap();
     assert_eq!(*refs.calls.borrow(), ["create2", "read2"]);
     assert_eq!(q.verified_ref(id.as_str()).unwrap().unwrap().generation, 2);
     assert!(refs.heads.borrow().contains_key(&1));
@@ -331,7 +346,7 @@ fn expiry_recovers_then_verified_successor_assigns_elsewhere_and_old_runner_disc
     };
     assert_eq!(next.generation, 2);
     assert_eq!(next.run.id(), &id);
-    runner_recovery_pass(&mut q, &refs, 1_090_003).unwrap();
+    runner_recovery_pass(&mut q, &refs, 1_090_003, &mut cleanup).unwrap();
     assert_eq!(*refs.calls.borrow(), ["create2", "read2", "delete1"]);
     assert_eq!(refs.heads.borrow().get(&2), Some(&h));
     let returning = Returning {
@@ -360,6 +375,7 @@ fn expiry_recovers_then_verified_successor_assigns_elsewhere_and_old_runner_disc
 fn revoked_or_disabled_runner_recovers_without_pids_and_headless_run_needs_no_ref() {
     for disable_owner in [false, true] {
         let (mut q, _) = fixture();
+        let mut cleanup = RunnerRefCleanup::default();
         let Outcome::Assignment(Some(first)) = poll(&q, "a") else {
             panic!("grant")
         };
@@ -373,7 +389,7 @@ fn revoked_or_disabled_runner_recovers_without_pids_and_headless_run_needs_no_re
         )
         .unwrap();
         let refs = Refs::default();
-        runner_recovery_pass(&mut q, &refs, 1_000_001).unwrap();
+        runner_recovery_pass(&mut q, &refs, 1_000_001, &mut cleanup).unwrap();
         assert_eq!(
             q.run(first.run.id()).unwrap().status(),
             RunStatus::Interrupted
@@ -387,7 +403,7 @@ fn revoked_or_disabled_runner_recovers_without_pids_and_headless_run_needs_no_re
         );
         execute(&q, "UPDATE members SET disabled_at=NULL").unwrap();
         resume(&mut q, first.run.id());
-        runner_recovery_pass(&mut q, &refs, 1_000_002).unwrap();
+        runner_recovery_pass(&mut q, &refs, 1_000_002, &mut cleanup).unwrap();
         assert!(refs.calls.borrow().is_empty());
         assert!(matches!(poll(&q, "b"), Outcome::Assignment(Some(_))));
     }
@@ -397,6 +413,7 @@ fn revoked_or_disabled_runner_recovers_without_pids_and_headless_run_needs_no_re
 fn failures_keep_the_old_ref_and_retry_readback_before_assignment() {
     for failure in ["create", "read", "mark", "delete"] {
         let (mut q, clock) = fixture();
+        let mut cleanup = RunnerRefCleanup::default();
         let Outcome::Assignment(Some(first)) = poll(&q, "a") else {
             panic!("grant")
         };
@@ -416,7 +433,7 @@ fn failures_keep_the_old_ref_and_retry_readback_before_assignment() {
         let refs = Refs::default();
         refs.heads.borrow_mut().insert(1, h.clone());
         clock.0.store(1_090_000, Ordering::SeqCst);
-        runner_recovery_pass(&mut q, &refs, 1_090_000).unwrap();
+        runner_recovery_pass(&mut q, &refs, 1_090_000, &mut cleanup).unwrap();
         resume(&mut q, &id);
         if failure == "mark" {
             execute(&q, "CREATE TRIGGER fail_mark BEFORE INSERT ON runner_lease_records WHEN NEW.generation=2 BEGIN SELECT RAISE(ABORT,'injected mark failure'); END").unwrap();
@@ -424,7 +441,7 @@ fn failures_keep_the_old_ref_and_retry_readback_before_assignment() {
             refs.fail.set(Some(failure));
         }
         if failure != "delete" {
-            assert!(runner_recovery_pass(&mut q, &refs, 1_090_001).is_err());
+            assert!(runner_recovery_pass(&mut q, &refs, 1_090_001, &mut cleanup).is_err());
             assert_eq!(q.verified_ref(id.as_str()).unwrap().unwrap().generation, 1);
             assert!(matches!(poll(&q, "b"), Outcome::Assignment(None)));
             assert!(refs.heads.borrow().contains_key(&1));
@@ -433,18 +450,18 @@ fn failures_keep_the_old_ref_and_retry_readback_before_assignment() {
                 execute(&q, "DROP TRIGGER fail_mark").unwrap();
             }
         }
-        runner_recovery_pass(&mut q, &refs, 1_090_002).unwrap();
+        runner_recovery_pass(&mut q, &refs, 1_090_002, &mut cleanup).unwrap();
         let Outcome::Assignment(Some(next)) = poll(&q, "b") else {
             panic!("grant after durable mark")
         };
         assert_eq!(next.generation, 2);
         if failure == "delete" {
             refs.fail.set(Some("delete"));
-            assert!(runner_recovery_pass(&mut q, &refs, 1_090_003).is_err());
+            assert!(runner_recovery_pass(&mut q, &refs, 1_090_003, &mut cleanup).is_err());
             assert_eq!(refs.heads.borrow().get(&2), Some(&h));
             refs.fail.set(None);
         }
-        runner_recovery_pass(&mut q, &refs, 1_090_004).unwrap();
+        runner_recovery_pass(&mut q, &refs, 1_090_004, &mut cleanup).unwrap();
         assert_eq!(*refs.heads.borrow(), BTreeMap::from([(2, h)]));
         assert!(!refs.calls.borrow().iter().any(|c| c == "read1"));
     }
@@ -482,4 +499,122 @@ fn loss_rechecks_a_renewal_and_recovery_rechecks_the_generation() {
     q.grant_runner_lease(id, "b", 1_090_001).unwrap();
     assert!(q.recover_runner(&lost).is_err());
     assert_eq!(q.runner_lease(id).unwrap().unwrap().generation, 2);
+}
+
+#[test]
+fn terminal_ref_cleanup_retries_and_keeps_unfinished_history() {
+    for canceled in [false, true] {
+        let (mut q, _) = fixture();
+        let mut cleanup = RunnerRefCleanup::default();
+        let Outcome::Assignment(Some(first)) = poll(&q, "a") else {
+            panic!("grant")
+        };
+        let h = "b".repeat(40);
+        q.report_runner_lease(
+            first.run.id().as_str(),
+            Report {
+                runner_id: "a",
+                generation: 1,
+            },
+            Some(&h),
+            1_000_000,
+        )
+        .unwrap();
+        q.verify_runner_ref(first.run.id().as_str(), 1, &h, 1_000_000)
+            .unwrap();
+        let refs = Refs::default();
+        refs.heads.borrow_mut().extend([(1, h.clone()), (2, h)]);
+        refs.landing.borrow_mut().insert(1, "M".into());
+        runner_recovery_pass(&mut q, &refs, 1_000_000, &mut cleanup).unwrap();
+        assert_eq!(refs.heads.borrow().len(), 2);
+        assert_eq!(refs.landing.borrow().len(), 1);
+        assert!(refs.calls.borrow().is_empty());
+        // Persist the terminal fact (not a worker's success receipt). Generation
+        // 2 has no durable verification mark: it represents a crash after POST.
+        if canceled {
+            execute(&q, "UPDATE tasks SET status='canceled'").unwrap();
+        } else {
+            execute(
+                &q,
+                &format!(
+                    "UPDATE task_runs SET status='integrated', result_commit='{}'",
+                    "b".repeat(40)
+                ),
+            )
+            .unwrap();
+        }
+        refs.fail
+            .set(Some(if canceled { "delete_landing" } else { "delete" }));
+        assert!(runner_recovery_pass(&mut q, &refs, 1_000_001, &mut cleanup).is_err());
+        if canceled {
+            assert_eq!(refs.landing.borrow().len(), 1);
+        } else {
+            assert_eq!(refs.heads.borrow().len(), 2);
+        }
+        refs.fail.set(None);
+        runner_recovery_pass(&mut q, &refs, 1_000_002, &mut cleanup).unwrap();
+        assert!(refs.heads.borrow().is_empty());
+        assert!(refs.landing.borrow().is_empty());
+        let calls_after_cleanup = refs.calls.borrow().len();
+        runner_recovery_pass(&mut q, &refs, 1_000_003, &mut cleanup).unwrap();
+        assert_eq!(refs.calls.borrow().len(), calls_after_cleanup);
+        assert!(refs.heads.borrow().is_empty());
+        assert_eq!(
+            q.verified_ref(first.run.id().as_str())
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+    }
+}
+
+fn assert_ref_failure_blocks_assignment(failure: crate::infrastructure::github_refs::RefFailure) {
+    let (mut q, clock) = fixture();
+    let mut cleanup = RunnerRefCleanup::default();
+    let Outcome::Assignment(Some(first)) = poll(&q, "a") else {
+        panic!("grant")
+    };
+    let id = first.run.id().as_str();
+    let h = "b".repeat(40);
+    q.report_runner_lease(
+        id,
+        Report {
+            runner_id: "a",
+            generation: 1,
+        },
+        Some(&h),
+        1_000_000,
+    )
+    .unwrap();
+    q.verify_runner_ref(id, 1, &h, 1_000_000).unwrap();
+    let refs = Refs::default();
+    refs.heads.borrow_mut().insert(1, h);
+    clock.0.store(1_090_000, Ordering::SeqCst);
+    runner_recovery_pass(&mut q, &refs, 1_090_000, &mut cleanup).unwrap();
+    resume(&mut q, first.run.id());
+    // Reuse one recovered run: after a failed POST, the next attempt creates
+    // the ref but its GET fails. Neither interruption makes it assignable.
+    for verb in ["create", "read"] {
+        refs.fail.set(Some(verb));
+        refs.failure_kind.set(Some(failure));
+        let error = runner_recovery_pass(&mut q, &refs, 1_090_001, &mut cleanup).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::infrastructure::github_refs::RefFailure>(),
+            Some(&failure)
+        );
+        assert!(matches!(poll(&q, "b"), Outcome::Assignment(None)));
+        assert!(refs.heads.borrow().contains_key(&1));
+        assert!(!refs.calls.borrow().iter().any(|c| c.starts_with("delete")));
+    }
+}
+#[test]
+fn permission_ref_failures_block_assignment_and_old_deletion() {
+    assert_ref_failure_blocks_assignment(
+        crate::infrastructure::github_refs::RefFailure::Permission,
+    );
+}
+#[test]
+fn temporary_ref_failures_block_assignment_and_old_deletion() {
+    assert_ref_failure_blocks_assignment(crate::infrastructure::github_refs::RefFailure::Temporary);
 }

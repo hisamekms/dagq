@@ -109,6 +109,7 @@ fn claimed_at_with(
         write_line: None,
         heavy_reads: None,
         ruleset_gate: None,
+        github_refs: None,
     };
     (backend, queue)
 }
