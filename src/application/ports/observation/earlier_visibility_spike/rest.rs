@@ -19,6 +19,34 @@ fn rest_large() -> usize {
         .unwrap_or(300)
 }
 
+/// Sizes of the out-of-range history: unit checks use 10/20; volume
+/// checks retain 30/300 and the configurable answer experiment.
+#[derive(Clone, Copy)]
+struct Sizes {
+    small: usize,
+    comparison: usize,
+    large: usize,
+    check_small_answer: bool,
+}
+
+fn unit_sizes() -> Sizes {
+    Sizes {
+        small: 10,
+        comparison: 20,
+        large: 20,
+        check_small_answer: true,
+    }
+}
+
+fn volume_sizes() -> Sizes {
+    Sizes {
+        small: 30,
+        comparison: 300,
+        large: rest_large(),
+        check_small_answer: false,
+    }
+}
+
 fn before_ms(e: &RunEvent, from_ms: i64) -> bool {
     crate::domain::stats::timestamp_millis(&e.created_at).is_some_and(|at| at < from_ms)
 }
@@ -82,115 +110,123 @@ fn final_count(part: &[&str], rows: &[LedgerRow]) -> usize {
     part.iter().map(|kind| queue_count(rows, kind)).sum()
 }
 
-/// [`check_part_of`]'s counts with `large` units of `answers`: with 30
-/// settled units of `small` every answer is that of every row, and the
-/// part's read returns as many rows with 30 of `small` as with 300 of
-/// `units`, and as many with 30 of `answers` as with `large` of them.
+/// Compare full and narrowed answers on the small history, and returned
+/// rows on both sizes, with and without shared supervisor lives.
 fn final_counts(
     name: &str,
     small: fn(usize) -> Log,
     units: fn(usize) -> Log,
     answers: fn(usize) -> Log,
-    large: usize,
+    sizes: Sizes,
 ) {
+    let Sizes {
+        small: n,
+        comparison,
+        large,
+        ..
+    } = sizes;
     let (part, kinds, from_ms) = final_kinds(name);
     let read =
         |rows: &[LedgerRow]| final_count(part, &queue_ii(rows, from_ms, &kinds, QUEUE_SHAPED));
-    let small = rows_of(&small(30));
+    let small = rows_of(&small(n));
     let (misses, _) = part_report(&small, part, QUEUE_SHAPED);
     let small_read = read(&small);
-    let units_read = read(&rows_of(&units(300)));
-    let shared_small = read(&rows_of(&answers(30)));
+    let units_read = read(&rows_of(&units(comparison)));
+    let shared_rows = rows_of(&answers(n));
+    let shared_small = read(&shared_rows);
     let rows = rows_of(&answers(large));
     let large_read = read(&rows);
+    if sizes.check_small_answer {
+        assert!(queue_count_all(&rows) >= queue_count_all(&shared_rows) + comparison - n);
+    }
     eprintln!(
-        "{name}: read {small_read}/{units_read} (30/300), shared lives {shared_small}/{large_read} \
-         (30/{large}) of {}, misses {misses:?}",
+        "{name}: read {small_read}/{units_read} ({n}/{comparison}), shared lives {shared_small}/{large_read} \
+         ({n}/{large}) of {}, misses {misses:?}",
         final_count(part, &rows)
     );
-    assert_eq!(misses, Vec::<String>::new(), "{name} 30");
+    assert_eq!(misses, Vec::<String>::new(), "{name} {n}");
     assert_eq!(small_read, units_read, "{name}");
     assert_eq!(shared_small, large_read, "{name}");
 }
 
-/// With `large` settled units of `answers`, the `answer` of the part's
-/// read is that of every row ([`queue_misses_of`]).
-fn final_answer(name: &str, answers: fn(usize) -> Log, large: usize, answer: Answer) {
-    let (_, kinds, from_ms) = final_kinds(name);
-    let rows = rows_of(&answers(large));
-    let (misses, _) = queue_misses_of(
-        &rows,
-        &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED),
-        |of| of == answer,
-    );
-    assert_eq!(misses, Vec::<String>::new(), "{name} {large} {answer:?}");
+/// Compare this answer of the narrowed read with every row. Unit tests
+/// check both sizes; volume tests retain the configurable large size.
+fn final_answer(name: &str, answers: fn(usize) -> Log, sizes: Sizes, answer: Answer) {
+    let Sizes { small, large, .. } = sizes;
+    for large in if sizes.check_small_answer {
+        vec![small, large]
+    } else {
+        vec![large]
+    } {
+        let (_, kinds, from_ms) = final_kinds(name);
+        let rows = rows_of(&answers(large));
+        let (misses, _) = queue_misses_of(
+            &rows,
+            &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED),
+            |of| of == answer,
+        );
+        assert_eq!(misses, Vec::<String>::new(), "{name} {large} {answer:?}");
+    }
 }
 
 /// A module of `#[test]`s of the part: its counts ([`final_counts`]) and
-/// each answer with [`rest_large`] units ([`final_answer`]: the kpi's
+/// each answer at the selected sizes ([`final_answer`]: the kpi's
 /// [`KPI_ANSWERS`] questions and `stats`), so they run in parallel.
 macro_rules! final_part {
-    ($test:ident, $name:literal, $small:path, $units:path, $answers:path) => {
+    ($test:ident, $name:literal, $small:path, $units:path, $answers:path, $sizes:path, $promise:literal) => {
         mod $test {
             use super::*;
 
+            #[doc = $promise]
             #[test]
             fn counts() {
-                final_counts($name, $small, $units, $answers, rest_large());
+                final_counts($name, $small, $units, $answers, $sizes());
             }
 
+            /// This KPI answer equals every-row folding at the selected history sizes.
+            #[doc = $promise]
             #[test]
             fn kpi_0() {
-                final_answer($name, $answers, rest_large(), Answer::Kpi(0));
+                final_answer($name, $answers, $sizes(), Answer::Kpi(0));
             }
 
+            /// This KPI answer equals every-row folding at the selected history sizes.
+            #[doc = $promise]
             #[test]
             fn kpi_1() {
-                final_answer($name, $answers, rest_large(), Answer::Kpi(1));
+                final_answer($name, $answers, $sizes(), Answer::Kpi(1));
             }
 
+            /// This KPI answer equals every-row folding at the selected history sizes.
+            #[doc = $promise]
             #[test]
             fn kpi_2() {
-                final_answer($name, $answers, rest_large(), Answer::Kpi(2));
+                final_answer($name, $answers, $sizes(), Answer::Kpi(2));
             }
 
+            /// This KPI answer equals every-row folding at the selected history sizes.
+            #[doc = $promise]
             #[test]
             fn kpi_3() {
-                final_answer($name, $answers, rest_large(), Answer::Kpi(3));
+                final_answer($name, $answers, $sizes(), Answer::Kpi(3));
             }
 
+            /// This KPI answer equals every-row folding at the selected history sizes.
+            #[doc = $promise]
             #[test]
             fn kpi_by_area() {
                 const _: () = assert!(KPI_ANSWERS == 5, "a test of each kpi question");
-                final_answer($name, $answers, rest_large(), Answer::Kpi(4));
+                final_answer($name, $answers, $sizes(), Answer::Kpi(4));
             }
 
+            /// The stats answer equals every-row folding at the selected history sizes.
+            #[doc = $promise]
             #[test]
             fn stats() {
-                final_answer($name, $answers, rest_large(), Answer::Stats);
+                final_answer($name, $answers, $sizes(), Answer::Stats);
             }
         }
     };
-}
-
-/// The final shapes of the waits, lives, samples and failures answer as
-/// every row with many units: a module of each part (ii-a, ii-f, ii-e)
-/// whose tests together hold what one test of the three parts held, with
-/// 30, 300 and [`rest_large`] settled units: the answers with 30 units and
-/// each answer with [`rest_large`] are those of every row, and the part's
-/// read returns as many rows however many units settled.
-mod the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units {
-    use super::*;
-
-    final_part!(
-        ii_a,
-        "ii-a",
-        near_snapshot,
-        near_snapshot_units,
-        shared_near_units
-    );
-    final_part!(ii_f, "ii-f", history_ii, queue_units_only, shared_units);
-    final_part!(ii_e, "ii-e", history_ii, queue_units_only, shared_units);
 }
 
 // The histories of (B)–(E): each settled unit adds a baseline's group of
@@ -828,21 +864,26 @@ fn rest_reads(rows: &[LedgerRow], kinds: &[&str]) -> [usize; 3] {
     [queue, saved, by_sha]
 }
 
-/// Check a part of the rest: with 30 units of `small` the read of Spike
-/// 4756 ([`QUEUE_SHAPED`]) and that of `rest` against the whole read, the
-/// answers of `rest` with [`rest_large`] units of `units`, and its reads
-/// with 30 and 300 units of `units`. Returns the misses of Spike 4756's
-/// read and the reads with 30 and 300.
+/// Compare the old shape's counterexamples, every-row answers and returned
+/// row counts at the selected history sizes. The whole history must grow
+/// by at least one row per extra unit while the narrowed read stays fixed.
 fn rest_part(
     name: &str,
     kinds: &[&str],
     rest: Rest,
     small: fn(usize) -> Log,
     units: fn(usize) -> Log,
+    sizes: Sizes,
 ) -> (Vec<String>, [[usize; 3]; 2]) {
+    let Sizes {
+        small: n,
+        comparison,
+        large,
+        ..
+    } = sizes;
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
     let set: BTreeSet<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
-    let rows = rows_of(&small(30));
+    let rows = rows_of(&small(n));
     // Spike 4756's read of the kinds (its main summary only when main's
     // kinds are narrowed: otherwise main is read whole).
     let shape_4756 = QueueShape {
@@ -853,97 +894,38 @@ fn rest_part(
     let small_narrowed = queue_rest(&rows, from_ms, &set, rest);
     let misses = rest_misses(&rows, &small_narrowed);
     let small_reads = rest_reads(&small_narrowed, kinds);
-    let large = rest_large();
     let mut reads = Vec::new();
     let mut whole = Vec::new();
-    let mut sizes = vec![30, large, 300];
+    let mut sizes = vec![n, large, comparison];
     sizes.dedup();
     for settled in sizes {
         let rows = rows_of(&units(settled));
         let narrowed = queue_rest(&rows, from_ms, &set, rest);
-        if settled != 300 || large == 300 {
+        if settled != comparison || large == comparison {
             let misses = rest_misses(&rows, &narrowed);
             assert_eq!(misses, Vec::<String>::new(), "{name} {settled}");
         }
-        if settled == 30 || settled == 300 {
+        if settled == n || settled == comparison {
             reads.push(rest_reads(&narrowed, kinds));
             whole.push(rest_reads(&rows, kinds)[0]);
         }
     }
     eprintln!(
-        "{name}: 4756 misses {} {:?}; reads [queue, saved, by sha] {reads:?} (30/300) of {whole:?}, \
-         with the units' runs {small_reads:?}, answers with 30 and {large}, misses {misses:?}",
+        "{name}: 4756 misses {} {:?}; reads [queue, saved, by sha] {reads:?} ({n}/{comparison}) of {whole:?}, \
+         with the units' runs {small_reads:?}, answers with {n} and {large}, misses {misses:?}",
         of_4756.len(),
         of_4756.iter().take(6).collect::<Vec<_>>()
     );
-    assert_eq!(misses, Vec::<String>::new(), "{name} 30");
+    assert_eq!(misses, Vec::<String>::new(), "{name} {n}");
     assert_eq!(reads[0], reads[1], "{name}");
     // With the settled units' tasks and runs (their landed commits) too.
     assert_eq!(small_reads, reads[1], "{name} with the units' runs");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(whole[1] >= whole[0] + 270, "{name} {whole:?}");
+    assert!(whole[1] >= whole[0] + comparison - n, "{name} {whole:?}");
     (of_4756, [reads[0], reads[1]])
 }
 
 const BASELINE_KINDS: [&str; 2] = ["attributes_baseline", "finding_baseline"];
 const GOAL_KINDS: [&str; 3] = ["goal_created", "goal_updated", "goal_status_changed"];
-
-#[test]
-fn the_baselines_read_from_their_latest_marks_answer_as_every_row() {
-    let rest = Rest {
-        marks: true,
-        goals: true,
-        ..Rest::default()
-    };
-    let (of_4756, _) = rest_part("B", &BASELINE_KINDS, rest, rest_full, rest_units);
-    assert!(of_4756.is_empty(), "{of_4756:?}");
-}
-
-#[test]
-fn main_s_saved_rows_and_its_commits_by_sha_are_counted_apart_and_stay_as_many() {
-    let rest = Rest {
-        main: true,
-        landing: true,
-        ..Rest::default()
-    };
-    let (of_4756, reads) = rest_part("C", &MAIN_KINDS, rest, rest_full, rest_units);
-    assert!(reads[0][1] > 0 && reads[0][2] > 0, "{reads:?}");
-    assert!(!of_4756.is_empty());
-}
-
-#[test]
-fn what_befell_a_landing_reads_its_failures_and_reverts_by_its_commit() {
-    let mut kinds = MAIN_KINDS.to_vec();
-    kinds.push("ci_turned_red");
-    let rest = Rest {
-        main: true,
-        landing: true,
-        ..Rest::default()
-    };
-    let (of_4756, _) = rest_part("D", &kinds, rest, rest_full, rest_units);
-    // Spike 4756's read: the earlier failure, the revert before the range
-    // and CI's record of main are lost.
-    assert!(
-        of_4756.iter().any(|miss| miss.contains("befell.60")),
-        "{of_4756:?}"
-    );
-}
-
-#[test]
-fn a_goal_is_read_from_its_latest_record_that_replaces_it() {
-    let mut kinds = GOAL_KINDS.to_vec();
-    kinds.extend(BASELINE_KINDS);
-    let rest = Rest {
-        marks: true,
-        goals: true,
-        ..Rest::default()
-    };
-    let (of_4756, _) = rest_part("E", &kinds, rest, rest_full, rest_units);
-    assert!(of_4756.is_empty(), "{of_4756:?}");
-}
 
 // (F) The proposals a finding links: each settled unit's finding proposed
 // (to the unit's proposal, its task landed) and resolved; finding 51
@@ -1080,13 +1062,112 @@ fn links_log(settled: usize) -> Log {
     history_with(settled, add_links(settled), |_| {})
 }
 
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
+mod the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units {
+    use super::*;
+
+    final_part!(
+        ii_a,
+        "ii-a",
+        near_snapshot,
+        near_snapshot_units,
+        shared_near_units,
+        unit_sizes,
+        "With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered."
+    );
+    final_part!(
+        ii_f,
+        "ii-f",
+        history_ii,
+        queue_units_only,
+        shared_units,
+        unit_sizes,
+        "With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered."
+    );
+    final_part!(
+        ii_e,
+        "ii-e",
+        history_ii,
+        queue_units_only,
+        shared_units,
+        unit_sizes,
+        "With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered."
+    );
+}
+
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
+#[test]
+fn the_baselines_read_from_their_latest_marks_answer_as_every_row() {
+    let rest = Rest {
+        marks: true,
+        goals: true,
+        ..Rest::default()
+    };
+    let (of_4756, _) = rest_part(
+        "B",
+        &BASELINE_KINDS,
+        rest,
+        rest_full,
+        rest_units,
+        unit_sizes(),
+    );
+    assert!(of_4756.is_empty(), "{of_4756:?}");
+}
+
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
+#[test]
+fn main_s_saved_rows_and_its_commits_by_sha_are_counted_apart_and_stay_as_many() {
+    let rest = Rest {
+        main: true,
+        landing: true,
+        ..Rest::default()
+    };
+    let (of_4756, reads) = rest_part("C", &MAIN_KINDS, rest, rest_full, rest_units, unit_sizes());
+    assert!(reads[0][1] > 0 && reads[0][2] > 0, "{reads:?}");
+    assert!(!of_4756.is_empty());
+}
+
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
+#[test]
+fn what_befell_a_landing_reads_its_failures_and_reverts_by_its_commit() {
+    let mut kinds = MAIN_KINDS.to_vec();
+    kinds.push("ci_turned_red");
+    let rest = Rest {
+        main: true,
+        landing: true,
+        ..Rest::default()
+    };
+    let (of_4756, _) = rest_part("D", &kinds, rest, rest_full, rest_units, unit_sizes());
+    // Spike 4756's read: the earlier failure, the revert before the range
+    // and CI's record of main are lost.
+    assert!(
+        of_4756.iter().any(|miss| miss.contains("befell.60")),
+        "{of_4756:?}"
+    );
+}
+
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
+#[test]
+fn a_goal_is_read_from_its_latest_record_that_replaces_it() {
+    let mut kinds = GOAL_KINDS.to_vec();
+    kinds.extend(BASELINE_KINDS);
+    let rest = Rest {
+        marks: true,
+        goals: true,
+        ..Rest::default()
+    };
+    let (of_4756, _) = rest_part("E", &kinds, rest, rest_full, rest_units, unit_sizes());
+    assert!(of_4756.is_empty(), "{of_4756:?}");
+}
+
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
 #[test]
 fn a_finding_settled_before_the_range_links_the_proposal_the_range_names() {
     let rest = Rest {
         links: true,
         ..Rest::default()
     };
-    let (of_4756, _) = rest_part("F", &["finding"], rest, links_log, links_log);
+    let (of_4756, _) = rest_part("F", &["finding"], rest, links_log, links_log, unit_sizes());
     // Spike 4756's read of the findings (open by the range or with a
     // record in it) loses finding 51's link to proposal 9.
     assert!(
@@ -1097,25 +1178,193 @@ fn a_finding_settled_before_the_range_links_the_proposal_the_range_names() {
     );
 }
 
+/// With 10 and 20 settled units outside the range, answers equal every row and returned rows do not grow with the history; all existing counterexamples and window starts remain covered.
 #[test]
 fn every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row() {
+    together(unit_sizes());
+}
+
+/// Large-history counterparts of the sibling 10/20-unit tests.
+mod volume {
+    use super::*;
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    mod the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units {
+        use super::*;
+
+        final_part!(
+            ii_a,
+            "ii-a",
+            near_snapshot,
+            near_snapshot_units,
+            shared_near_units,
+            volume_sizes,
+            "With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test."
+        );
+        final_part!(
+            ii_f,
+            "ii-f",
+            history_ii,
+            queue_units_only,
+            shared_units,
+            volume_sizes,
+            "With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test."
+        );
+        final_part!(
+            ii_e,
+            "ii-e",
+            history_ii,
+            queue_units_only,
+            shared_units,
+            volume_sizes,
+            "With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test."
+        );
+    }
+
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    #[test]
+    fn the_baselines_read_from_their_latest_marks_answer_as_every_row() {
+        let rest = Rest {
+            marks: true,
+            goals: true,
+            ..Rest::default()
+        };
+        let (of_4756, _) = rest_part(
+            "B",
+            &BASELINE_KINDS,
+            rest,
+            rest_full,
+            rest_units,
+            volume_sizes(),
+        );
+        assert!(of_4756.is_empty(), "{of_4756:?}");
+    }
+
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    #[test]
+    fn main_s_saved_rows_and_its_commits_by_sha_are_counted_apart_and_stay_as_many() {
+        let rest = Rest {
+            main: true,
+            landing: true,
+            ..Rest::default()
+        };
+        let (of_4756, reads) = rest_part(
+            "C",
+            &MAIN_KINDS,
+            rest,
+            rest_full,
+            rest_units,
+            volume_sizes(),
+        );
+        assert!(reads[0][1] > 0 && reads[0][2] > 0, "{reads:?}");
+        assert!(!of_4756.is_empty());
+    }
+
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    #[test]
+    fn what_befell_a_landing_reads_its_failures_and_reverts_by_its_commit() {
+        let mut kinds = MAIN_KINDS.to_vec();
+        kinds.push("ci_turned_red");
+        let rest = Rest {
+            main: true,
+            landing: true,
+            ..Rest::default()
+        };
+        let (of_4756, _) = rest_part("D", &kinds, rest, rest_full, rest_units, volume_sizes());
+        // Spike 4756's read: the earlier failure, the revert before the range
+        // and CI's record of main are lost.
+        assert!(
+            of_4756.iter().any(|miss| miss.contains("befell.60")),
+            "{of_4756:?}"
+        );
+    }
+
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    #[test]
+    fn a_goal_is_read_from_its_latest_record_that_replaces_it() {
+        let mut kinds = GOAL_KINDS.to_vec();
+        kinds.extend(BASELINE_KINDS);
+        let rest = Rest {
+            marks: true,
+            goals: true,
+            ..Rest::default()
+        };
+        let (of_4756, _) = rest_part("E", &kinds, rest, rest_full, rest_units, volume_sizes());
+        assert!(of_4756.is_empty(), "{of_4756:?}");
+    }
+
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    #[test]
+    fn a_finding_settled_before_the_range_links_the_proposal_the_range_names() {
+        let rest = Rest {
+            links: true,
+            ..Rest::default()
+        };
+        let (of_4756, _) = rest_part(
+            "F",
+            &["finding"],
+            rest,
+            links_log,
+            links_log,
+            volume_sizes(),
+        );
+        // Spike 4756's read of the findings (open by the range or with a
+        // record in it) loses finding 51's link to proposal 9.
+        assert!(
+            of_4756
+                .iter()
+                .any(|miss| miss.contains("improvement_proposals")),
+            "{of_4756:?}"
+        );
+    }
+
+    /// With 30/300 settled units and the configurable large history, preserve every-row equivalence, bounded reads and the original counterexamples; the same small contract is checked by the sibling unit test.
+    #[test]
+    fn every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row() {
+        together(volume_sizes());
+    }
+}
+
+/// Compare all queue kinds together, retaining the four logical count
+/// slots. When the large and comparison sizes coincide, the latter slot
+/// reuses the former's fixture and read, including its equivalence check.
+fn together(sizes: Sizes) {
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
-    let large = rest_large();
+    let Sizes {
+        small,
+        comparison,
+        large,
+        ..
+    } = sizes;
     let mut counts = Vec::new();
-    for (settled, log) in [
-        (30, rest_full(30)),
-        (30, rest_units(30)),
-        (large, rest_units(large)),
-        (300, rest_units(300)),
+    // The two logical large slots share one fixture and one read when
+    // large == comparison. Keep both count slots and all assertions.
+    let mut cached = None;
+    for (settled, full) in [
+        (small, true),
+        (small, false),
+        (large, false),
+        (comparison, false),
     ] {
-        let rows = rows_of(&log);
+        if !full
+            && settled == comparison
+            && large == comparison
+            && let Some(count) = cached
+        {
+            counts.push(count);
+            continue;
+        }
+        let rows = rows_of(&if full {
+            rest_full(settled)
+        } else {
+            rest_units(settled)
+        });
         let kinds: BTreeSet<String> = rows
             .iter()
             .filter(|row| row.kind == LedgerKind::Queue)
             .map(|row| subject_kind(row).to_owned())
             .collect();
         let narrowed = queue_rest(&rows, from_ms, &kinds, REST);
-        if settled < 300 || large == 300 {
+        if settled < comparison || large == comparison {
             let misses = rest_misses(&rows, &narrowed);
             assert_eq!(misses, Vec::<String>::new(), "{settled}");
         }
@@ -1125,14 +1374,17 @@ fn every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row() {
             "{settled}: [queue, saved, by sha] {read:?} of {} queue rows",
             queue_count_all(&rows)
         );
-        counts.push((read, queue_count_all(&rows)));
+        let count = (read, queue_count_all(&rows));
+        if !full && settled == large {
+            cached = Some(count);
+        }
+        counts.push(count);
     }
     assert_eq!(counts[1].0, counts[3].0, "{counts:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(counts[3].1 >= counts[1].1 + 270, "{counts:?}");
+    assert!(
+        counts[3].1 >= counts[1].1 + comparison - small,
+        "{counts:?}"
+    );
 }
 
 fn queue_count_all(rows: &[LedgerRow]) -> usize {

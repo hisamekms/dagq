@@ -1,0 +1,329 @@
+# Seconds from the named rest-module run, native debug build, -j 6.
+# Application limit: 0.200 s. Unit exceptions retain both 10/20 histories;
+# goal 297 owns further shortening of fixed fixture/folding/reader work.
+# Volume exceptions retain the full-size prototype contract and name
+# their corresponding 10/20-unit test below.
+
+# 7.432 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::a_finding_settled_before_the_range_links_the_proposal_the_range_names"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 9.194 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::a_goal_is_read_from_its_latest_record_that_replaces_it"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 5.716 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 9.372 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::main_s_saved_rows_and_its_commits_by_sha_are_counted_apart_and_stay_as_many"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 9.581 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_baselines_read_from_their_latest_marks_answer_as_every_row"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 2.306 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::counts"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.699 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_0"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.526 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_1"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.659 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_2"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.527 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_3"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.633 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_by_area"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.202 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::stats"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 2.504 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::counts"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.731 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_0"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.690 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_1"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.916 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_2"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.731 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_3"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.760 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_by_area"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.272 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::stats"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 2.583 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::counts"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.798 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_0"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.627 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_1"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.845 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_2"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.815 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_3"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.938 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_by_area"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 0.238 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::stats"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036
+
+# 22.685 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::a_finding_settled_before_the_range_links_the_proposal_the_range_names"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::a_finding_settled_before_the_range_links_the_proposal_the_range_names"
+task = 5036
+
+# 30.326 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::a_goal_is_read_from_its_latest_record_that_replaces_it"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::a_goal_is_read_from_its_latest_record_that_replaces_it"
+task = 5036
+
+# 17.030 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row"
+task = 5036
+
+# 30.604 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::main_s_saved_rows_and_its_commits_by_sha_are_counted_apart_and_stay_as_many"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::main_s_saved_rows_and_its_commits_by_sha_are_counted_apart_and_stay_as_many"
+task = 5036
+
+# 31.525 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_baselines_read_from_their_latest_marks_answer_as_every_row"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_baselines_read_from_their_latest_marks_answer_as_every_row"
+task = 5036
+
+# 5.777 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::counts"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::counts"
+task = 5036
+
+# 3.749 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_0"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_0"
+task = 5036
+
+# 2.763 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_1"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_1"
+task = 5036
+
+# 3.786 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_2"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_2"
+task = 5036
+
+# 3.564 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_3"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_3"
+task = 5036
+
+# 3.530 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_by_area"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::kpi_by_area"
+task = 5036
+
+# 1.847 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::stats"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::stats"
+task = 5036
+
+# 6.111 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::counts"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::counts"
+task = 5036
+
+# 3.743 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_0"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_0"
+task = 5036
+
+# 2.960 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_1"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_1"
+task = 5036
+
+# 3.603 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_2"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_2"
+task = 5036
+
+# 3.627 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_3"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_3"
+task = 5036
+
+# 3.645 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_by_area"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::kpi_by_area"
+task = 5036
+
+# 1.926 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::stats"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::stats"
+task = 5036
+
+# 6.385 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::counts"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::counts"
+task = 5036
+
+# 4.247 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_0"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_0"
+task = 5036
+
+# 3.380 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_1"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_1"
+task = 5036
+
+# 4.129 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_2"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_2"
+task = 5036
+
+# 3.971 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_3"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_3"
+task = 5036
+
+# 3.894 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_by_area"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::kpi_by_area"
+task = 5036
+
+# 1.689 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::stats"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::stats"
+task = 5036
+
+# 23.133 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::volume::what_befell_a_landing_reads_its_failures_and_reverts_by_its_commit"
+reason = "goal 297で縮める予定: 小さい版への分離後も、量の層に残す全行の畳み込み・実際の読者・fixtureの固定コストを短縮する。量の約束: 台帳の最終の範囲の読みと全行の畳み込みの答え・返る行数・反例を30/300単位でも保つ。小さい版: application::ports::observation::earlier_visibility_spike::rest::what_befell_a_landing_reads_its_failures_and_reverts_by_its_commit"
+task = 5036
+
+# 6.702 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::what_befell_a_landing_reads_its_failures_and_reverts_by_its_commit"
+reason = "goal 297で縮める予定: 10/20単位へ縮小済みでも、固定の反例fixture・台帳の構築・複数の窓の全行の畳み込みと実際の読者の比較が200msを超える。凍った値の一致と全行を読む答え・読み始めの範囲の約束を落とさず、残る固定コストの短縮か読者ごとの分割を行う"
+task = 5036

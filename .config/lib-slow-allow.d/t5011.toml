@@ -2,24 +2,6 @@
 # --test-threads 6 --stress-count 5. The task's paired serial comparison
 # is recorded separately; these entries retain the observed >5 s boundaries.
 
-# 5.703 s
-[[test]]
-name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_a::counts"
-reason = "B 境界（守る境界）: 最終の形の同じ部分について 30・300 単位の読む行の数と 30 単位の全ての答えを全行の読みと比べる。小さい入力と大きい入力の両方を保ち、読む量が履歴に比例しないことを確かめる"
-task = 5011
-
-# 5.544 s
-[[test]]
-name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_e::counts"
-reason = "B 境界（守る境界）: 最終の形の同じ部分について 30・300 単位の読む行の数と 30 単位の全ての答えを全行の読みと比べる。小さい入力と大きい入力の両方を保ち、読む量が履歴に比例しないことを確かめる"
-task = 5011
-
-# 5.094 s
-[[test]]
-name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units::ii_f::counts"
-reason = "B 境界（守る境界）: 最終の形の同じ部分について 30・300 単位の読む行の数と 30 単位の全ての答えを全行の読みと比べる。小さい入力と大きい入力の両方を保ち、読む量が履歴に比例しないことを確かめる"
-task = 5011
-
 # 5.280 s
 [[test]]
 name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold::queue_and_run_s3_readers::kpi_since"
