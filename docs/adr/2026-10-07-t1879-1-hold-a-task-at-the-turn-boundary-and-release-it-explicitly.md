@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-07
 updated: 2026-10-07
 accepted_on: 2026-10-07
+amended_by:
+  - adr-t5292-2
 owners:
   - hisamekms
 tags:

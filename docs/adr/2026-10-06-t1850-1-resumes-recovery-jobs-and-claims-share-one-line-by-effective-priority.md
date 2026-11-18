@@ -12,6 +12,9 @@ amends:
   - adr-0049 decision 4
   - adr-t1639-1 decision 3
   - adr-t1811-1 decision 2
+amended_by:
+  - adr-t5292-1
+  - adr-t5292-2
 owners:
   - hisamekms
 tags:

@@ -13,6 +13,8 @@ amends:
   - adr-t5059-1 decision 3
   - adr-t4542-1 decision 1
   - adr-t4542-1 decision 3
+amended_by:
+  - adr-t5292-1
 owners:
   - hisamekms
 tags:
