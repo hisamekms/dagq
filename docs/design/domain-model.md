@@ -124,7 +124,7 @@ pathは`src/domain/`から。
 | 優先度 | `domain::base_priority`（ADR-t1639-1・ADR-t1811-1）、誰が置いたかは`PriorityBy`、由来は`RecordedOrigin`、`task::set_goal`、`application::effective_priority`（ADR-t791-1） |
 | slotとclaimの順 | `domain::slot_order`、`dependency_graph`の`candidates`、`domain::claim_order` |
 | proposalとplan review | `proposal.rs`、`TaskStore::submit`、`infrastructure::proposals::approve`、`domain::lint::lint`、`domain::plan_review`、follow_upの所属は[所属の判断](follow-up-membership.md) |
-| claimと候補 | `task::claim`、`infrastructure::sqlite`の`READY_QUERY`、buildを待つclaimは`domain::build_wait`、読む口は`application::claim_view`（ADR-t1992-1） |
+| claimと候補 | `task::claim`、`infrastructure::task_store`の`READY_QUERY`、buildを待つclaimは`domain::build_wait`、読む口は`application::claim_view`（ADR-t1992-1） |
 | goalのclose・開き直し・依存 | `goal::close`、`goal::check_follow_ups`、`goal::reopen`、`goal::check_accepts_dependents`、acceptanceの版は`GoalDetail` |
 | goal review | [Goal review](supervisor-lifecycle/goal-review.md) |
 | cancelの理由の分類コード | `domain::cancel_reason`、`dagq cancel --help`（[ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)） |

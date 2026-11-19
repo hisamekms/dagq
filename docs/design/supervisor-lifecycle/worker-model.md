@@ -92,7 +92,7 @@ keyと既定値の意味は`domain::worker_model::WorkerTrial`のdoc commentが�
   読めないときはwarnをlogに出して試しの外でclaimする（壊れた`dagq.toml`はprovisioningがerrorにする）。
 - **設定の検査**: 候補が段（`LADDER`）の上の組でないものなど、`WorkerTrial::check`が断る値は`dagq.toml`の読み込みが断る。
   段の外の組は段上げで上がらないため（決定2）。
-- **選ぶ場所**: claimのtransactionの中（`infrastructure::sqlite::claim_task`）で、queueの`task_weight_predicted`と`run_claimed`を読み、純粋関数`domain::worker_model::choose`が決める。
+- **選ぶ場所**: claimのtransactionの中（`infrastructure::task_store::claim_task`）で、`domain::worker_model::choose`が決める。
 - **決定的な割り当て**: 群をまだ持たない対象のtaskは、試しの名前とtaskのIDのhashを割合と比べて群を決める（`WorkerTrial::draw`）。
   claimの順や並行に依らず、同じ設定なら同じtaskは同じ群になる。
 - **群の固定**: 前のrunの`run_claimed`で群を持ったtaskは、その群の今の候補で起動する（resume・revise・retryで変えない。予測・割合・試しの名前が後で変わっても変えない）。
