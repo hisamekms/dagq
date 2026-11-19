@@ -11,6 +11,7 @@ amended_by:
   - adr-t1433-3
   - adr-t1533-1
   - adr-t1704-1
+  - adr-t2930-1
 amends:
   - adr-t1228-1 decision 2
   - adr-t1228-1 decision 3
