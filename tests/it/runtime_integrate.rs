@@ -2701,3 +2701,222 @@ fn a_batch_that_fails_only_when_stacked_lands_the_first_run_and_sends_back_the_o
         1
     );
 }
+
+/// A landing batch checks the subjects visible from main in each program
+/// checkout, using main's program even when the first run changes it.
+#[test]
+fn landing_batch_programs_read_each_runs_own_commits() {
+    use dagq::application::Repository;
+    use dagq::infrastructure::adapters::GitRepository;
+
+    let (_fixture, repo, db) = fixture();
+    let script = "scripts/subjects.sh";
+    programs_on_main(
+        &repo,
+        "[verification]\nlanding_batch_size = 2\n\
+         [review.programs.subjects]\nscript = \"scripts/subjects.sh\"\npaths = [\"**\"]\n",
+        &[(
+            script,
+            r#"#!/bin/sh
+set -eu
+echo 'program-version: base'
+base=$(git merge-base main HEAD)
+subjects=$(git log --reverse --no-merges --format=%s "$base..HEAD")
+printf '%s\n' "$subjects"
+printf '%s\n' "$subjects" | awk '!/^fix: .+$/ { bad = 1 } END { exit bad }'
+"#
+            .to_owned(),
+        )],
+    );
+    let original_base = git_out(&repo, &["rev-parse", "main"]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let concern = verdict("concern", &["please confirm"], "unsure");
+    let reviewer = TestReviewer::new(&[concern.clone(), concern]);
+    let (a_title, b_title) = ("fix: first change", "fix: second change");
+    let check = r#"test -f second.txt && grep -q unrelated dagq.toml && test "$(git log -1 --format=%s)" = 'dagq landing verification'"#;
+    let a = add_script_task(&mut queue, &backend, a_title, "true", &[check]);
+    backend.script_for(
+        a.as_i64(),
+        r#"printf '%s\n' '#!/bin/sh' "echo 'program-version: first run'" 'exit 0' > scripts/subjects.sh
+printf '%s\n' '[verification]' 'landing_batch_size = 2' '[review.programs.subjects]' 'script = "scripts/subjects.sh"' 'paths = ["unrelated/**"]' > dagq.toml
+git add -A && GIT_COMMITTER_DATE='2002-03-04T05:06:07-08:00' git commit -q --author='First Author <first@example.invalid>' --date='2001-02-03T04:05:06+07:00' -m 'fix: first change' -m 'The original body.'
+receipt "$(git rev-parse HEAD)""#,
+    );
+    queue.set_priority(a, Some(Priority::High)).unwrap();
+    let b = add_script_task(
+        &mut queue,
+        &backend,
+        b_title,
+        "printf 'second\n' > second.txt",
+        &[check],
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let runs = [a, b].map(|task| queue.show(task).unwrap().runs[0].clone());
+    let [a_source, b_source] = runs.each_ref().map(|run| run.result_commit().unwrap());
+    let asks = queue.asks(Default::default()).unwrap();
+    for run in &runs {
+        let ask = asks
+            .iter()
+            .find(|ask| ask.run_id.as_ref() == Some(run.id()))
+            .unwrap();
+        queue.answer(ask.id, "land").unwrap();
+    }
+    fs::write(repo.join("main-only.txt"), "main moved\n").unwrap();
+    git(&repo, &["add", "main-only.txt"]);
+    git(
+        &repo,
+        &["commit", "-qm", "main advances away from both runs"],
+    );
+    let advanced = git_out(&repo, &["rev-parse", "main"]);
+
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let adapter = GitRepository::inspect(&repo).unwrap();
+    let mut program_heads = Vec::new();
+    for (task, subjects) in [(a, vec![a_title]), (b, vec![a_title, b_title])] {
+        let detail = queue.show(task).unwrap();
+        let events = payloads(&detail, "integrate_programs_finished");
+        assert_eq!(events.len(), 1, "{events:?}");
+        let finished = events[0];
+        assert_eq!(finished["outcome"], "passed", "{finished}");
+        assert_eq!(finished["main"], advanced);
+        let program = finished["programs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|program| program["name"] == "subjects")
+            .unwrap();
+        assert_eq!(program["result"], "passed", "{program}");
+        let stdout = fs::read_to_string(program["log"]["stdout"].as_str().unwrap()).unwrap();
+        let expected: Vec<_> = std::iter::once("program-version: base")
+            .chain(subjects)
+            .collect();
+        assert_eq!(stdout.lines().collect::<Vec<_>>(), expected);
+        let head = finished["head"].as_str().unwrap();
+        let run = &detail.runs[0];
+        assert_eq!(run.status(), RunStatus::Integrated);
+        let landed = run.result_commit().unwrap();
+        assert_eq!(
+            adapter.tree_of(head).unwrap(),
+            adapter.tree_of(landed.as_str()).unwrap()
+        );
+        program_heads.push(head.to_owned());
+    }
+    assert_eq!(git_out(&repo, &["rev-parse", "main~2"]), advanced);
+    assert_eq!(
+        git_out(&repo, &["log", "--reverse", "--format=%s", "main~2..main"]),
+        format!("{a_title}\n{b_title}")
+    );
+    // One successful verification of the joint tree, followed by two
+    // squash commits. The program checkouts are a separate history.
+    let progress = events_of(&db, runs[0].id(), "landing_batch_progress");
+    let stages: Vec<_> = progress
+        .iter()
+        .filter_map(|event| event.get("stage").filter(|stage| !stage.is_null()))
+        .collect();
+    assert_eq!(stages.len(), 1, "{progress:?}");
+    assert_eq!(stages[0]["runs"], json!([runs[0].id(), runs[1].id()]));
+    assert_eq!(
+        events_of(&db, runs[0].id(), "verification_command").len(),
+        1
+    );
+    assert!(events_of(&db, runs[1].id(), "verification_command").is_empty());
+    assert_eq!(
+        git_out(&repo, &["rev-parse", &format!("{}^", program_heads[1])]),
+        program_heads[0]
+    );
+    let metadata = |head| {
+        git_out(
+            &repo,
+            &[
+                "show",
+                "-s",
+                "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B",
+                head,
+            ],
+        )
+    };
+    assert_eq!(metadata(&program_heads[0]), metadata(a_source.as_str()));
+
+    let again = adapter
+        .replay_commit(&advanced, a_source.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.as_str(), program_heads[0]);
+    let original = git_out(&repo, &["cat-file", "commit", a_source.as_str()]);
+    let object = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        object.path(),
+        format!("{}\n", original.replacen(a_title, "fix: reworded", 1)),
+    )
+    .unwrap();
+    let reworded = git_out(
+        &repo,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            object.path().to_str().unwrap(),
+        ],
+    );
+    let reworded_replay = adapter
+        .replay_commit(&advanced, &reworded)
+        .unwrap()
+        .unwrap();
+    assert_ne!(again, reworded_replay);
+    assert_eq!(
+        adapter.tree_of(again.as_str()).unwrap(),
+        adapter.tree_of(reworded_replay.as_str()).unwrap()
+    );
+
+    // Model the next segment after A was squashed. B's original parent is
+    // A's source, whose history must be excluded even though main cannot
+    // reach it.
+    let a_squash = git_out(&repo, &["rev-parse", "main^"]);
+    let combined = adapter
+        .merged_tree(a_source.as_str(), b_source.as_str())
+        .unwrap()
+        .unwrap();
+    let dependent = git_out(
+        &repo,
+        &[
+            "commit-tree",
+            &combined,
+            "-p",
+            a_source.as_str(),
+            "-m",
+            b_title,
+        ],
+    );
+    let range_base = git_out(&repo, &["merge-base", &a_squash, &dependent]);
+    assert_eq!(range_base, original_base);
+    let range = adapter
+        .commits_for_replay(&range_base, &dependent, std::slice::from_ref(a_source))
+        .unwrap();
+    assert_eq!(
+        range,
+        [(
+            CommitSha::parse(dependent, "dependent source").unwrap(),
+            false
+        )]
+    );
+    let head = adapter
+        .replay_commit(&a_squash, range[0].0.as_str())
+        .unwrap()
+        .unwrap();
+    let base = git_out(&repo, &["merge-base", &a_squash, head.as_str()]);
+    assert_eq!(base, a_squash);
+    assert_eq!(
+        git_out(&repo, &["log", "--format=%s", &format!("{base}..{head}")]),
+        b_title
+    );
+    assert_eq!(
+        adapter.tree_of(head.as_str()).unwrap(),
+        adapter.tree_of("main").unwrap()
+    );
+}

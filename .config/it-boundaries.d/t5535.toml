@@ -1,0 +1,6 @@
+[[boundary]]
+id = "landing-batch-programs-read-each-run-s-own-commits"
+kind = "Git"
+test = "runtime_integrate::landing_batch_programs_read_each_runs_own_commits"
+reason = "実のGitのprogram用worktreeでmainとのmerge baseから件名を読み、先行runが変更する前の設定とscriptで両方が通って着地することを確かめる。landing-batch-verifies-stacked-runs-once-and-bisects-to-the-breaking-runの代表はprogramが無く二本目を差し戻す。landing-programs-read-from-main-run-before-the-commandsの代表は単独の着地で先行runの履歴が無い"
+task = 5535

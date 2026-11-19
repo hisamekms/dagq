@@ -2465,6 +2465,23 @@ pub trait Repository: RepositoryReads {
         paragraphs: &[String],
     ) -> Result<std::result::Result<CommitSha, String>>;
     fn tree_of(&self, commit: &str) -> Result<String>;
+    /// Commits reachable from `source` but from neither `base` nor any
+    /// excluded source, parents first. The boolean marks a merge commit.
+    fn commits_for_replay(
+        &self,
+        _base: &str,
+        _source: &str,
+        _excluded: &[CommitSha],
+    ) -> Result<Vec<(CommitSha, bool)>> {
+        anyhow::bail!("listing commits for replay is unsupported")
+    }
+
+    /// Replay a single-parent commit on `onto`, preserving its message and
+    /// both identities and dates without signing. `None` means a conflict.
+    fn replay_commit(&self, _onto: &str, _source: &str) -> Result<Option<CommitSha>> {
+        anyhow::bail!("replaying a commit is unsupported")
+    }
+
     /// One commit with `tree` on top of `parent`, `paragraphs` its message.
     fn commit_tree(&self, tree: &str, parent: &str, paragraphs: &[String]) -> Result<CommitSha>;
     fn update_ref(&self, name: &str, value: &str) -> Result<()>;

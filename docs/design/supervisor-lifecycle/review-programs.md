@@ -29,7 +29,7 @@ related:
 | 段の流れと記録 | `src/application/supervise/execution/landing.rs`の`start_review_programs` |
 | 次の一手の判断と差し戻しの理由 | `src/domain/review_programs.rs`の`step` |
 | 一覧とscriptの読み込み | `src/application/review_programs.rs`の`snapshot_programs` |
-| 範囲での選びと1本の実行の共有の部品 | `src/application/review_programs.rs`の`programs_for_range`・`run_program`・`ProgramRun` |
+| 範囲での選びと1本の実行の共有の部品 | `src/application/review_programs.rs`の`required_programs`・`run_program`・`ProgramRun` |
 | jobの起動と終わり | `src/application/supervise/execution/jobs.rs`の`start_review_program` |
 | eventの欄 | `src/domain/event_kind.rs`の`REVIEW_PROGRAMS_STARTED`ほかのdoc comment |
 | 送れなかった差し戻しの引き継ぎ | `src/application/supervise/execution/adopt.rs`の`programs_rejected_after` |
@@ -65,9 +65,9 @@ eventはrunのeventとして`events --run`と`timeline`に出る。
 
 ## 着地の前の流し直し
 
-`integrate`はrebaseの後・検証のコマンドの前に、同じプログラムを着地する差分（`main..rebased`）で選び直して流す（[ADR-t3749-1](../../adr/2026-10-31-t3749-1-integrate-runs-the-review-programs-of-the-landing-diff-before-its-commands.md)、流れは[integrate](integrate.md)）。
+`integrate`はrebaseの後・検証のコマンドの前に、同じプログラムを着地する差分で選び直して流す（[ADR-t3749-1](../../adr/2026-10-31-t3749-1-integrate-runs-the-review-programs-of-the-landing-diff-before-its-commands.md)、流れは[integrate](integrate.md)）。
 reviewの段はrebaseの前のcommitを見るので、mainの変更と合わさって初めて落ちる形式の誤りはここで捉える。
-読む元・env・上限・backendの選びはこの段と同じ部品（`programs_for_range`・`run_program`・`ProgramBackends`）で、1本ずつ呼んだthreadで終わりまで待つ。
+選んだプログラムのスクリプトは着地先の今のcommitから読み、上限とbackendはreviewと同じ部品で扱い、1本ずつ終わりまで待つ。
 記録は`integrate_programs_finished`だけで、`review_programs_*`には書かない（この段の回の数え方とadoptの読み方を変えないため）。
 
 ## 引き継ぎ

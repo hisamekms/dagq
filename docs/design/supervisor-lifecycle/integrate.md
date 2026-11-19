@@ -154,7 +154,9 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 
 ## reviewのプログラム
 
-- pathsの検査の後・検証のコマンドの前に、landing branchのcommitのreviewのプログラム（built-inを含む）のうち着地する差分（`main..rebased`）にpathsが当たるものを、宣言の順に1本ずつ流す（`integrate::programs::landing_programs`、[ADR-t3749-1](../../adr/2026-10-31-t3749-1-integrate-runs-the-review-programs-of-the-landing-diff-before-its-commands.md)、読む元とenvは[プログラムのreview](review-programs.md)）。
+- pathsの検査の後・検証のコマンドの前に、landing branchのcommitのreviewのプログラム（built-inを含む）のうち着地する差分にpathsが当たるものを、宣言の順に1本ずつ流す（`integrate::programs::landing_programs`、[ADR-t3749-1](../../adr/2026-10-31-t3749-1-integrate-runs-the-review-programs-of-the-landing-diff-before-its-commands.md)、読む元とenvは[プログラムのreview](review-programs.md)）。
+- バッチの段でも設定とスクリプトは着地先の今のcommitから読み、プログラムに見せる履歴は各run自身のcommitを重ね、検証のtreeと衝突の判定には積み重ねの列を使う。
+- バッチのプログラムの準備と範囲は`BatchLanding::stack`と`ProgramsAt`から辿る。
 - 1本が非0なら検証のコマンドを1本も流さず`needs_session`にし、reviewのreviseの上限には数えない。
 - 起動できない・読めない・時間切れは下のhostの失敗と同じく同じ試行で1回だけ流し直し、なお同じなら`held`、handoffのdrain中は流し直さず引き継ぐ。
 - reviewのactorのbackendが流せないときはhostで流さず、`skipped`を記録して検証のコマンドへ進む（理由はADR-t3749-1決定5）。

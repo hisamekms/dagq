@@ -222,22 +222,27 @@ pub fn programs_for_range(
     let changed = repository.changed_paths(from, head)?;
     Ok(required_programs(repository, commit, configured, &changed)?
         .into_iter()
-        .map(|snapshot| {
-            let SelectedProgram { program, matched } = review_programs::with_range(
-                SelectedProgram {
-                    program: snapshot.program,
-                    matched: snapshot.matched,
-                },
-                from,
-                head,
-            );
-            SnapshotProgram {
-                program,
-                matched,
-                script: snapshot.script,
-            }
-        })
+        .map(|program| program.with_range(from, head))
         .collect())
+}
+
+impl SnapshotProgram {
+    /// Give a built-in its range after selecting it and reading its script.
+    pub(crate) fn with_range(self, from: &str, head: &str) -> Self {
+        let SelectedProgram { program, matched } = review_programs::with_range(
+            SelectedProgram {
+                program: self.program,
+                matched: self.matched,
+            },
+            from,
+            head,
+        );
+        Self {
+            program,
+            matched,
+            script: self.script,
+        }
+    }
 }
 
 /// Where `run`'s program reviews write the scripts they run: its directory

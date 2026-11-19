@@ -1,0 +1,4 @@
+[[test]]
+name = "runtime_integrate::landing_batch_programs_read_each_runs_own_commits"
+reason = "B 境界（守る境界）: 実のGitで未着地の2本を承認済みにしてからmainを進め、同じバッチのprogram checkoutの履歴と読み込む版を確かめ、共同検証後のsquashとcommitの写し直しを照合する"
+task = 5535

@@ -2977,7 +2977,8 @@ fn land(
                 worktree,
                 run_dir,
                 onto,
-                main,
+                landing: main,
+                from: main,
                 rebased: &rebased,
             },
         )?
@@ -5175,15 +5176,27 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    pub(super) struct BatchGit {
+        pub base: Option<&'static str>,
+        pub ancestors: Vec<(&'static str, &'static str)>,
+        pub ranges: Vec<(&'static str, Vec<(&'static str, bool)>)>,
+        pub trees: Vec<(&'static str, &'static str)>,
+        pub replay: Vec<(&'static str, &'static str, &'static str)>,
+        pub merges: Vec<(&'static str, &'static str, &'static str)>,
+        pub stacked: Option<&'static str>,
+    }
+
     /// A repository whose worktree is on `branch` at `head`, with `status`.
     /// For the migration renumbering: whether it is dagq's source, the paths
     /// the run added and changed, the rebased tree's paths, and the contents
     /// [`Repository::paths_containing`] searches.
-    struct FakeRepository {
+    pub(super) struct FakeRepository {
+        pub(super) batch: Option<BatchGit>,
         branch: Option<String>,
         head: CommitSha,
         status: String,
-        calls: RefCell<Vec<String>>,
+        pub(super) calls: RefCell<Vec<String>>,
         dagq_source: bool,
         added: Vec<String>,
         changed: Vec<String>,
@@ -5200,8 +5213,9 @@ mod tests {
     }
 
     impl FakeRepository {
-        fn sound() -> Self {
+        pub(super) fn sound() -> Self {
             Self {
+                batch: None,
                 branch: Some(format!("refs/heads/dagq/{RUN}")),
                 head: sha(HEAD),
                 status: String::new(),
@@ -5259,7 +5273,9 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("is_ancestor {ancestor} {descendant}"));
-            Ok(ancestor == BASE)
+            Ok(self.batch.as_ref().map_or(ancestor == BASE, |git| {
+                git.ancestors.contains(&(ancestor, descendant))
+            }))
         }
         fn status(&self, _: &Path) -> Result<String> {
             Ok(self.status.clone())
@@ -5276,7 +5292,10 @@ mod tests {
         fn conflicted_files(&self, _: &Path) -> Result<Vec<String>> {
             unimplemented!()
         }
-        fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            if self.batch.is_some() {
+                self.calls.borrow_mut().push(format!("changed {from} {to}"));
+            }
             Ok(self.changed.clone())
         }
         fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
@@ -5322,21 +5341,78 @@ mod tests {
             Ok(format!("{from}..{to}").into_bytes())
         }
         fn tree_of(&self, commit: &str) -> Result<String> {
-            Ok(format!("tree:{commit}"))
+            Ok(self
+                .batch
+                .as_ref()
+                .and_then(|git| {
+                    git.trees
+                        .iter()
+                        .find_map(|(head, tree)| (*head == commit).then_some((*tree).to_owned()))
+                })
+                .unwrap_or_else(|| format!("tree:{commit}")))
         }
         fn merged_tree(
             &self,
-            _: &str,
-            _: &str,
+            from: &str,
+            to: &str,
         ) -> Result<std::result::Result<String, Vec<String>>> {
+            if let Some(git) = &self.batch {
+                self.calls.borrow_mut().push(format!("merge {from} {to}"));
+                return Ok(git
+                    .merges
+                    .iter()
+                    .find_map(|(a, b, tree)| ((*a, *b) == (from, to)).then_some((*tree).to_owned()))
+                    .ok_or_else(|| vec!["x".to_owned()]));
+            }
             let head = self
                 .merged_head
                 .as_ref()
                 .context("no merge in the fixture")?;
             Ok(Ok(self.tree_of(head.as_str())?))
         }
-        fn commit_tree(&self, _: &str, _: &str, _: &[String]) -> Result<CommitSha> {
-            unimplemented!()
+        fn commits_for_replay(
+            &self,
+            base: &str,
+            source: &str,
+            excluded: &[CommitSha],
+        ) -> Result<Vec<(CommitSha, bool)>> {
+            let excluded = excluded
+                .iter()
+                .map(CommitSha::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.calls
+                .borrow_mut()
+                .push(format!("range {base} {source} exclude {excluded}"));
+            Ok(self
+                .batch
+                .as_ref()
+                .unwrap()
+                .ranges
+                .iter()
+                .find_map(|(head, range)| (*head == source).then_some(range.as_slice()))
+                .unwrap_or_default()
+                .iter()
+                .map(|(head, merge)| (sha(head), *merge))
+                .collect())
+        }
+        fn replay_commit(&self, onto: &str, source: &str) -> Result<Option<CommitSha>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("replay {onto} {source}"));
+            Ok(self
+                .batch
+                .as_ref()
+                .unwrap()
+                .replay
+                .iter()
+                .find_map(|(a, b, head)| ((*a, *b) == (onto, source)).then(|| sha(head))))
+        }
+        fn commit_tree(&self, tree: &str, parent: &str, _: &[String]) -> Result<CommitSha> {
+            self.calls
+                .borrow_mut()
+                .push(format!("stack {tree} {parent}"));
+            Ok(sha(self.batch.as_ref().unwrap().stacked.unwrap()))
         }
         fn update_ref(&self, _: &str, _: &str) -> Result<()> {
             unimplemented!()
@@ -5389,7 +5465,21 @@ mod tests {
         fn main_head(&self) -> Result<CommitSha> {
             Ok(sha(BASE))
         }
-        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+            anyhow::ensure!(
+                self.batch.is_some(),
+                "this repository cannot read committed files"
+            );
+            self.calls
+                .borrow_mut()
+                .push(format!("read {commit} {path}"));
+            Ok(Some(format!("{commit}:{path}")))
+        }
+        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+            if let Some(git) = &self.batch {
+                self.calls.borrow_mut().push(format!("base {a} {b}"));
+                return Ok(git.base.map(sha));
+            }
             Ok(Some(sha(BASE)))
         }
     }
@@ -5585,7 +5675,7 @@ mod tests {
         }
     }
 
-    fn run(dir: &Path) -> TaskRun {
+    pub(super) fn run(dir: &Path) -> TaskRun {
         run_in(dir, RunStatus::Validating)
     }
 
@@ -5785,7 +5875,8 @@ mod tests {
 
     /// A verifier whose commands exit as `passes` says, one per command in
     /// order, and records each command it ran.
-    struct ScriptedVerifier {
+    pub(super) struct ScriptedVerifier {
+        pub(super) review: crate::domain::review_programs::ReviewPrograms,
         passes: Vec<bool>,
         ran: RefCell<Vec<String>>,
         /// The environment of each command it ran, on top of `[run.env]`.
@@ -5802,8 +5893,9 @@ mod tests {
     }
 
     impl ScriptedVerifier {
-        fn new(passes: Vec<bool>, container: bool) -> Self {
+        pub(super) fn new(passes: Vec<bool>, container: bool) -> Self {
             Self {
+                review: Default::default(),
                 passes,
                 ran: RefCell::new(Vec::new()),
                 envs: RefCell::new(Vec::new()),
@@ -5816,6 +5908,13 @@ mod tests {
     }
 
     impl Verifier for ScriptedVerifier {
+        fn review_programs_in(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::review_programs::ReviewPrograms> {
+            Ok(self.review.clone())
+        }
+
         fn landing_verification(
             &self,
         ) -> Result<Option<landing_verification::LandingVerification>> {

@@ -2954,6 +2954,113 @@ impl GitRepository {
         object_id(&output(&mut command)?, "new commit")
     }
 
+    /// Walk the run's range in parent order, excluding any history
+    /// already covered by the original sources of preceding batch members.
+    fn commits_for_replay(
+        &self,
+        base: &str,
+        source: &str,
+        excluded: &[CommitSha],
+    ) -> Result<Vec<(CommitSha, bool)>> {
+        let listing = output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["rev-list", "--reverse", "--topo-order", "--parents", source])
+                .arg(format!("^{base}"))
+                .args(excluded.iter().map(|sha| format!("^{sha}")))
+                .arg("--"),
+        )?;
+        listing
+            .lines()
+            .map(|line| {
+                let (commit, parents) = line.split_once(' ').unwrap_or((line, ""));
+                Ok((
+                    object_id(commit, "commit to replay")?,
+                    parents.contains(' '),
+                ))
+            })
+            .collect()
+    }
+
+    /// Apply the original parent's delta with the same three trees as a
+    /// cherry-pick, without touching a checkout. A proxy for the new parent's
+    /// tree gives merge-tree the original parent as its merge base on Git
+    /// versions that do not accept an explicit merge base. The proxy never
+    /// becomes part of the replayed history.
+    fn replay_commit(&self, onto: &str, source: &str) -> Result<Option<CommitSha>> {
+        let (status, original, stderr) = capture_bytes(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["cat-file", "commit", source]),
+            OUTPUT_TIMEOUT,
+        )?;
+        ensure!(status.success(), "git cat-file failed ({status}): {stderr}");
+        let separator = original
+            .windows(2)
+            .position(|bytes| bytes == b"\n\n")
+            .context("missing commit message separator")?;
+        let headers = &original[..separator];
+        let mut parents = headers
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| line.strip_prefix(b"parent "));
+        let parent = parents
+            .next()
+            .context("missing parent of commit to replay")?;
+        ensure!(parents.next().is_none(), "cannot replay a merge commit");
+        let parent = std::str::from_utf8(parent)?;
+        let write = |tree: &str, parent: &str| {
+            self.write_replayed_commit(tree, parent, headers, &original[separator + 1..])
+        };
+        let proxy = write(&self.tree_of(onto)?, parent)?;
+        let Ok(tree) = self.merged_tree(proxy.as_str(), source)? else {
+            return Ok(None);
+        };
+        Ok(Some(write(&tree, onto)?))
+    }
+
+    /// Copy the raw message and identity headers, including timestamps,
+    /// time zones and any encoding. Omitting signatures leaves the object
+    /// ID determined entirely by its inputs.
+    fn write_replayed_commit(
+        &self,
+        tree: &str,
+        parent: &str,
+        headers: &[u8],
+        message: &[u8],
+    ) -> Result<CommitSha> {
+        let mut input = output_file()?;
+        writeln!(input, "tree {tree}\nparent {parent}")?;
+        for line in headers.split(|byte| *byte == b'\n') {
+            if [b"author ".as_slice(), b"committer ", b"encoding "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+            {
+                input.write_all(line)?;
+                input.write_all(b"\n")?;
+            }
+        }
+        input.write_all(message)?;
+        input.rewind()?;
+        let (status, stdout, stderr) = capture_with_input(
+            self.command().arg("-C").arg(&self.root).args([
+                "hash-object",
+                "-w",
+                "-t",
+                "commit",
+                "--stdin",
+            ]),
+            input,
+            OUTPUT_TIMEOUT,
+        )?;
+        ensure!(
+            status.success(),
+            "git hash-object failed ({status}): {stderr}"
+        );
+        object_id(std::str::from_utf8(&stdout)?, "replayed commit")
+    }
+
     pub fn update_ref(&self, name: &str, value: &str) -> Result<()> {
         output(
             self.command()
@@ -3829,6 +3936,17 @@ impl Repository for GitRepository {
     }
     fn commit_tree(&self, tree: &str, parent: &str, paragraphs: &[String]) -> Result<CommitSha> {
         GitRepository::commit_tree(self, tree, parent, paragraphs)
+    }
+    fn commits_for_replay(
+        &self,
+        base: &str,
+        source: &str,
+        excluded: &[CommitSha],
+    ) -> Result<Vec<(CommitSha, bool)>> {
+        GitRepository::commits_for_replay(self, base, source, excluded)
+    }
+    fn replay_commit(&self, onto: &str, source: &str) -> Result<Option<CommitSha>> {
+        GitRepository::replay_commit(self, onto, source)
     }
     fn update_ref(&self, name: &str, value: &str) -> Result<()> {
         GitRepository::update_ref(self, name, value)

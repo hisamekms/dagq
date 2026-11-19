@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::super::review_programs::{
-    ProgramBackends, ProgramRun, SnapshotProgram, program_scratch, programs_at, programs_for_range,
+    ProgramBackends, ProgramRun, SnapshotProgram, program_scratch, programs_at, required_programs,
     run_program,
 };
 use super::super::{Clock, Queue, Repository, RunFiles, Spawner, Verifier};
@@ -37,14 +37,15 @@ pub struct LandingPrograms<'a> {
 }
 
 /// Where a landing's program reviews run and what the verdict says of the
-/// run: its landing tree and run directory, and `main..rebased`, the diff
-/// that lands.
+/// run: its landing tree and run directory, the commit that supplies the
+/// configuration and scripts, and `from..rebased`, the diff that lands.
 pub(super) struct ProgramsAt<'r> {
     pub run: &'r TaskRun,
     pub worktree: &'r Path,
     pub run_dir: &'r Path,
     pub onto: &'r str,
-    pub main: &'r CommitSha,
+    pub landing: &'r CommitSha,
+    pub from: &'r CommitSha,
     pub rebased: &'r CommitSha,
 }
 
@@ -162,7 +163,9 @@ pub(super) fn run_all(
 /// `head` (`integrate_programs_finished` with `outcome` `passed`): a
 /// verification done again on the same rebased head (a flaky retry, a
 /// handoff's next landing) does not run them again. One held, failed or
-/// handed over on it runs them anew.
+/// handed over on it runs them anew. In a batch the identity is the program
+/// head (the source or the deterministic copy), independent of the verification
+/// commit. A different program parent or source message can change that SHA.
 pub(super) fn passed_before(events: &[RunEvent], head: &CommitSha) -> bool {
     events.iter().any(|event| {
         event.kind == EventKind::IntegrateProgramsFinished
@@ -226,66 +229,92 @@ pub(super) fn landing_programs(
     handing_off: Option<HandoffDrain<'_>>,
     at: &ProgramsAt<'_>,
 ) -> Result<Option<Verdict>> {
-    let (main, rebased) = (at.main, at.rebased);
     let events = queue.run_events(at.run.id())?;
-    if passed_before(&events, rebased) {
+    if passed_before(&events, at.rebased) {
         return Ok(None);
     }
-    let round = events
-        .iter()
-        .filter(|event| event.kind == EventKind::IntegrateProgramsFinished)
-        .count()
-        + 1;
-    let record = |queue: &mut dyn Queue, mut payload: Value| -> Result<()> {
-        payload["main"] = json!(main);
-        payload["head"] = json!(rebased);
-        payload["round"] = json!(round);
-        queue.record_runtime_event(at.run.id(), EventKind::IntegrateProgramsFinished, payload)
-    };
-    // The programs and their scripts of the landing branch's commit, which
-    // is main now (ADR-t1895-2 decision 2), selected by the diff that
-    // lands.
+    let selected = select(
+        repository,
+        verifier,
+        handing_off,
+        at.landing,
+        (at.from, at.rebased),
+    );
+    run_selected(
+        queue,
+        repository,
+        (files, clock),
+        programs,
+        handing_off,
+        at,
+        &events,
+        selected,
+    )
+}
+
+/// Select by the landing diff and read scripts from the landing branch.
+/// Retry a read failure once, with the same handoff rule as execution.
+pub(super) fn select(
+    repository: &dyn Repository,
+    verifier: &dyn Verifier,
+    handing_off: Option<HandoffDrain<'_>>,
+    landing: &CommitSha,
+    (from, head): (&CommitSha, &CommitSha),
+) -> std::result::Result<Vec<SnapshotProgram>, ProgramsEnd> {
     let read = || -> Result<Vec<SnapshotProgram>> {
-        let configured = programs_at(repository, main.as_str(), &|text| {
+        let configured = programs_at(repository, landing.as_str(), &|text| {
             verifier.review_programs_in(text)
         })?
         .effective();
         if configured.is_empty() {
             return Ok(Vec::new());
         }
-        programs_for_range(
-            repository,
-            main.as_str(),
-            &configured,
-            (main.as_str(), rebased.as_str()),
-        )
+        let changed = repository.changed_paths(from.as_str(), head.as_str())?;
+        required_programs(repository, landing.as_str(), &configured, &changed)
     };
-    let selected = match read() {
+    match read() {
+        Err(first) if drains_for_handoff(handing_off) => Err(ProgramsEnd::HandedOver {
+            program: String::new(),
+            why: format!("{first:#}"),
+        }),
+        Err(_) => read().map_err(|again| ProgramsEnd::Held {
+            program: String::new(),
+            why: format!("{again:#}"),
+        }),
+        Ok(selected) => Ok(selected),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_selected(
+    queue: &mut dyn Queue,
+    repository: &dyn Repository,
+    (files, clock): (&dyn RunFiles, &dyn Clock),
+    programs: &LandingPrograms<'_>,
+    handing_off: Option<HandoffDrain<'_>>,
+    at: &ProgramsAt<'_>,
+    events: &[RunEvent],
+    selected: std::result::Result<Vec<SnapshotProgram>, ProgramsEnd>,
+) -> Result<Option<Verdict>> {
+    let round = events
+        .iter()
+        .filter(|event| event.kind == EventKind::IntegrateProgramsFinished)
+        .count()
+        + 1;
+    let record = |queue: &mut dyn Queue, mut payload: Value| -> Result<()> {
+        payload["main"] = json!(at.landing);
+        payload["head"] = json!(at.rebased);
+        payload["round"] = json!(round);
+        queue.record_runtime_event(at.run.id(), EventKind::IntegrateProgramsFinished, payload)
+    };
+    let selected = match selected {
         Ok(selected) => selected,
-        // What to run cannot be known: not the worker's (decision 4), read
-        // once more as a program is run once more.
-        Err(first) => {
-            let end = if drains_for_handoff(handing_off) {
-                Err(ProgramsEnd::HandedOver {
-                    program: String::new(),
-                    why: format!("{first:#}"),
-                })
-            } else {
-                read().map_err(|again| ProgramsEnd::Held {
-                    program: String::new(),
-                    why: format!("{again:#}"),
-                })
-            };
-            match end {
-                Ok(selected) => selected,
-                Err(end) => {
-                    record(
-                        queue,
-                        json!({"outcome": end.outcome(), "programs": [], "error": why_of(&end)}),
-                    )?;
-                    return Ok(Some(verdict(at, &end)));
-                }
-            }
+        Err(end) => {
+            record(
+                queue,
+                json!({"outcome": end.outcome(), "programs": [], "error": why_of(&end)}),
+            )?;
+            return Ok(Some(verdict(at, &end)));
         }
     };
     if selected.is_empty() {
@@ -301,6 +330,10 @@ pub(super) fn landing_programs(
         record(queue, skipped)?;
         return Ok(None);
     }
+    let selected: Vec<_> = selected
+        .into_iter()
+        .map(|program| program.with_range(at.from.as_str(), at.rebased.as_str()))
+        .collect();
     let scratch = program_scratch(programs.scratch, at.run.id());
     // A container run's landing tree, with its git guarded (ADR-t2179-1
     // decision 8).
@@ -354,7 +387,7 @@ fn verdict(at: &ProgramsAt<'_>, end: &ProgramsEnd) -> Verdict {
 /// The verdict on the run of a landing whose programs ended as `end`
 /// (not [`ProgramsEnd::Passed`]), `last` the program run it ended at.
 fn verdict_with_logs(at: &ProgramsAt<'_>, end: &ProgramsEnd, last: Option<&Ran>) -> Verdict {
-    let (main, head, onto) = (at.main, at.rebased, at.onto);
+    let (main, head, onto) = (at.landing, at.rebased, at.onto);
     let (stdout, stderr) = last.map_or((None, None), |ran| {
         let (stdout, stderr) = logs(at.run_dir, &ran.stem);
         (Some(stdout), Some(stderr))
@@ -569,7 +602,9 @@ mod tests {
         let other = "3333333333333333333333333333333333333333";
         assert!(!passed_before(&[], &head));
         assert!(passed_before(
-            &[event(json!({"outcome": "passed", "head": head}))],
+            &[event(
+                json!({"outcome": "passed", "head": head, "main": other})
+            )],
             &head
         ));
         for (outcome, at) in [
