@@ -930,18 +930,25 @@ pub struct DiskNeeds {
     /// What a landing's verification needs free: the reserve with no run
     /// moving or no expectation, else reserve + max(0, I - candidate size).
     pub landing: u64,
-    /// Claims wait while runs move and there is no expectation.
+    /// Claims wait while a run is moving and the worker budget is unknown.
+    /// See [`ClaimsWaitReason::NoSamples`] for how Admission records this wait.
     pub claims_wait: bool,
     /// The relaxation these needs were reckoned under; `None` outside one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relaxed: Option<DiskRelaxed>,
 }
 
-/// A disk rule that defers claims without a hold.
+/// Why the disk rules defer claims regardless of free space.
+/// When this wait is Admission's reason for blocking claims, it appears in
+/// the candidate sample and is tracked as a queue-wide `claim_held`.
+/// A free-space shortage during cleanup that is reclaiming space is a
+/// separate disk block. That pass leaves the reason in the sample and
+/// skips the hold transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimsWaitReason {
-    /// With no expectation only one run moves at a time.
+    /// A run is moving and the worker budget is unknown. Admission blocks
+    /// claims with this disk reason, recorded without free-space details.
     NoSamples,
 }
 

@@ -893,14 +893,24 @@ enum Command {
     /// closed as achieved and whose goal is not a draft, in claim order (highest
     /// `effective_priority`, then most `unblocks`, then lowest ID) less those whose claim the
     /// supervisor last recorded as deferred (`candidates`); the deferred ones apart with the
-    /// recorded reason, files, runs and since (`deferred`), and what holds every claim now as the
-    /// supervisors recorded it, or `no_supervisor` (`held`). The deferrals are the supervisor's
-    /// last judgment, kept while it does not judge again (full slots, a hold), the class and
-    /// investigation limits' among them: a Spike held while Spikes fill `[supervisor]
+    /// recorded reason, files, runs and since (`deferred`).
+    ///
+    /// `held` includes the active queue-wide `claim_held` and other hold records for missing
+    /// run environment programs, repository configuration, CI and the landing branch. It shows
+    /// spacing waits as `claim_spacing`. Other Admission reasons from live supervisors' candidate
+    /// samples appear as `claim_admission` when there is no active `claim_held` for that supervisor
+    /// and reason. If no supervisor is live, `held` reports `no_supervisor`.
+    ///
+    /// A `claim_held` record includes `value` and `threshold` when it has hold details.
+    /// For a free-space hold these are the free and required bytes, and `disk` (the required
+    /// space breakdown) and `disk_status` appear when available.
+    ///
+    /// The deferrals are the supervisor's last judgment, kept until it judges again.
+    /// They include the class and investigation limits. A Spike held while Spikes fill `[supervisor]
     /// max_spikes` shows `spike_limit`, and one that would open an investigation past
     /// `max_investigations` shows `investigation_limit` once the Spike limit lets Spikes go.
     /// While the claims of the whole queue are held (`claim_held` in `held`), each deferral
-    /// carries that hold's reason (`claims_held`): it is the last one recorded before the hold.
+    /// carries that hold's reason (`claims_held`).
     /// The ready tasks that never enter the order are counted by why, with their lowest IDs
     /// (`excluded`: `draft_goal`, `dependencies`, `goal_dependencies`). Does not claim.
     Candidates {
@@ -1494,12 +1504,18 @@ enum Command {
         id: i64,
     },
     /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks, the open planning requests (not for a planner) and the event cursor, without changing anything.
-    /// `claim_hold` is the hold on the whole queue's claims in place now, null while none is.
-    /// Its reason and `since` come from the `claim_held` record. While a live supervisor holds
-    /// claims for disk space, `value`, `threshold`, `disk` (the need's breakdown), `message` and
-    /// `disk_status` come from that supervisor's latest pass, not a copy of `claim_held`.
-    /// Otherwise, or when no live disk reading is available, they remain as recorded in
-    /// `claim_held`.
+    ///
+    /// `claim_hold` uses the active `claim_held` record of a live supervisor when present.
+    /// With no active record, if at least one supervisor is live and all live supervisors'
+    /// candidate samples (`claim_admission`) show `claims_held: true`, it uses one of those
+    /// samples, with its `admission_reason` as `reason`. Otherwise `claim_hold` is null.
+    /// `since` is the time of the record or sample used.
+    ///
+    /// `value` and `threshold` appear when the hold record has details. For a free-space hold
+    /// these are the free and required bytes, and `disk` (the required space breakdown) and
+    /// `disk_status` appear when available. The supervisor's latest disk reading supplies
+    /// these details and the message when available, with the event's values as the fallback.
+    ///
     /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
     /// (it may repeat one). A run's `progress.phase` is the phase it last recorded
     /// (`run_phase_changed`) and `since` when; a run with no phase recorded has a null phase and
