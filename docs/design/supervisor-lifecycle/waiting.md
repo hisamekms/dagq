@@ -26,26 +26,28 @@ related:
 
 生きているsessionを持つrunが人の答えか人の操作だけを待っているあいだ、そのrunを並列の上限のslotから外し（**待ち**）、空いたslotで他のtaskをclaimする。
 待ちの約束は[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)、最初の決定は[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)を読む。
-待ちの実行の入口は `src/application/supervise/execution/waiting.rs`、イベントからの状態の導出と集計の入口は `src/domain/waiting.rs`。
+戻りと新しいclaimの判断の入口は `src/domain/admission.rs`。
 
 着地の列は人の待ちとは別で、workerのslotとの境界は[claimを控える](claim-hold.md#workerのslotと着地の列)を読む。
 着地の列はsessionを閉じているため人の待ちの上限にも数にも含めない。
 人の待ちから戻れるrunがworkerのslotの空きを待つあいだは、新しいclaimをしない。
+claimを控える判断では、待ちが終わって空きslotを待つrunのうち、Admissionが「今進めるrun」と判定するものを戻り待ちに数える。
+「今進めるrun」はholdも答え待ちもなく、その段階に効くCI・env・landing branchの停止もないrunを指す（[ADR-t5292-1](../../adr/2026-11-18-t5292-1-admission-unifies-starts-resources-and-reasons.md)決定2）。
+人の答えを待ち続けているrunとhold中のrunはこの数から外れ、戻り待ちのrunに残る未回答のaskやCI・env・landing branchの停止は戻りを妨げない。
 
 ## 待ちの出入り
 
-待ちはrunのstatusを変えずにslotに付ける印で、戻ればphaseの続きから進む（印の定義は `Waiting`）。
-停止要求を受けたdrainは、holdや答え待ちで止まったrunの待ちを次のsupervisorに渡す（[ADR-t5293-1](../../adr/2026-11-19-t5293-1-drain-keeps-stopped-waits-and-landing-skips-unanswered-entries.md)）。
-slotの数え方を知りたいときは `Supervisor::used_slots` を読む。
+待ちはrunのstatusを変えずにslotに付ける印で、戻ればphaseの続きから進む。
 workerのslotは人の待ちと着地の列を除き、着地の順番待ちのうち上限を超えた分だけを含む。
-戻りもこのworkerのslotの空きを待つ。
+戻り待ちはこのworkerのslotの空きを待つ。
 
-待ちに入れる条件と上限を超えたrunの扱いは `Supervisor::start_waits`、見張りが待ちを終える条件は `Supervisor::watch_waiting` を読む。
-見張りはsessionへ送らず、答えはslotに戻った後のtickで届ける。
+待ちの最中は答えをsessionへ届けず、slotに戻ってから届ける。
 失ったsessionの開き直しもbackgroundで行い、workspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[開き直しの境界](headless-worker.md#待ちの最中に失ったsessionの開き直し)）。
-待ちを終えた記録と戻り先は `Supervisor::end_wait`、戻す順と計時の再開は `Supervisor::return_waiting_runs` を読む。
-今進めるrunを戻す処理は新しいclaimより先で、claimを止めたあいだもdrain中も続く。
-hold中のrunは待ちが終わってもslotに戻さない。
+
+答えが届くなどして待ちが終わり、workerの空きslotを待つrunは、hold中はslotの外に残って未使用のディスク予約を持たず、holdを外すまでslotを取り戻さない。
+claimを止めたあいだも戻りは進み、holdされていないrunは答えが届いて待ちが終わればdrain中も空いたslotに戻れる。
+停止要求を受けたdrainは進行中の工程を終え、待ちのrunでは今進めるものだけを待つ。
+hold中のrunがslotの外に残っていてもdrainは終わり、holdや答え待ちで止まったrunは待ちの記録とleaseを保ったまま次のsupervisorに渡る（[ADR-t5293-1](../../adr/2026-11-19-t5293-1-drain-keeps-stopped-waits-and-landing-skips-unanswered-entries.md)決定2）。
 
 ## taskのhold
 
