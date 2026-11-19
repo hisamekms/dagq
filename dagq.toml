@@ -159,6 +159,13 @@ workflow = "it-coverage-map.yml"
 max_age_hours = 48
 warn_before_hours = 12
 
+[verification]
+# code の run の着地の検証は 25〜60 分かかる。2026-11-18 は着地待ちが 3〜6 本たまり、3〜4 時間待つ run があった。
+# 上限を 4 本にすると、典型的な待ちの本数を 1 回の検証で着地でき、失敗時に二分する深さは最大 2 段（log2 4）になる。
+# 失敗率が今の着地の検証と同程度なら、1 本ずつ検証する場合より検証回数が減る見込み。
+# 値を変えるときは変更に印を打ち、kpi --compare の着地数と同じ期間に集計した検証回数を印の前後で比べる。
+landing_batch_size = 4
+
 [landing_verification]
 # 着地の検証で、task の coverage の関門のコマンドを、.config/landing-unit-skip.toml に載ったものと差分が当たらない
 # .config/landing-unit-path-groups.toml の組を除く unit test 全件と影響範囲で絞った IT に置き換える
