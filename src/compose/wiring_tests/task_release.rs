@@ -310,6 +310,61 @@ fn drain_leaves_a_held_run_in_its_ended_wait_for_the_next_supervisor() {
 }
 
 #[test]
+fn drain_returns_an_answered_wait_without_claiming_ready_work() {
+    use crate::domain::EventKind;
+    use std::time::Duration;
+
+    let token = LeaseToken::new("draining-answered-wait");
+    let wiring = Wiring::new(
+        "drain_returns_an_answered_wait_without_claiming_ready_work",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(Duration::from_millis(1))
+    .with_handoff(token.clone());
+    let (run, ask) = session_waiting_for_scope(&wiring, &token);
+    let ready = wiring.ready_task(&["true"]);
+    let mut queue = wiring.queue();
+    queue.answer(ask, "Use this task's scope.").unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunWaitingEnded,
+            json!({"ask_id": ask, "ask_kind": "worker_question", "cause": "answered", "ask_ids": [ask]}),
+        )
+        .unwrap();
+    // The wrapper exited while the run was queued for a slot. Its final
+    // poll can settle the session as soon as the run returns.
+    super::harness::connect(&wiring.db)
+        .execute(
+            "INSERT INTO run_processes(run_id, role, pid, exited_at, exit_code) \
+             VALUES (?1, 'wrapper', 1234, unixepoch(), 0)",
+            [run.id().as_str()],
+        )
+        .unwrap();
+
+    let outcome = wiring.supervise_draining();
+
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    let detail = queue.show(run.task_id()).unwrap();
+    assert!(
+        payloads(&detail, "run_phase_changed")
+            .iter()
+            .any(|event| event["phase"] == "returning" && event["cause"] == "handoff")
+    );
+    assert_eq!(payloads(&detail, "run_slot_regained").len(), 1);
+    assert!(queue.show(ready).unwrap().runs.is_empty());
+    let sample = queue
+        .latest_event_of(EventKind::CandidatesSampled.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(sample.payload["claims_held"], true);
+    assert_eq!(sample.payload["admission_reason"], "Draining");
+}
+
+#[test]
 fn drain_leaves_an_unanswered_wait_and_its_lease_for_the_next_supervisor() {
     use std::time::Duration;
 

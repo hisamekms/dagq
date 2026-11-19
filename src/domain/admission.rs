@@ -101,7 +101,6 @@ pub fn disk_wait(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    Return { ended_at: i64 },
     Landing { needs_worker: bool },
     Slot(SlotKind),
 }
@@ -133,6 +132,7 @@ pub enum Blocked {
     Environment,
     LandingBranch,
     WorkerSlot,
+    /// An eligible returning run takes precedence over a fresh claim.
     Returning,
     Disk(Option<ClaimsWaitReason>),
     Load,
@@ -187,7 +187,6 @@ impl Blocked {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Resources {
     pub free_slots: usize,
-    pub returning: usize,
     pub gates: Gates,
     pub repository_config_missing: bool,
     pub service_down: bool,
@@ -231,6 +230,12 @@ pub fn probe(kind: SlotKind, resources: Resources) -> Option<Blocked> {
         .map(|(_, reason)| *reason)
 }
 
+/// Apply the worker line's return precedence when a claim group rereads
+/// the ready order before a transaction.
+pub fn claim_waits_for_return(priority: Priority, highest_return: Option<Priority>) -> bool {
+    highest_return.is_some_and(|returning| returning >= priority)
+}
+
 /// Capacity for the existing slots-full observations, before other holds.
 pub fn claim_room(resources: Resources) -> super::light_slots::ClaimRoom {
     use super::light_slots::ClaimRoom;
@@ -268,8 +273,6 @@ impl Resources {
                 Some(Blocked::QueueService)
             } else if let Some(hold) = self.claim_hold {
                 Some(hold)
-            } else if self.returning > 0 {
-                Some(Blocked::Returning)
             } else if self.free_slots == 0 {
                 Some(Blocked::WorkerSlot)
             } else if self.disk_claims == Some(0) {
@@ -290,7 +293,7 @@ impl Resources {
             Kind::Slot(SlotKind::Claim) => self.claim_block(),
             Kind::Slot(SlotKind::Resume) => self.gates.blocked().or(self.worker_block()),
             Kind::Slot(SlotKind::Recovery) if self.gates.branch => Some(Blocked::LandingBranch),
-            Kind::Slot(SlotKind::Recovery) | Kind::Return { .. } => self.worker_block(),
+            Kind::Slot(SlotKind::Recovery | SlotKind::Return { .. }) => self.worker_block(),
             Kind::Landing { .. } => self.gates.blocked().or({
                 if self.container_held {
                     Some(Blocked::LandingHeld)
@@ -310,17 +313,15 @@ impl Resources {
     }
 }
 
-/// Order starts as the current runtime does: returns by wait end, the
-/// landing selected by LandingQueue, then the worker priority line.
+/// Admit the landing selected by LandingQueue and the worker priority
+/// line, which includes returns from human waits.
 /// Call again with refreshed facts after a start or a failed attempt. A
 /// queued e2e has already passed LandingQueue's worker replacement check.
 pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Decision<T> {
-    let mut returns = Vec::new();
     let mut landings = Vec::new();
     let mut slots = Vec::new();
     for candidate in candidates {
         match candidate.kind {
-            Kind::Return { ended_at } => returns.push((ended_at, candidate)),
             Kind::Landing { .. } => landings.push(candidate),
             Kind::Slot(kind) => slots.push(SlotCandidate {
                 kind,
@@ -329,15 +330,12 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
             }),
         }
     }
-    returns.sort_by_key(|(at, _)| *at);
     let mut decision = Decision {
         starts: Vec::new(),
         blocked: Vec::new(),
     };
-    for candidate in returns
+    for candidate in landings
         .into_iter()
-        .map(|(_, candidate)| candidate)
-        .chain(landings)
         .chain(slot_order(slots).into_iter().map(|slot| slot.item))
     {
         // LandingQueue already checked the selected entry's own stops.
@@ -358,10 +356,6 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
                 if needs_worker {
                     resources.free_slots = resources.free_slots.saturating_sub(1);
                 }
-            }
-            Kind::Return { .. } => {
-                resources.free_slots -= 1;
-                resources.returning = resources.returning.saturating_sub(1);
             }
             Kind::Slot(kind) => {
                 resources.free_slots -= 1;
@@ -401,13 +395,6 @@ mod tests {
         .unwrap();
         for (resources, expected) in [
             (open, None),
-            (
-                Resources {
-                    returning: 1,
-                    ..open
-                },
-                Some(Blocked::Returning),
-            ),
             (
                 Resources {
                     free_slots: 0,
@@ -498,55 +485,110 @@ mod tests {
         }
     }
 
+    fn returning(item: &'static str, priority: Priority, ended_at: i64) -> Candidate<&'static str> {
+        Candidate::slot(SlotKind::Return { ended_at }, priority, item)
+    }
+
     #[test]
-    fn starts_keep_return_order_then_the_landing_and_the_priority_line() {
-        let returning = |item, ended_at| Candidate {
-            item,
-            kind: Kind::Return { ended_at },
-            priority: Priority::Low,
-            progress: Progress::default(),
-        };
+    fn returns_compete_by_effective_priority_then_wait_end() {
+        use Priority::{High, Low, Normal};
+
         let decision = admit(
             vec![
-                Candidate::slot(SlotKind::Claim, Priority::Normal, "normal claim"),
-                returning("later return", 3),
-                Candidate::slot(SlotKind::Recovery, Priority::Normal, "recovery"),
-                Candidate::slot(SlotKind::Resume, Priority::Normal, "resume"),
-                Candidate::slot(SlotKind::Claim, Priority::Interrupt, "interrupt claim"),
-                returning("earlier return", 1),
-                Candidate {
-                    item: "queue head",
-                    kind: Kind::Landing {
-                        needs_worker: false,
-                    },
-                    priority: Priority::Low,
-                    progress: Progress::default(),
-                },
+                returning("oldest low return", Low, 0),
+                returning("later normal return", Normal, 3),
+                Candidate::slot(SlotKind::Recovery, Normal, "normal recovery"),
+                Candidate::slot(SlotKind::Resume, Normal, "normal resume"),
+                returning("earlier normal return", Normal, 1),
+                returning("latest high return", High, 4),
             ],
             Resources {
                 free_slots: 5,
-                returning: 2,
                 ..Resources::default()
             },
         );
         assert_eq!(
             decision
                 .starts
-                .iter()
+                .into_iter()
                 .map(|start| start.item)
                 .collect::<Vec<_>>(),
             [
-                "earlier return",
-                "later return",
-                "queue head",
-                "interrupt claim",
-                "resume",
-                "recovery"
+                "latest high return",
+                "earlier normal return",
+                "later normal return",
+                "normal resume",
+                "normal recovery",
             ],
         );
         assert_eq!(decision.blocked.len(), 1);
-        assert_eq!(decision.blocked[0].0.item, "normal claim");
+        assert_eq!(decision.blocked[0].0.item, "oldest low return");
         assert_eq!(decision.blocked[0].1, Blocked::WorkerSlot);
+    }
+
+    #[test]
+    fn higher_priority_claims_and_resumes_take_the_slot_before_a_low_return() {
+        use Priority::{High, Interrupt, Low, Urgent};
+
+        for priority in [Interrupt, Urgent, High] {
+            assert!(!claim_waits_for_return(priority, Some(Low)));
+            for kind in [SlotKind::Claim, SlotKind::Resume] {
+                let result = admit(
+                    vec![
+                        returning("return", Low, 1),
+                        Candidate::slot(kind, priority, "higher"),
+                    ],
+                    Resources {
+                        free_slots: 1,
+                        ..Resources::default()
+                    },
+                );
+                assert_eq!(result.starts[0].item, "higher", "{priority:?} {kind:?}");
+                assert_eq!(result.blocked[0].0.item, "return");
+                assert_eq!(result.blocked[0].1, Blocked::WorkerSlot);
+            }
+        }
+        assert!(claim_waits_for_return(Low, Some(Low)));
+        assert!(claim_waits_for_return(Low, Some(High)));
+        assert!(!claim_waits_for_return(Low, None));
+        for held in [false, true] {
+            let mut returning = returning("return", Low, 1);
+            returning.progress.held = held;
+            let result = admit(
+                vec![Candidate::slot(SlotKind::Claim, Low, "claim"), returning],
+                Resources {
+                    free_slots: 1,
+                    ..Resources::default()
+                },
+            );
+            assert_eq!(result.starts[0].item, if held { "claim" } else { "return" });
+            assert_eq!(
+                result.blocked[0].1,
+                if held {
+                    Blocked::TaskHold
+                } else {
+                    Blocked::WorkerSlot
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_claim_hold_leaves_the_slot_available_for_a_return() {
+        let result = admit(
+            vec![
+                Candidate::slot(SlotKind::Claim, Priority::Interrupt, "claim"),
+                returning("return", Priority::Low, 1),
+            ],
+            Resources {
+                free_slots: 1,
+                claim_hold: Some(Blocked::Load),
+                ..Resources::default()
+            },
+        );
+        assert_eq!(result.starts[0].item, "return");
+        assert_eq!(result.blocked[0].0.item, "claim");
+        assert_eq!(result.blocked[0].1, Blocked::Load);
     }
 
     #[test]

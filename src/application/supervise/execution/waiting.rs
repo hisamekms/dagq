@@ -4,12 +4,13 @@
 //! slot, keeps its lease and is watched without anything sent to its
 //! session, within `--max-waiting`; once the wait ends it goes back to a
 //! slot (at once when a person already moved the session, else when one is
-//! free, before any new work) and its phase goes on where it stopped.
+//! free in the worker priority line) and its phase goes on where it stopped.
 
 use super::reopen::Reopen;
 use super::*;
 use crate::domain::EventKind;
-use crate::domain::admission::{self, Candidate, Kind, Progress, Resources};
+use crate::domain::admission::{self, Candidate, Progress, Resources};
+use crate::domain::slot_order::SlotKind;
 use crate::domain::{
     Ask,
     waiting::{
@@ -58,7 +59,7 @@ pub(super) struct Waiting {
     /// It is the second after the ask's ([`asked_since`]): ask times are
     /// whole seconds, so a marker in the ask's second is taken as older.
     pub(super) since: SystemTime,
-    /// When and how it ended, for a run that waits for a free slot.
+    /// When (Unix milliseconds) and how it ended, while it waits for a slot.
     pub(super) ended: Option<(i64, WaitCause)>,
 }
 
@@ -660,7 +661,8 @@ impl Supervisor<'_> {
         let Some(waiting) = &mut slot.waiting else {
             return Ok(());
         };
-        let now = self.generators.clock.now();
+        let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
+        let now = now_ms.div_euclid(1000);
         self.queue.record_runtime_event(
             slot.run.id(),
             EventKind::RunWaitingEnded,
@@ -674,7 +676,18 @@ impl Supervisor<'_> {
         )?;
         info!(run_id = %slot.run.id(), "run {}'s wait ended ({}) after {}s", slot.run.id(), cause.as_str(), now - waiting.started_at);
         slot.consumed.extend(waiting.asks.iter().map(|(id, _)| *id));
-        waiting.ended = Some((now, cause));
+        // Use the journal time used by adoption. A buffered event or an
+        // unavailable journal read leaves the time this supervisor saw.
+        let ended_at = if cause.returns_at_once() {
+            now_ms
+        } else {
+            self.queue
+                .run_events(slot.run.id())
+                .ok()
+                .and_then(|events| WaitState::of(&events)?.ended.map(|(at, _)| at))
+                .unwrap_or(now_ms)
+        };
+        waiting.ended = Some((ended_at, cause));
         if cause.returns_at_once() {
             // The slot is out of the slot table while it is watched.
             let used = self.used_slots() + 1;
@@ -703,7 +716,7 @@ impl Supervisor<'_> {
             EventKind::RunSlotRegained,
             slot_regained(
                 now,
-                waiting.ended.map(|(at, _)| at),
+                waiting.ended.map(|(at, _)| at.div_euclid(1000)),
                 used,
                 self.claim.parallel,
             ),
@@ -712,73 +725,73 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Put the runs whose wait ended back in the slots, the earliest end
-    /// first, while a slot is free (decision 8): before any new work, and
-    /// also while the supervisor drains, whose end waits for them.
-    /// The drive loop calls this each pass before handoff and fill_slots,
-    /// even with claiming stopped. The current phase resumes; a worker
-    /// question's answer is submitted as the next turn after return.
+    /// Admit returns on passes that drain or have stopped starting work.
+    /// The normal fill pass includes these candidates in its worker line.
     pub(super) fn return_waiting_runs(&mut self) -> Result<()> {
-        let decision = admission::admit(
-            self.return_candidates()?,
-            Resources {
-                free_slots: self.claim.parallel.saturating_sub(self.used_slots()),
-                ..Resources::default()
-            },
-        );
-        for mut candidate in decision.starts {
+        if !self.claim.slots.iter().any(|slot| {
+            slot.waiting
+                .as_ref()
+                .is_some_and(|wait| wait.ended.is_some())
+        }) {
+            return Ok(());
+        }
+        let graph = dependency_graph(self.queue.graph_input()?, None);
+        let effective = graph
+            .tasks
+            .iter()
+            .map(|node| (node.id, node.effective_priority))
+            .collect();
+        let resources = Resources {
+            free_slots: self.claim.parallel.saturating_sub(self.used_slots()),
+            ..Resources::default()
+        };
+        for candidate in admission::admit(self.return_candidates(&effective)?, resources).starts {
+            // The preceding return's records may have taken time to write.
             let index = candidate.item;
-            // The preceding return can take time to record. A hold may
-            // have arrived before this run regains its worker slot.
-            candidate.progress =
-                self.run_progress(&self.claim.slots[index].run, Default::default(), false)?;
-            if !admission::admit(
-                vec![candidate],
-                Resources {
-                    free_slots: self.claim.parallel.saturating_sub(self.used_slots()),
-                    ..Resources::default()
-                },
-            )
-            .starts_work()
+            if self
+                .run_progress(&self.claim.slots[index].run, Default::default(), false)?
+                .can_progress()
             {
-                continue;
-            }
-            let now = self.generators.clock.monotonic();
-            let Some(waiting) = self.claim.slots.regain(index, &*self.files, now) else {
-                continue;
-            };
-            self.claim
-                .slots
-                .note_phase(index, EventKind::RunSlotRegained.as_str(), &*self.queue);
-            let run = self.claim.slots[index].run.id().clone();
-            let used = self.used_slots();
-            if let Err(error) = self.record_regained(&run, &waiting, used) {
-                warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: its return to a slot could not be recorded: {error:#}");
+                self.regain_waiting_run(index);
             }
         }
         Ok(())
     }
 
-    pub(super) fn return_candidates(&self) -> Result<Vec<Candidate<usize>>> {
+    pub(super) fn regain_waiting_run(&mut self, index: usize) {
+        let now = self.generators.clock.monotonic();
+        let Some(waiting) = self.claim.slots.regain(index, &*self.files, now) else {
+            return;
+        };
         self.claim
             .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let (ended_at, _) = slot.waiting.as_ref()?.ended?;
-                // The wait ended even if its ask is still open, for
-                // example when a revise produced a receipt on its own.
-                Some(
-                    self.run_progress(&slot.run, Default::default(), false)
-                        .map(|progress| Candidate {
-                            item: index,
-                            kind: Kind::Return { ended_at },
-                            priority: Priority::Normal,
-                            progress,
-                        }),
-                )
-            })
-            .collect()
+            .note_phase(index, EventKind::RunSlotRegained.as_str(), &*self.queue);
+        let run = self.claim.slots[index].run.id().clone();
+        let used = self.used_slots();
+        if let Err(error) = self.record_regained(&run, &waiting, used) {
+            warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: its return to a slot could not be recorded: {error:#}");
+        }
+    }
+
+    pub(super) fn return_candidates(
+        &mut self,
+        effective: &HashMap<TaskId, Priority>,
+    ) -> Result<Vec<Candidate<usize>>> {
+        let mut candidates = Vec::new();
+        for index in 0..self.claim.slots.len() {
+            let slot = &self.claim.slots[index];
+            let Some((ended_at, _)) = slot.waiting.as_ref().and_then(|wait| wait.ended) else {
+                continue;
+            };
+            // A wait may end with an open ask, for instance when a revise
+            // produced a receipt. Its next step is free to advance.
+            let progress = self.run_progress(&slot.run, Default::default(), false)?;
+            let priority = self.line_priority(effective, slot.run.task_id())?;
+            let mut candidate = Candidate::slot(SlotKind::Return { ended_at }, priority, index);
+            candidate.progress = progress;
+            candidates.push(candidate);
+        }
+        Ok(candidates)
     }
 
     /// A stop finishes work in progress and waits that can proceed. It
@@ -873,8 +886,7 @@ impl Supervisor<'_> {
             asks,
             started_at: since_secs,
             since: asked_since(asked_at),
-
-            ended: state.ended.map(|(ms, cause)| (ms.div_euclid(1000), cause)),
+            ended: state.ended,
         };
         let held = self.queue.hold_guard(slot.run.task_id())?.is_some();
         let restore = restore_wait(
@@ -901,7 +913,7 @@ impl Supervisor<'_> {
             )?;
             // Over the limit, the same asks may start a wait later: they
             // are not taken as consumed here.
-            waiting.ended = Some((now, WaitCause::PhaseChanged));
+            waiting.ended = Some((now * 1000, WaitCause::PhaseChanged));
         }
         slot.waiting = Some(waiting);
         let used = self.used_slots() + 1;
@@ -1022,7 +1034,7 @@ mod tests {
                 asks: vec![(AskId::new(1), AskKind::WorkerQuestion)],
                 started_at: asked,
                 since: asked_since(asked),
-                ended: Some((asked + 3600, WaitCause::Answered)),
+                ended: Some(((asked + 3600) * 1000, WaitCause::Answered)),
             },
         );
         table

@@ -38,7 +38,7 @@ related:
 ## 流れ
 
 ```text
-起動 ── 登録・heartbeat ──► pass: 読み直し → adopt → slotを渡す順（再開・復旧job・claim）
+起動 ── 登録・heartbeat ──► pass: 読み直し → adopt → slotを渡す順（戻り・再開・復旧job・claim）
 claim ──► provision ──► 監視（tick）──► sessionの終わり ──► 検証 ──► review ──► 着地
                                                      └──► needs_session / failed ──► 再開 / 復旧job
 ```
@@ -71,7 +71,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## passの始め
 
 - 各passの検査と設定の読み直しの順は`Supervisor::drive`のコメントで、設定の変更は再起動なしに効く。
-- 待ちが終わり進めるrunは新しい仕事より先に（drain中も）slotへ戻す（`return_waiting_runs`、[人の答えを待つrun](waiting.md)）。
+- drain中と新しいclaimを止めたpassも、待ちが終わり進めるrunをslotへ戻す（[人の答えを待つrun](waiting.md)）。
 
 ## adopt
 
@@ -80,10 +80,11 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## slotを渡す順とclaim
 
-- 再開・復旧job・claimは1つの候補の列になり、taskの効く優先度の降順にslotを受ける（`domain::slot_order`のmodule doc、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
+- 戻り・再開・復旧job・claimは1つの候補の列になり、taskの効く優先度の降順にslotを受ける（[ADR-t5292-1](../../adr/2026-11-18-t5292-1-admission-unifies-starts-resources-and-reasons.md)の決定3）。
+- 同じ効く優先度では戻り・再開・復旧job・claimの順にし、戻りどうしは待ちが終わった古い順にする。
 - Admissionは戻り・着地・slotを使う新しい仕事を、候補と資源の写しから順番と停止理由にする。
 - supervisorはAdmissionの許可に従って仕事を始める。
-- 戻りは待ちが終わった順に先に扱い、着地は共通の列が選んだ候補を受け取る。
+- 着地は共通の列が選んだ候補を受け取る。
 - 保留された候補のためにslotを空けて待たず、[今進めるrun](claim-hold.md#workerのslotと着地の列)から着地待ちと戻り待ちを数える。
 - 効く優先度は`application::effective_priority`、goal間のrankが無いことは[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定2・4・8。
 - claimの規則の順は`domain::ClaimRank`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定4）、控えと区分の上限とagingは[claimを控える](claim-hold.md)。

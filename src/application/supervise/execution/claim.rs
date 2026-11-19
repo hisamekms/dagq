@@ -1,6 +1,6 @@
 //! Filling the slots: a fill pass adopts and recovers the runs other
 //! supervisors left, then starts the candidates of one line by effective
-//! priority (ADR-t1850-1): resumes, recovery jobs and the claim loop of
+//! priority (ADR-t5292-1): returns, resumes, recovery jobs and the claim loop of
 //! each priority. Here are that pass, the claims and their provisioning,
 //! and what holds them before a claim starts: the claim hold (disk, load),
 //! the landing branch and its recheck, and the `[run.env]` programs; also
@@ -16,8 +16,9 @@ use super::*;
 use crate::domain::admission::{self, Blocked, Candidate, Gates, Resources};
 use crate::domain::slot_order::SlotKind;
 
-/// What a candidate in the line of a fill pass starts (ADR-t1850-1).
+/// What a candidate in the line of a fill pass starts (ADR-t5292-1).
 enum LineItem {
+    Return(usize),
     Resume(Box<ResumeCandidate>),
     Recovery(Box<TaskRun>),
     /// The claim loop of the candidate's priority (it reads its own order).
@@ -123,7 +124,7 @@ impl Supervisor<'_> {
         self.apply_triage_answers()?;
         // A slot the runs freed since the last pass ends the wait for one
         // before anything takes it again (ADR-t1662-1 decision 6).
-        self.note_admission_slots_full(parallel)?;
+        self.note_admission_slots_full(parallel);
         // A session that ended on a full disk is resumed once there is
         // room, before the resumes below take it into a free slot (goal
         // 260).
@@ -163,8 +164,8 @@ impl Supervisor<'_> {
         } else {
             Vec::new()
         };
-        // The resumes, the recovery jobs and the claims stand in one line
-        // by the effective priority of their task (ADR-t1850-1); a held
+        // Returns, resumes, recovery jobs and claims stand in one line
+        // by the effective priority of their task (ADR-t5292-1); a held
         // kind only leaves the line, and holds no slot for itself. Read
         // after the candidates: a run out of resumes may have made its task
         // ready again for a claim in this pass.
@@ -240,7 +241,7 @@ impl Supervisor<'_> {
             } else {
                 // Only while there is room for a claim, as the claim loop
                 // reads the candidates only then.
-                let capacity = self.admission_capacity(parallel)?;
+                let capacity = self.admission_capacity(parallel);
                 let reason = admission::probe(SlotKind::Claim, capacity);
                 let mut pass = ClaimPass {
                     spaced_since,
@@ -279,14 +280,24 @@ impl Supervisor<'_> {
         // The claims of one priority run together: the claim loop takes
         // every candidate of that priority or higher, in its own order.
         let mut preceding_priority = None;
-        while !line.is_empty() {
-            // Start only the first admitted item, then refresh capacity:
-            // a resume may resolve without taking a slot, and a claim
-            // group may consume several slots or stop claiming altogether.
-            let capacity = self.admission_capacity(parallel)?;
+        loop {
+            // Read returns again after each start. A resume may change the
+            // slot table, and a hold or its release may have arrived.
+            line.extend(
+                self.return_candidates(&effective)?
+                    .into_iter()
+                    .map(|candidate| Candidate {
+                        item: LineItem::Return(candidate.item),
+                        kind: candidate.kind,
+                        priority: candidate.priority,
+                        progress: candidate.progress,
+                    }),
+            );
+            if line.is_empty() {
+                break;
+            }
             let resources = Resources {
-                free_slots: capacity.free_slots,
-                returning: capacity.returning,
+                free_slots: self.admission_capacity(parallel).free_slots,
                 gates: self.admission_gates(),
                 ..claims.as_ref().map_or(gates_only, |pass| pass.resources)
             };
@@ -317,8 +328,10 @@ impl Supervisor<'_> {
             };
             line = starts
                 .chain(decision.blocked.drain(..).map(|(candidate, _)| candidate))
+                .filter(|candidate| !matches!(candidate.item, LineItem::Return(_)))
                 .collect();
             match candidate.item {
+                LineItem::Return(index) => self.regain_waiting_run(index),
                 LineItem::Resume(resume) => {
                     self.note_resume_slot_wait(
                         &resume,
@@ -342,7 +355,7 @@ impl Supervisor<'_> {
             preceding_priority = Some(candidate.priority);
         }
         // The slots as the pass leaves them.
-        self.note_admission_slots_full(parallel)?;
+        self.note_admission_slots_full(parallel);
         if let Some(pass) = claims {
             end = pass.end;
             if !self.claim.claiming {
@@ -374,29 +387,23 @@ impl Supervisor<'_> {
         }
     }
 
-    fn admission_capacity(&self, parallel: usize) -> Result<Resources> {
-        Ok(Resources {
+    fn admission_capacity(&self, parallel: usize) -> Resources {
+        Resources {
             free_slots: parallel.saturating_sub(self.used_slots()),
-            returning: self
-                .return_candidates()?
-                .iter()
-                .filter(|run| run.progress.can_progress())
-                .count(),
             ..Resources::default()
-        })
+        }
     }
 
-    fn note_admission_slots_full(&mut self, parallel: usize) -> Result<()> {
-        let room = admission::claim_room(self.admission_capacity(parallel)?);
+    fn note_admission_slots_full(&mut self, parallel: usize) {
+        let room = admission::claim_room(self.admission_capacity(parallel));
         self.claim
             .note_slots_full(&*self.queue, self.registration.token(), parallel, room);
-        Ok(())
     }
 
     /// The effective priority of `task_id` in the line of the fill pass
     /// (ADR-t1850-1): the graph's, else (a task the graph read before it
     /// does not hold) its own.
-    fn line_priority(
+    pub(super) fn line_priority(
         &mut self,
         effective: &HashMap<TaskId, Priority>,
         task_id: TaskId,
@@ -425,10 +432,8 @@ impl Supervisor<'_> {
         pass: &mut ClaimPass,
     ) -> Result<ClaimStep> {
         loop {
-            let capacity = self.admission_capacity(parallel)?;
             let resources = Resources {
-                free_slots: capacity.free_slots,
-                returning: capacity.returning,
+                free_slots: self.admission_capacity(parallel).free_slots,
                 gates: self.admission_gates(),
                 ..pass.resources
             };
@@ -446,7 +451,7 @@ impl Supervisor<'_> {
             // Less the candidates deferred on a conflict hotspot (ADR-0069)
             // or held by a class limit.
             let graph = dependency_graph(self.queue.graph_input()?, None);
-            let claimable = self.claimable(&graph, None, &pass.trial.providers)?;
+            let mut claimable = self.claimable(&graph, None, &pass.trial.providers)?;
             // The candidates of a lower priority wait for the resumes and
             // recovery jobs before them in the line (ADR-t1850-1).
             let effective: HashMap<TaskId, Priority> = graph
@@ -454,10 +459,25 @@ impl Supervisor<'_> {
                 .iter()
                 .map(|node| (node.id, node.effective_priority))
                 .collect();
-            let mut order = claimable.order.clone();
-            order.retain(|id| effective.get(id).is_some_and(|priority| *priority >= floor));
+            let highest_return = self
+                .return_candidates(&effective)?
+                .into_iter()
+                .filter(|candidate| candidate.progress.can_progress())
+                .map(|candidate| candidate.priority)
+                .max();
+            let mut order = claimable.order;
+            order.retain(|id| effective.get(id).is_some_and(|&priority| priority >= floor));
+            let had_candidates_at_floor = !order.is_empty();
+            order.retain(|id| !admission::claim_waits_for_return(effective[id], highest_return));
+            // If the named claims disappear in the transaction, a fallback
+            // could take a task that was behind the return in Admission.
+            claimable.held.ordered_only = highest_return.is_some();
             if order.is_empty() {
-                pass.end = pass.no_candidate(!graph.candidates.is_empty());
+                pass.end = if had_candidates_at_floor && !pass.started {
+                    ClaimPassEnd::blocked(Blocked::Returning)
+                } else {
+                    pass.no_candidate(!graph.candidates.is_empty())
+                };
                 return Ok(ClaimStep::Next);
             }
             // While the load hold is on, a claim waits for the spacing

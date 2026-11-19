@@ -682,9 +682,6 @@ impl Supervisor<'_> {
             self.registration.drain_for(stopping, self.claim.claiming);
             self.note_handoff_drain(stopping);
             self.refresh_landing_backpressure()?;
-            // Runs that can return do so before new work, including
-            // while a stop drains.
-            self.return_waiting_runs()?;
             // A stop wins over a handoff: the drain goes on as before.
             if !stopping {
                 if !self.registration.handing_off()
@@ -704,6 +701,7 @@ impl Supervisor<'_> {
                     self.note_handoff_drain(stopping);
                 }
                 if let Some(binary) = self.registration.handoff().map(str::to_owned) {
+                    self.return_waiting_runs()?;
                     self.sample_candidates(
                         self.claim.parallel,
                         ClaimPassEnd::blocked(admission::Blocked::Handoff),
@@ -806,6 +804,9 @@ impl Supervisor<'_> {
             self.on_host(|host, env| host.queue_broker_pass(env, working));
             // And the runs' relays to it (ADR-t2114-3 decision 4).
             self.on_host(|host, env| host.broker_relay_pass(env, working));
+            if !working {
+                self.return_waiting_runs()?;
+            }
             let paused = if stopping {
                 self.drain_paused_waits()?
             } else {

@@ -30,16 +30,18 @@ related:
 
 着地の列は人の待ちとは別で、workerのslotとの境界は[claimを控える](claim-hold.md#workerのslotと着地の列)を読む。
 着地の列はsessionを閉じているため人の待ちの上限にも数にも含めない。
-人の待ちから戻れるrunがworkerのslotの空きを待つあいだは、新しいclaimをしない。
-claimを控える判断では、待ちが終わって空きslotを待つrunのうち、Admissionが「今進めるrun」と判定するものを戻り待ちに数える。
+人の待ちからの戻りは[共通のslotの列](supervise.md#slotを渡す順とclaim)に入り、効く優先度の降順にslotを受ける。
+待ちが終わって空きslotを待つrunのうち、Admissionが「今進めるrun」と判定するものがこの列に加わる。
 「今進めるrun」はholdも答え待ちもなく、その段階に効くCI・env・landing branchの停止もないrunを指す（[ADR-t5292-1](../../adr/2026-11-18-t5292-1-admission-unifies-starts-resources-and-reasons.md)決定2）。
-人の答えを待ち続けているrunとhold中のrunはこの数から外れ、戻り待ちのrunに残る未回答のaskやCI・env・landing branchの停止は戻りを妨げない。
+人の答えを待ち続けているrunとhold中のrunは列の外に残る。
+戻り待ちのrunに残る未回答のaskやCI・env・landing branchの停止は戻りを妨げない。
 
 ## 待ちの出入り
 
 待ちはrunのstatusを変えずにslotに付ける印で、戻ればphaseの続きから進む。
 workerのslotは人の待ちと着地の列を除き、着地の順番待ちのうち上限を超えた分だけを含む。
 戻り待ちはこのworkerのslotの空きを待つ。
+同じ効く優先度では戻り・再開・復旧job・claimの順とし、戻りどうしは待ちの終了を記録した古い順にslotを受ける。
 
 待ちの最中は答えをsessionへ届けず、slotに戻ってから届ける。
 失ったsessionの開き直しもbackgroundで行い、workspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[開き直しの境界](headless-worker.md#待ちの最中に失ったsessionの開き直し)）。

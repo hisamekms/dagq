@@ -625,6 +625,7 @@ pub(super) fn claim_task_filtered(
     };
     let preferred = match position(order) {
         Some(index) => index,
+        None if held.ordered_only => return Ok(ClaimOutcome::NoReadyTask),
         // Back to the claim order when none of `order` is ready any more
         // (claimed elsewhere, canceled): never a task that waits for a
         // build containing its dependencies' landings, which only the

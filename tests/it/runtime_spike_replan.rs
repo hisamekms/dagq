@@ -282,6 +282,7 @@ fn abandoning_the_goal_or_canceling_its_spikes_ends_an_investigation() {
             max: Some(2),
             grace_secs: 600,
         },
+        ..Default::default()
     };
     let mut queue = SqliteQueue::open(&db).unwrap();
     let outcome = queue

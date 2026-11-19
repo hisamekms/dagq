@@ -54,6 +54,10 @@ pub const ORDER_DEFERRALS: [&str; 3] = [SPIKE_LIMIT, INVESTIGATION_LIMIT, LIGHT_
 pub struct ClaimHolds {
     pub classes: Vec<ExecutionClass>,
     pub investigations: InvestigationLimit,
+    /// A return is competing for worker capacity. Only the tasks admitted
+    /// from the priority snapshot may claim, even if all have since left.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ordered_only: bool,
 }
 
 /// A claimable task as the order compares it.

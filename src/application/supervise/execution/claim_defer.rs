@@ -685,6 +685,7 @@ impl Supervisor<'_> {
         let held = ClaimHolds {
             classes: limits.held(),
             investigations: investigation,
+            ..Default::default()
         };
         let arranged = if light.is_some() {
             let out: HashSet<TaskId> = out.into_iter().chain(investigation_held).collect();

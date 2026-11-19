@@ -1,14 +1,13 @@
 //! Runtime tests: the supervisor's `candidates_sampled` (ADR-0051
-//! decision 3), recorded when the claimable ready tasks, the free slots or
-//! the ready tasks change, and `kpi` reading it.
+//! decision 3), recorded when the counts or the admission reason change,
+//! and `kpi` reading it.
 use crate::runtime_support;
 use dagq::domain::EventKind;
 
 use runtime_support::*;
 use std::sync::atomic::AtomicBool;
 
-/// Above `--max-load`: every claim is held, so the samples depend on the
-/// tasks alone.
+/// Above `--max-load`, a working supervisor reports the load hold.
 fn high_load() -> Option<f64> {
     Some(40.0)
 }
@@ -34,9 +33,9 @@ fn counts(sample: &Value) -> (i64, i64, i64) {
 
 /// A one-shot supervisor records the sample of its only pass; the next
 /// supervisor records one on its first pass though nothing changed, none
-/// on the passes after, and one more when a ready task is added. A task
-/// waiting for another is ready but no candidate. `kpi` then reads the
-/// samples: the candidates have a value and are no longer unavailable.
+/// on unchanged passes, and one more when a blocked ready task is added.
+/// Entering drain records a change of reason at the same counts. `kpi`
+/// reads the samples and reports the number of candidates.
 #[test]
 fn the_supervisor_samples_the_candidates_when_they_change() {
     let (_dir, repo, db) = fixture();
@@ -86,8 +85,13 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let all = samples(&db);
-    assert_eq!(all.len(), 3, "{all:?}");
+    assert_eq!(all.len(), 4, "{all:?}");
     assert_eq!(counts(&all[2]), (1, 2, 2));
+    assert_eq!(all[2]["admission_reason"], "Load");
+    assert_eq!(counts(&all[3]), (1, 2, 2));
+    assert_eq!(all[3]["admission_reason"], "Draining");
+    assert_eq!(all[3]["claims_held"], true);
+    assert_eq!(all[3]["supervisor"], all[2]["supervisor"]);
 
     {
         // KPI's now has second precision, while events have milliseconds.

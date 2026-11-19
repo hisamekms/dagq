@@ -529,7 +529,6 @@ impl ClaimState {
     fn room(&self, parallel: usize) -> ClaimRoom {
         crate::domain::admission::claim_room(crate::domain::admission::Resources {
             free_slots: parallel.saturating_sub(self.slots.used(parallel)),
-            returning: self.slots.returning(),
             ..Default::default()
         })
     }
@@ -888,9 +887,8 @@ mod tests {
     }
 
     /// The room for a claim follows the slots the table holds: full slots
-    /// leave none, a landing queue leaves room for any change regardless of
-    /// light changes, and a run waiting to go back takes the room
-    /// first.
+    /// leave none, and landings and pending returns leave room for any
+    /// change when they occupy no worker slot.
     #[test]
     fn the_claim_room_follows_the_slots_held() {
         let docs: TaskChange = "docs".parse().unwrap();
@@ -910,12 +908,11 @@ mod tests {
             assert_eq!(claim.room(2), want);
             claim.slots.admit(slot("r3"));
             claim.slots.leave_for(2, waiting(Some(1)));
-            assert_eq!(claim.room(2), ClaimRoom::None);
+            assert_eq!(claim.room(2), ClaimRoom::Any);
         }
     }
 
-    /// Every admission path reads this table through used_slots; claim room
-    /// adds only returning precedence. Literal counts cover the phase wiring,
+    /// Literal counts cover the worker capacity a pass gives Admission,
     /// including a failed landing leaving the lane and a human return.
     #[test]
     fn admission_uses_worker_capacity_across_landing_review_e2e_and_returns() {
@@ -954,7 +951,7 @@ mod tests {
         }
         claim.slots.leave_for(0, waiting(Some(1)));
         assert_eq!(claim.slots.used(3), 1);
-        assert_eq!(claim.room(3), ClaimRoom::None);
+        assert_eq!(claim.room(3), ClaimRoom::Any);
         let files = crate::application::memory_files::MemoryFiles::default();
         assert!(claim.slots.regain(0, &files, origin()).is_some());
         assert_eq!(claim.slots.used(3), 2);

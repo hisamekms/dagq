@@ -1,12 +1,8 @@
-//! The order a fill pass gives its free slots in (ADR-t1850-1): the
-//! resumes of `needs_session` runs, the recovery jobs of ended runs and the
-//! claims of ready tasks stand in one line, by the effective priority of
-//! their task, highest first. On the same priority a resume comes first,
-//! then a recovery job, then a claim; within a kind the order stays the one
-//! the kind already had (resumes oldest first, recovery jobs in the order
-//! the queue lists the runs, claims by [`super::ClaimRank`] with the aging
-//! across the execution classes, which reorders only within one effective
-//! priority: every claim stands at its own ([`claims`], ADR-t1489-1).
+//! Worker slots go to returning runs, resumes, recovery jobs and claims
+//! in descending effective priority (ADR-t5292-1 decision 3).
+//! On the same priority a return comes first, then a resume, a recovery
+//! job and a claim. Returns use the oldest wait end first. Other kinds
+//! keep their input order, including claim aging within a priority.
 
 use std::collections::HashMap;
 
@@ -16,6 +12,8 @@ use super::{Priority, TaskId};
 /// order on the same effective priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotKind {
+    /// A human wait that ended at this timestamp in Unix milliseconds.
+    Return { ended_at: i64 },
     /// A session resumed for a `needs_session` run.
     Resume,
     /// A recovery job for a `failed` or `interrupted` run.
@@ -54,8 +52,8 @@ pub fn claims(
 }
 
 /// `candidates` in the order they get a slot: effective priority, highest
-/// first, then [`SlotKind`]'s order, then the order they were given in
-/// (each kind's own order).
+/// first, then [`SlotKind`]'s order (including the wait end for returns),
+/// then the order they were given in.
 pub fn slot_order<T>(mut candidates: Vec<SlotCandidate<T>>) -> Vec<SlotCandidate<T>> {
     // Stable: a kind's own order survives within the same priority.
     candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.priority), candidate.kind));
@@ -95,13 +93,16 @@ mod tests {
     }
 
     #[test]
-    fn on_the_same_priority_a_resume_comes_before_a_recovery_job_and_a_claim() {
+    fn at_equal_priority_returns_precede_resumes_recoveries_and_claims() {
         let candidates = vec![
             candidate(SlotKind::Claim, Priority::Normal, 1),
             candidate(SlotKind::Recovery, Priority::Normal, 2),
             candidate(SlotKind::Resume, Priority::Normal, 3),
+            candidate(SlotKind::Return { ended_at: 20 }, Priority::Normal, 4),
+            candidate(SlotKind::Return { ended_at: 10 }, Priority::Normal, 5),
+            candidate(SlotKind::Return { ended_at: 0 }, Priority::Low, 6),
         ];
-        assert_eq!(order(candidates), [3, 2, 1]);
+        assert_eq!(order(candidates), [5, 4, 3, 2, 1, 6]);
     }
 
     #[test]

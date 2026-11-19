@@ -133,10 +133,9 @@ mod tests {
         assert!(!LightChanges::default().admits(Some(&change("docs")), &paths));
     }
 
-    fn claim_room(used: usize, parallel: usize, returning: usize) -> ClaimRoom {
+    fn claim_room(used: usize, parallel: usize) -> ClaimRoom {
         super::super::admission::claim_room(super::super::admission::Resources {
             free_slots: parallel.saturating_sub(used),
-            returning,
             ..Default::default()
         })
     }
@@ -152,9 +151,9 @@ mod tests {
         ] {
             // A heavy interrupt is not classified light but gets the same room.
             assert!(!light.admits(Some(&change("feature")), &["src/**".into()]));
-            assert_eq!(claim_room(used, 3, 0), ClaimRoom::Any);
-            assert_eq!(claim_room(used + 1, 3, 0), ClaimRoom::Any);
-            assert_eq!(claim_room(used + 2, 3, 0), ClaimRoom::None);
+            assert_eq!(claim_room(used, 3), ClaimRoom::Any);
+            assert_eq!(claim_room(used + 1, 3), ClaimRoom::Any);
+            assert_eq!(claim_room(used + 2, 3), ClaimRoom::None);
         }
     }
 
@@ -162,7 +161,7 @@ mod tests {
     fn landing_queue_excess_is_worker_backpressure() {
         assert_eq!(outside_the_slots(5, 3), 3);
         assert_eq!(worker_slots(1, 5, 3), 3);
-        assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
+        assert_eq!(claim_room(3, 3), ClaimRoom::None);
         assert_eq!(worker_slots(0, 6, 3), 3);
         assert_eq!(worker_slots(0, 5, 3), 2);
         assert_eq!(worker_slots(0, 0, 3), 0);
@@ -178,13 +177,12 @@ mod tests {
     }
 
     #[test]
-    fn returning_runs_precede_claims_and_failed_landings_are_workers() {
-        assert_eq!(claim_room(worker_slots(1, 2, 3), 3, 1), ClaimRoom::None);
+    fn failed_landings_are_workers() {
         // Landing failure moves out of the lane into needs_session.
         assert_eq!(worker_slots(2, 2, 3), 2);
-        assert_eq!(claim_room(2, 3, 0), ClaimRoom::Any);
+        assert_eq!(claim_room(2, 3), ClaimRoom::Any);
         assert_eq!(worker_slots(3, 2, 3), 3);
-        assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
+        assert_eq!(claim_room(3, 3), ClaimRoom::None);
         // Review and e2e are ordinary workers, not queued landings.
         assert_eq!(worker_slots(3, 0, 3), 3);
     }

@@ -44,7 +44,7 @@ hostの負荷・空き容量・providerの壁で止まるときはqueue全体の
 
 ```text
 passの初め（[run.env]の検査の次）: 空き容量 → 足りなければ掃除のjob → それでも足りなければinboxにask
-fill pass: queue全体の控え → 再開・復旧job・claimの列 → Admissionがslotを渡す
+fill pass: queue全体の控え → 戻り・再開・復旧job・claimの列 → Admissionがslotを渡す
   └─ claimのloop: 候補ごとの控えと順位 → Admissionの許可 → claim → 次の候補を読み直す
 ```
 
@@ -199,7 +199,7 @@ Admissionは選ばれた着地を共通の資源とclaimに照らして始める
 着地待ちは並列度を超えた分だけworkerのslotを占め、lease返却後もclaimに背圧を掛ける。
 review・e2e・revise・resumeの途中はworkerのslotに残す。
 承認された着地でworkerの空きを待つのはe2eの開始だけで、e2eの要らない後続の着地を止めない。
-軽い枠は無く、claimの可否はchangeによらずworkerのslotの空きで決まり、人の待ちからの戻りを新しいclaimより先にする。
+claimはchangeによらず同じslotを使い、進める戻りは同じ優先度以下のclaimに先行する。
 load・ディスク・claimの間隔の関門はすべてのclaimに効き、着地はloadで止めない。
 `stats`の空きslotと`kpi`のslot使用率にも着地待ちを数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
 着地待ち・戻り待ち・ディスクの動作と予約は、holdも答え待ちもなくCI・環境・着地branchで止まっていないrunから数える。
@@ -287,7 +287,7 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
 - 上限に達している区分は、claimの後戻りもその区分を取らない。
 - agingは効く優先度の中だけで並べ替え、優先度を越えず、区分の中の順とinterruptの順を変えない。
   控えや上限で除かれた候補は前に出さない。
-- claimは再開・復旧jobとの列（`slot_order`）で各自の効く優先度で比べ、`run_claimed`の区分とagingの記録は`domain::claim_facts`が持つ。
+- claimは戻り・再開・復旧jobとの列（`slot_order`）で各自の効く優先度で比べ、`run_claimed`の区分とagingの記録は`domain::claim_facts`が持つ。
 
 ## 記録と見え方
 

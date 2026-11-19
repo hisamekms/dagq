@@ -42,6 +42,7 @@ impl ClaimLimits {
             }
             .held(),
             investigations: self.investigations,
+            ..Default::default()
         }
     }
 }
