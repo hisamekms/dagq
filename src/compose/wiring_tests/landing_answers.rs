@@ -1337,6 +1337,189 @@ fn admission_leaves_a_review_pass_waiting_and_claims_an_interrupt() {
     );
 }
 
+fn disk_admission_fixture(
+    name: &str,
+    free_at_admission: u64,
+    needs_e2e: bool,
+) -> (Wiring, TaskId, TaskId, crate::domain::EventId) {
+    use crate::application::{RunFiles, integrate::binding, supervise::PausePoint};
+    use crate::domain::{
+        EventKind, Priority,
+        disk::{DiskConfig, DiskEstimate},
+    };
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::Ordering},
+    };
+
+    let wiring = Wiring::new(
+        name,
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1))
+    .with_disk(DiskConfig {
+        estimate: DiskEstimate::Fixed,
+        run_size: Some(20 * (1 << 30)),
+        landing_size: Some(20 * (1 << 30)),
+        ..DiskConfig::default()
+    });
+    wiring.git.allow_clean_merges();
+    let free = wiring.free.clone();
+    free.store(free_at_admission, Ordering::SeqCst);
+    let wiring = wiring.with_pauses(Arc::new(move |point, _| {
+        if point == PausePoint::LandingStart {
+            // Any later pass would read too little space for a new claim.
+            free.store(0, Ordering::SeqCst);
+        }
+    }));
+    wiring.fail_claim_launches(true);
+    let mut queue = wiring.queue();
+    let landing = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::High,
+        RunStatus::AwaitingIntegration,
+    );
+    let receipt = succeeded_at_the_head(
+        landing.id(),
+        Path::new(landing.worktree_path().unwrap()),
+        &wiring.git,
+    )
+    .unwrap();
+    wiring
+        .files
+        .write(
+            Path::new(landing.receipt_path().unwrap()),
+            &serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+    if needs_e2e {
+        queue
+            .record_runtime_event(
+                landing.id(),
+                EventKind::ValidationFinished,
+                json!({"e2e_requirement": {"required": true}}),
+            )
+            .unwrap();
+    }
+    let mut approval = json!({"push": false});
+    let events = queue.run_events(landing.id()).unwrap();
+    binding::put(
+        &mut approval,
+        &binding::of_run(&wiring.git, &landing, &events).unwrap(),
+    );
+    queue
+        .record_runtime_event(landing.id(), EventKind::IntegrationApproved, approval)
+        .unwrap();
+    let approval_id = queue
+        .run_events(landing.id())
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::IntegrationApproved)
+        .unwrap()
+        .id;
+    let claim = wiring.ready_task(&["true"]);
+    (wiring, landing.task_id(), claim, approval_id)
+}
+
+#[test]
+fn admission_starts_the_queued_landing_and_claim_from_one_disk_reading() {
+    use std::sync::atomic::Ordering;
+
+    let (wiring, landing, claim, approval_id) = disk_admission_fixture(
+        "admission_starts_the_queued_landing_and_claim_from_one_disk_reading",
+        45 * (1 << 30),
+        false,
+    );
+    let mut queue = wiring.queue();
+    let outcome = wiring.supervise_once_reporting();
+
+    assert!(
+        outcome["errors"]
+            .to_string()
+            .contains("refuses to start the wrapper"),
+        "{outcome}"
+    );
+    assert_eq!(wiring.free.load(Ordering::SeqCst), 0);
+    let landed = queue.show(landing).unwrap();
+    assert_eq!(
+        payloads(&landed, "landing_queue_waiting").first().copied(),
+        Some(&json!({"entry_id": approval_id, "judgment": approval_id, "waiting_for": null}))
+    );
+    assert_eq!(payloads(&landed, "integration_started").len(), 1);
+    assert_eq!(
+        payloads(&queue.show(claim).unwrap(), "run_claimed").len(),
+        1
+    );
+}
+
+#[test]
+fn disk_competition_reaches_the_claim_hold_and_kpi_sample() {
+    use crate::domain::EventKind;
+
+    let (wiring, landing, claim, _) = disk_admission_fixture(
+        "disk_competition_reaches_the_claim_hold_and_kpi_sample",
+        10 * (1 << 30),
+        false,
+    );
+    wiring.supervise_once();
+
+    let mut queue = wiring.queue();
+    assert_eq!(
+        payloads(&queue.show(landing).unwrap(), "integration_started").len(),
+        1
+    );
+    assert!(queue.show(claim).unwrap().runs.is_empty());
+    let events = queue.all_events().unwrap();
+    let sample = events
+        .iter()
+        .find(|event| event.kind == EventKind::CandidatesSampled)
+        .unwrap();
+    assert_eq!(sample.payload["admission_reason"], "DiskCompetition");
+    assert_eq!(sample.payload["claims_held"], true);
+    assert_eq!(sample.payload["candidates"], 1);
+    let held = events
+        .iter()
+        .find(|event| event.kind == EventKind::ClaimHeld)
+        .unwrap();
+    assert_eq!(held.payload["admission_reason"], "DiskCompetition");
+}
+
+#[test]
+fn a_queued_e2e_lease_leaves_an_equal_priority_claim_waiting_for_disk() {
+    use crate::application::TaskStore;
+    use crate::domain::{EventKind, Priority};
+
+    let (wiring, landing, claim, _) = disk_admission_fixture(
+        "a_queued_e2e_lease_leaves_an_equal_priority_claim_waiting_for_disk",
+        10 * (1 << 30),
+        true,
+    );
+    let mut queue = wiring.queue();
+    queue.set_priority(claim, Some(Priority::High)).unwrap();
+    wiring.supervise_once();
+
+    let detail = queue.show(landing).unwrap();
+    let lease = detail
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::LeaseAcquired && event.payload["reason"] == "e2e")
+        .expect("the selected landing took a worker lease for e2e");
+    let events = queue.all_events().unwrap();
+    let sample = events
+        .iter()
+        .find(|event| event.kind == EventKind::CandidatesSampled)
+        .expect("the first admission pass recorded its claim decision");
+    assert!(lease.id.as_i64() < sample.id.as_i64());
+    assert_eq!(sample.payload["admission_reason"], "DiskCompetition");
+    assert_eq!(sample.payload["claims_held"], true);
+    assert_eq!(sample.payload["candidates"], 1);
+    assert!(queue.show(claim).unwrap().runs.is_empty());
+}
+
 /// A stopped head keeps its queue position while the next entry lands.
 #[test]
 fn admission_lands_the_next_entry_while_the_head_waits_for_an_answer() {

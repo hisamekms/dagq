@@ -213,6 +213,11 @@ impl Wiring {
         self.service_wrap = Some(wrap);
         self
     }
+    pub(super) fn with_disk(mut self, disk: crate::domain::disk::DiskConfig) -> Self {
+        self.disk = disk;
+        self
+    }
+
     pub(super) fn with_volume(mut self, bytes: u64) -> Self {
         self.total = Some(bytes);
         self

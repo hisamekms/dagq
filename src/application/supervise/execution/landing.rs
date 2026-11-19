@@ -71,6 +71,11 @@ pub(super) enum ReviewRoute {
     Manual(String),
 }
 
+pub(super) struct QueuedLanding {
+    pub(super) entry: Entry,
+    run: TaskRun,
+}
+
 impl Supervisor<'_> {
     /// Apply the pure acceptance gate before recording a successful
     /// validation. Returning its reasons as missing evidence uses normal
@@ -3210,6 +3215,18 @@ impl Supervisor<'_> {
         draining: bool,
         drain_may_adopt: bool,
     ) -> Result<()> {
+        if let Some(landing) = self.queued_landing(parallel, draining, drain_may_adopt)? {
+            self.start_queued_landing(landing)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn queued_landing(
+        &mut self,
+        parallel: usize,
+        draining: bool,
+        drain_may_adopt: bool,
+    ) -> Result<Option<QueuedLanding>> {
         self.landing.pending_landings.retain(|id| {
             self.queue.run(id).is_ok_and(|run| {
                 matches!(
@@ -3343,25 +3360,50 @@ impl Supervisor<'_> {
             .first()
             .map(|candidate| &candidate.item.run_id);
         for entry in &queued.entries {
+            if selected == Some(&entry.run_id) {
+                continue;
+            }
             let waiting =
                 LandingQueue::explain(entry, capacity, candidates[&entry.run_id].1, selected);
-            let events = self.queue.run_events(&entry.run_id)?;
-            let payload = json!({"entry_id": entry.entry_id, "judgment": entry.judgment, "waiting_for": waiting});
-            if crate::domain::landing_queue::recorded_wait(&events, entry.judgment)
-                .is_none_or(|e| e.payload != payload)
-            {
-                self.queue.record_runtime_event(
-                    &entry.run_id,
-                    EventKind::LandingQueueWaiting,
-                    payload,
-                )?;
-            }
+            self.record_landing_queue_wait(entry, waiting)?;
         }
-        let Some(candidate) = starts.starts.into_iter().next() else {
-            return Ok(());
+        Ok(starts.starts.into_iter().next().map(|candidate| {
+            let entry = candidate.item.clone();
+            let (run, _, _) = candidates.remove(&entry.run_id).expect("queue candidate");
+            QueuedLanding { entry, run }
+        }))
+    }
+
+    pub(super) fn record_landing_queue_wait(
+        &mut self,
+        entry: &Entry,
+        waiting: Option<landing_queue::Wait>,
+    ) -> Result<()> {
+        let events = self.queue.run_events(&entry.run_id)?;
+        let payload = json!({
+            "entry_id": entry.entry_id,
+            "judgment": entry.judgment,
+            "waiting_for": waiting,
+        });
+        if landing_queue::recorded_wait(&events, entry.judgment)
+            .is_none_or(|event| event.payload != payload)
+        {
+            self.queue.record_runtime_event(
+                &entry.run_id,
+                EventKind::LandingQueueWaiting,
+                payload,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn start_queued_landing(&mut self, landing: QueuedLanding) -> Result<bool> {
+        let QueuedLanding { entry, run } = landing;
+        let entry = &entry;
+        self.record_landing_queue_wait(entry, None)?;
+        let kind = admission::Kind::Landing {
+            needs_worker: entry.e2e,
         };
-        let entry = candidate.item;
-        let (run, _, _) = candidates.remove(&entry.run_id).expect("queue candidate");
         let e2e = entry.e2e;
         let current_main = self.repository.main_head()?;
         // Not while the cleanup job clears the run's build outputs (task
@@ -3370,17 +3412,20 @@ impl Supervisor<'_> {
         let mut guard = cleanup::lock_cleaning(&cleaning);
         if !guard.may_lease(run.id()) {
             self.host.defer_cleanup();
-            return Ok(());
+            return Ok(false);
         }
         // Recheck may have recorded a hold while the former owner returned
         // its lease. Park under the cleanup lock, as an owned slot does.
         if self.park_queued_by_recheck(&run, &current_main)?.is_some() {
             guard.withdraw(run.id());
             self.claim.slots.remove_unleased_landing_wait();
-            return Ok(());
+            return Ok(false);
         }
-        if e2e && !self.landing_still_admitted(&run, entry, candidate.kind)? {
-            return Ok(());
+        if e2e
+            && (!self.claim.slots.queued_e2e_has_room(self.claim.parallel)
+                || !self.landing_still_admitted(&run, entry, kind)?)
+        {
+            return Ok(false);
         }
         let main = (!e2e).then_some(current_main);
         // A run that still needs its e2e (ADR-t1233-2) runs it in a slot
@@ -3398,17 +3443,18 @@ impl Supervisor<'_> {
                     "e2e_leased",
                     &*self.queue,
                 );
+                return Ok(true);
             }
-            return Ok(());
+            return Ok(false);
         };
         self.pause_at(PausePoint::LandingStart, run.id());
         // Selection's probe is only a snapshot. Keep the turn through
         // the start so an update that took it meanwhile can still defer us.
         let Some(turn) = self.take_check_turn("landing queue")? else {
-            return Ok(());
+            return Ok(false);
         };
-        if !self.landing_still_admitted(&run, entry, candidate.kind)? {
-            return Ok(());
+        if !self.landing_still_admitted(&run, entry, kind)? {
+            return Ok(false);
         }
         let starting = self.begin_landing(run.id(), &main);
         drop(turn);
@@ -3423,7 +3469,7 @@ impl Supervisor<'_> {
                     .is_some() =>
             {
                 info!(run_id = %run.id(), "run {} does not land as queued: its supervisor was asked to hand off", run.id());
-                return Ok(());
+                return Ok(false);
             }
             Err(error) => return Err(error),
         };
@@ -3437,7 +3483,7 @@ impl Supervisor<'_> {
             EventKind::IntegrationStarted.as_str(),
             &*self.queue,
         );
-        Ok(())
+        Ok(true)
     }
     /// Re-read the candidate's stops after acquiring its execution fence.
     fn landing_still_admitted(

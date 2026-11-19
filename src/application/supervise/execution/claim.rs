@@ -1,7 +1,8 @@
 //! Filling the slots: a fill pass adopts and recovers the runs other
 //! supervisors left, then starts the candidates of one line by effective
 //! priority (ADR-t5292-1): returns, resumes, recovery jobs and the claim loop of
-//! each priority. Here are that pass, the claims and their provisioning,
+//! each priority. The queued landing shares the disk decision with claims.
+//! Here are that pass, the claims and their provisioning,
 //! and what holds them before a claim starts: the claim hold (disk, load),
 //! the landing branch and its recheck, and the `[run.env]` programs; also
 //! the attributes a claim records and the load sampled per slot.
@@ -13,12 +14,13 @@
 //! the rest of [`super`] calls are `pub(super)`.
 
 use super::*;
-use crate::domain::admission::{self, Blocked, Candidate, Gates, Resources};
+use crate::domain::admission::{self, Blocked, Candidate, Gates, Kind, Resources};
 use crate::domain::slot_order::SlotKind;
 
 /// What a candidate in the line of a fill pass starts (ADR-t5292-1).
 enum LineItem {
     Return(usize),
+    Landing(Box<super::landing::QueuedLanding>),
     Resume(Box<ResumeCandidate>),
     Recovery(Box<TaskRun>),
     /// The claim loop of the candidate's priority (it reads its own order).
@@ -91,8 +93,8 @@ impl Supervisor<'_> {
         }
         // Takes no slot: a dead run goes to the triage below.
         self.recover_dead_runs()?;
-        // Whatever the slots: a `land` answer only queues the run, which
-        // lands below, before new claims, once there is room (task 949).
+        // Whatever the slots: a `land` answer queues the run for the same
+        // start decision as new claims (task 949, ADR-t5292-1).
         self.apply_landing_answers()?;
         // An answer to an `already_satisfied` claim's ask; a close that
         // verifies the claim again takes a free slot (ADR-t1818-1).
@@ -100,12 +102,13 @@ impl Supervisor<'_> {
         // A claim a held container kept from its verification starts it
         // once the verification may run.
         self.start_awaiting_claims(parallel)?;
-        // Like a landing answer before: an error (an `integrate` that took
-        // the integration slot since the check, a main that did not
-        // resolve) is noted, and the run stays queued for a later pass.
-        if let Err(error) = self.start_approved_landings(parallel, false, false) {
-            warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
-        }
+        let landing = match self.queued_landing(parallel, false, false) {
+            Ok(landing) => landing,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the landing queue could not be read: {error:#}");
+                None
+            }
+        };
         // A run recovered from a landing it may not land again (task 1118),
         // or queued by a `retry_review` answer (ADR-t2521-1), is reviewed as
         // one just validated.
@@ -115,7 +118,10 @@ impl Supervisor<'_> {
         // A run a supervisor that stopped left awaiting integration, its
         // review passed and nobody asked, goes back to its landing's line
         // (ADR-t3049-1).
-        if let Err(error) = self.take_up_stranded_landings(parallel) {
+        if let Err(error) = self.take_up_stranded_landings(
+            parallel,
+            landing.as_ref().map(|landing| &landing.entry.run_id),
+        ) {
             warn!(error = %format_args!("{error:#}"), "a run left awaiting integration could not be taken up: {error:#}");
         }
         // Before the answers and the recovery jobs: a result a hold kept
@@ -176,6 +182,20 @@ impl Supervisor<'_> {
             .map(|node| (node.id, node.effective_priority))
             .collect();
         let mut line = Vec::new();
+        let landing_disk = landing
+            .as_ref()
+            .and_then(|landing| self.host.landing_claims(&landing.entry.run_id));
+        let landing_uses_no_worker = landing.as_ref().is_some_and(|landing| !landing.entry.e2e);
+        if let Some(landing) = landing {
+            line.push(Candidate {
+                kind: Kind::Landing {
+                    needs_worker: landing.entry.e2e,
+                },
+                priority: landing.entry.priority,
+                progress: Default::default(),
+                item: LineItem::Landing(Box::new(landing)),
+            });
+        }
         for candidate in resumes {
             let priority = self.line_priority(&effective, candidate.run.task_id())?;
             line.push(Candidate::slot(
@@ -229,9 +249,14 @@ impl Supervisor<'_> {
                 WorkerTrial::default()
             });
             // The runs in flight go on; only new claims wait (task 327).
-            let (resources, details) = self.read_claim_resources(claim_gates);
+            let (resources, details) = self.read_claim_resources(Resources {
+                landing_disk,
+                ..claim_gates
+            });
             hold_details = details;
-            if let Some(reason) = admission::probe(SlotKind::Claim, resources) {
+            let reason = admission::probe(SlotKind::Claim, resources)
+                .filter(|_| admission::probe(SlotKind::Claim, resources.after_landing()).is_some());
+            if let Some(reason) = reason {
                 end = ClaimPassEnd::blocked(reason);
                 // Neither provider can take a worker: the candidates are
                 // deferred for it too (ADR-t813-2 decision 6).
@@ -242,7 +267,11 @@ impl Supervisor<'_> {
                 // Only while there is room for a claim, as the claim loop
                 // reads the candidates only then.
                 let capacity = self.admission_capacity(parallel);
-                let reason = admission::probe(SlotKind::Claim, capacity);
+                let reason = admission::probe(SlotKind::Claim, capacity).filter(|reason| {
+                    !(*reason == Blocked::WorkerSlot
+                        && landing_uses_no_worker
+                        && self.claim.slots.projected_landing_room(parallel))
+                });
                 let mut pass = ClaimPass {
                     spaced_since,
                     host: None,
@@ -296,20 +325,36 @@ impl Supervisor<'_> {
             if line.is_empty() {
                 break;
             }
-            let resources = Resources {
+            let has_landing = line
+                .iter()
+                .any(|candidate| matches!(candidate.item, LineItem::Landing(_)));
+            let mut resources = Resources {
                 free_slots: self.admission_capacity(parallel).free_slots,
                 gates: self.admission_gates(),
                 ..claims.as_ref().map_or(gates_only, |pass| pass.resources)
             };
+            if has_landing && claims.is_some() {
+                self.read_claim_spacing(&mut resources)?;
+            }
             let mut decision = admission::admit(line, resources);
+            let landing_waits_for_claim = decision.blocked.iter().any(|(candidate, reason)| {
+                matches!(candidate.item, LineItem::Landing(_))
+                    && *reason == Blocked::DiskCompetition
+            });
             let mut starts = decision.starts.into_iter();
             let Some(candidate) = starts.next() else {
                 for (candidate, reason) in decision.blocked {
+                    if matches!(candidate.item, LineItem::Landing(_)) {
+                        continue;
+                    }
                     if matches!(candidate.item, LineItem::Claim)
                         && let Some(pass) = claims.as_mut()
                         && !pass.started
                     {
                         pass.end = ClaimPassEnd::blocked(reason);
+                        if reason == Blocked::ClaimSpacing {
+                            pass.end.spacing_secs = resources.spacing_secs;
+                        }
                     }
                     if let LineItem::Resume(resume) = candidate.item
                         && reason == Blocked::WorkerSlot
@@ -332,6 +377,23 @@ impl Supervisor<'_> {
                 .collect();
             match candidate.item {
                 LineItem::Return(index) => self.regain_waiting_run(index),
+                LineItem::Landing(landing) => {
+                    let run = landing.entry.run_id.clone();
+                    let started = match self.start_queued_landing(*landing) {
+                        Ok(started) => started,
+                        Err(error) => {
+                            warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
+                            self.queue.run(&run)?.status() == RunStatus::Integrating
+                        }
+                    };
+                    if let Some(pass) = claims.as_mut() {
+                        if started {
+                            pass.resources = pass.resources.after_landing();
+                        }
+                        pass.resources.landing_disk = None;
+                    }
+                    continue;
+                }
                 LineItem::Resume(resume) => {
                     self.note_resume_slot_wait(
                         &resume,
@@ -347,7 +409,33 @@ impl Supervisor<'_> {
                 }
                 LineItem::Claim => {
                     let pass = claims.as_mut().expect("admitted claim has a pass");
-                    if self.claim_tasks(parallel, candidate.priority, pass)? == ClaimStep::Stop {
+                    let budget = pass.resources.disk_claims;
+                    if landing_waits_for_claim {
+                        pass.resources.disk_claims = Some(1);
+                    }
+                    let step = self.claim_tasks(
+                        parallel,
+                        candidate.priority,
+                        landing_waits_for_claim,
+                        pass,
+                    )?;
+                    if landing_waits_for_claim {
+                        if pass.resources.disk_claims == Some(0) {
+                            pass.resources.landing_disk = None;
+                            if let Some(index) = line.iter().position(|candidate| {
+                                matches!(candidate.item, LineItem::Landing(_))
+                            }) && let LineItem::Landing(landing) = line.remove(index).item
+                            {
+                                self.record_landing_queue_wait(
+                                    &landing.entry,
+                                    Some(crate::domain::landing_queue::Wait::Disk),
+                                )?;
+                            }
+                        } else {
+                            pass.resources.disk_claims = budget;
+                        }
+                    }
+                    if step == ClaimStep::Stop {
                         line.retain(|candidate| !matches!(candidate.item, LineItem::Claim));
                     }
                 }
@@ -366,7 +454,8 @@ impl Supervisor<'_> {
         }
         // A cleanup already reclaiming space may relieve this wait before
         // it becomes a hold interval. Its reason is still in the sample.
-        let hold = if self.host.disk_cleaning()
+        let hold = if end.reason == Some(Blocked::Disk(None))
+            && self.host.disk_cleaning()
             && hold_details
                 .as_ref()
                 .is_some_and(|hold| hold.reason == claim_hold::HoldReason::DiskSpace)
@@ -429,6 +518,7 @@ impl Supervisor<'_> {
         &mut self,
         parallel: usize,
         floor: Priority,
+        landing_waits_for_claim: bool,
         pass: &mut ClaimPass,
     ) -> Result<ClaimStep> {
         loop {
@@ -470,8 +560,8 @@ impl Supervisor<'_> {
             let had_candidates_at_floor = !order.is_empty();
             order.retain(|id| !admission::claim_waits_for_return(effective[id], highest_return));
             // If the named claims disappear in the transaction, a fallback
-            // could take a task that was behind the return in Admission.
-            claimable.held.ordered_only = highest_return.is_some();
+            // could take a task behind a return or the competing landing.
+            claimable.held.ordered_only = highest_return.is_some() || landing_waits_for_claim;
             if order.is_empty() {
                 pass.end = if had_candidates_at_floor && !pass.started {
                     ClaimPassEnd::blocked(Blocked::Returning)
@@ -484,26 +574,13 @@ impl Supervisor<'_> {
             // after the queue's latest claim, a light one too, and the next
             // pass judges the load again before it (ADR-t1479-1). The hold
             // itself returned above, before any claim.
-            let spacing = claim_spacing::in_effect(
-                self.host.max_load(),
-                self.claim.limits.claim_spacing.value,
-            );
-            let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
-            let last = if spacing.is_some() {
-                self.queue
-                    .latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?
-                    .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at))
-            } else {
-                None
-            };
+            let mut resources = resources;
+            self.read_claim_spacing(&mut resources)?;
+            let spacing = resources.spacing_secs;
+            let now_ms = resources.now_ms;
             let decision = admission::admit(
                 vec![Candidate::slot(SlotKind::Claim, floor, order)],
-                Resources {
-                    spacing_secs: spacing,
-                    last_claim_ms: last,
-                    now_ms,
-                    ..resources
-                },
+                resources,
             );
             if let Some((_, reason)) = decision.blocked.first() {
                 pass.end = ClaimPassEnd::blocked(*reason);
@@ -619,6 +696,20 @@ impl Supervisor<'_> {
             }
         }
     }
+    fn read_claim_spacing(&self, resources: &mut Resources) -> Result<()> {
+        resources.spacing_secs =
+            claim_spacing::in_effect(self.host.max_load(), self.claim.limits.claim_spacing.value);
+        resources.now_ms = crate::application::unix_millis(self.generators.clock.system_time());
+        resources.last_claim_ms = if resources.spacing_secs.is_some() {
+            self.queue
+                .latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?
+                .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+        } else {
+            None
+        };
+        Ok(())
+    }
+
     /// Provision the run this supervisor just claimed and give it a slot,
     /// the work interval starting with the `load` sampled at the claim. A
     /// provisioning that failed stops the claims ([`ClaimStep::Stop`]),
@@ -699,7 +790,7 @@ impl Supervisor<'_> {
     }
     /// Whether the free disk space this pass read lets no claim go
     /// ([`crate::domain::disk::DiskState::claims`]): short of what a claim
-    /// needs, or a claim that waits for a landing first or for the one run
+    /// needs, or a claim that waits for the one run
     /// of a project with no samples (a space that could not be read is not
     /// short).
     pub(super) fn claims_short_of_disk(&mut self) -> Result<bool> {
@@ -709,12 +800,21 @@ impl Supervisor<'_> {
     fn read_claim_resources(&self, mut resources: Resources) -> (Resources, Option<ClaimHold>) {
         let decision = self.host.disk_decision();
         let short = decision.as_ref().and_then(|d| d.claim_hold());
-        let hold = if self.host.disk_cleaning() && short.is_some() {
+        let can_share = resources
+            .landing_disk
+            .is_some_and(|disk| disk.claims != Some(0));
+        let mut standalone_short = short;
+        let disk = if can_share {
+            None
+        } else {
+            standalone_short.take()
+        };
+        let hold = if self.host.disk_cleaning() && disk.is_some() {
             // Cleanup is already acting on the disk shortage.
-            short
+            disk
         } else {
             admission::claim_hold(
-                short,
+                disk,
                 &HoldInputs {
                     queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
                     ..HoldInputs::default()
@@ -732,7 +832,7 @@ impl Supervisor<'_> {
         if let Some(decision) = decision {
             resources = resources.with_disk(&decision);
         }
-        (resources, hold)
+        (resources, hold.or(standalone_short))
     }
 
     /// Check the programs `[run.env]` names on this process's PATH

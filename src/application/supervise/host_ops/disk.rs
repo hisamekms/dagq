@@ -423,6 +423,21 @@ impl HostOpsState {
         }
         Ok(())
     }
+    /// The selected landing takes its reservation in the claim budget,
+    /// including when its first step is leasing a worker slot for e2e.
+    pub(in crate::application::supervise) fn landing_claims(
+        &self,
+        run: &RunId,
+    ) -> Option<crate::domain::admission::LandingDisk> {
+        let decision = self
+            .disk
+            .decision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let claims = decision.as_ref()?.landing(run)?.claims_with_landing;
+        Some(crate::domain::admission::LandingDisk { claims })
+    }
+
     /// A handoff found after this pass polled the cleanup and read the
     /// disk: the cleanup ends now, and the rest of a cleanup for room it
     /// started this pass counts as one for this pass's reading, so the

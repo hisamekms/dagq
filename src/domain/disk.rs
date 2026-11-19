@@ -496,6 +496,9 @@ pub struct LandingDecision {
     pub needed: u64,
     pub allowed: bool,
     pub waiting: bool,
+    /// Claim capacity when this candidate takes the landing reservation.
+    #[serde(skip)]
+    pub claims_with_landing: Option<usize>,
 }
 /// Reserve policy flags in the same disk decision, including the existing
 /// ask-close margin. An unavailable reading holds nothing.
@@ -927,26 +930,49 @@ pub struct DiskNeeds {
     /// What a landing's verification needs free: the reserve with no run
     /// moving or no expectation, else reserve + max(0, I - candidate size).
     pub landing: u64,
-    /// The claims wait this pass whatever is free, with no hold: a landing
-    /// waits with no run moving (it goes first), or runs move with no
-    /// expectation (a project with no samples runs one at a time).
+    /// Claims wait while runs move and there is no expectation.
     pub claims_wait: bool,
     /// The relaxation these needs were reckoned under; `None` outside one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relaxed: Option<DiskRelaxed>,
 }
 
-/// The existing ordering and no-sample rules that defer claims without a hold.
+/// A disk rule that defers claims without a hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimsWaitReason {
-    /// An idle queue gives the waiting landing the first turn.
-    LandingFirst,
     /// With no expectation only one run moves at a time.
     NoSamples,
 }
 
 impl DiskNeeds {
+    /// Count worker reservations after taking the shared reserve, existing
+    /// unused reservations and this landing's remaining reservation once.
+    /// The idle progress exception and empty landing slot do not apply.
+    fn claims_with_landing(self, free: Option<u64>, current: Option<u64>) -> Option<usize> {
+        let (Some(worker), Some(integrator)) = (self.expected, self.integrator_expected) else {
+            return Some(0);
+        };
+        let free = free?;
+        let remaining = if self
+            .relaxed
+            .is_some_and(|relaxed| relaxed.relax.no_remaining)
+        {
+            0
+        } else {
+            self.remaining
+        };
+        let room = free
+            .checked_sub(self.reserve)
+            .and_then(|room| room.checked_sub(remaining))
+            .and_then(|room| room.checked_sub(integrator.saturating_sub(current.unwrap_or(0))));
+        match room {
+            None => Some(0),
+            Some(_) if worker == 0 => None,
+            Some(room) => Some(usize::try_from(room / worker).unwrap_or(usize::MAX)),
+        }
+    }
+
     /// The same breakdown for event messages and cleanup waits; sizes are GiB.
     pub fn message(&self) -> String {
         let show = |bytes: u64| gib(bytes as f64);
@@ -969,7 +995,6 @@ impl DiskNeeds {
             show(self.claim_expected),
             show(self.claim_remaining),
             match self.claims_wait_reason {
-                Some(ClaimsWaitReason::LandingFirst) => "landing first",
                 Some(ClaimsWaitReason::NoSamples) => "no samples; one run at a time",
                 None => "none",
             },
@@ -993,7 +1018,7 @@ impl DiskState {
     /// contributes I separately. Claim = reserve + U + W + empty-slot I.
     /// Landing = reserve + max(0, I - candidate current).
     /// With no moving run the reserve alone allows one run to progress;
-    /// LandingFirst and NoSamples retain their ordering. Relax expected
+    /// NoSamples retains its ordering. Relax expected
     /// overrides both W/I, no_remaining clears U, no_landing_expectation
     /// clears only the empty-slot term. Nothing relaxes the reserve.
     pub fn needs(&self, share: f64) -> DiskNeeds {
@@ -1045,7 +1070,7 @@ impl DiskState {
             expected.unwrap_or(0)
         };
         let claims_wait_reason =
-            super::admission::disk_wait(moving, self.landing_waiting, expected);
+            (moving > 0 && expected.is_none()).then_some(ClaimsWaitReason::NoSamples);
         DiskNeeds {
             volume: self.total,
             reserve_share: share,
@@ -1100,6 +1125,7 @@ impl DiskState {
                     needed,
                     allowed: self.free.is_none_or(|free| free >= needed),
                     waiting: c.waiting,
+                    claims_with_landing: needs.claims_with_landing(self.free, c.current),
                 }
             })
             .collect();
@@ -1627,7 +1653,7 @@ pub struct DiskStatus {
     pub integration_slot: Vec<super::RunId>,
     /// max(0, claim need - free); null when free space could not be read.
     pub deficit: Option<u64>,
-    /// `reserve_floor`, `unread`, `landing_first`, `no_samples`,
+    /// `reserve_floor`, `unread`, `no_samples`,
     /// `disk_space`, or `allowed`: in that precedence order.
     pub reason: String,
     pub claims: usize,
@@ -2534,7 +2560,61 @@ mod tests {
     }
 
     #[test]
-    fn stage_claims_use_the_floor_and_keep_progress_order_and_no_samples() {
+    fn shared_landing_and_claim_reservation_uses_each_term_once() {
+        let mut state = staged_state();
+        state.total = 0;
+        let candidate = LandingCandidate {
+            run: super::super::RunId::new("landing").unwrap(),
+            current: Some(18 * GIB),
+            integrating: false,
+            waiting: true,
+        };
+        // 5 reserve + (8 + 15) remaining workers + 20 new worker + 2 landing.
+        for (free, claims) in [(50 * GIB - 1, 0), (50 * GIB, 1), (70 * GIB, 2)] {
+            state.free = Some(free);
+            let disk = state.decide(
+                0.05,
+                std::slice::from_ref(&candidate),
+                DiskEstimate::Fixed,
+                0,
+            );
+            assert_eq!(
+                disk.landing(&candidate.run).unwrap().claims_with_landing,
+                Some(claims)
+            );
+            if claims == 1 {
+                // A claim by itself needs to leave the full 20 GiB landing slot.
+                assert_eq!(disk.claims, Some(0));
+            }
+        }
+        // Relaxing the empty-slot term leaves the actual landing reservation
+        // intact. The expected override and the release of U both apply.
+        state.relaxed = Some(relaxed(DiskRelax {
+            expected: Some(10 * GIB),
+            no_remaining: true,
+            no_landing_expectation: true,
+        }));
+        let candidate = LandingCandidate {
+            current: None,
+            ..candidate
+        };
+        for (free, claims) in [(25 * GIB - 1, 0), (25 * GIB, 1)] {
+            state.free = Some(free);
+            let disk = state.decide(
+                0.05,
+                std::slice::from_ref(&candidate),
+                DiskEstimate::Fixed,
+                0,
+            );
+            assert_eq!(
+                disk.landing(&candidate.run).unwrap().claims_with_landing,
+                Some(claims)
+            );
+        }
+    }
+
+    #[test]
+    fn stage_claims_use_the_floor_and_keep_idle_progress_and_no_samples() {
         let mut state = staged_state();
         let reserve = (228 * GIB).div_ceil(20);
         state.runs = vec![staged(DiskStage::Worker, Some(gib_f(33.7)))];
@@ -2557,11 +2637,8 @@ mod tests {
         state.free = Some(reserve + 80 * GIB);
         assert_eq!(state.claims(0.05), Some(3)); // still reserves the empty I slot
         state.landing_waiting = true;
-        assert_eq!(
-            state.needs(0.05).claims_wait_reason,
-            Some(ClaimsWaitReason::LandingFirst)
-        );
-        assert_eq!(state.claims(0.05), Some(0));
+        assert_eq!(state.needs(0.05).claims_wait_reason, None);
+        assert_eq!(state.claims(0.05), Some(3));
         state.runs.push(staged(DiskStage::Worker, None));
         state.moving = 1;
         state.expected = None;

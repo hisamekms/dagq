@@ -119,6 +119,15 @@ impl SlotTable {
         light_slots::worker_slots(self.active_workers(), self.queued_landings(), parallel)
     }
 
+    /// Whether claiming has worker room after the selected entry leaves for landing.
+    pub(super) fn projected_landing_room(&self, parallel: usize) -> bool {
+        light_slots::worker_slots(
+            self.active_workers(),
+            self.queued_landings().saturating_sub(1),
+            parallel,
+        ) < parallel
+    }
+
     /// The same capacity for an e2e that replaces one waiting entry.
     pub(super) fn queued_e2e_has_room(&self, parallel: usize) -> bool {
         light_slots::queued_e2e_has_room(self.active_workers(), self.queued_landings(), parallel)

@@ -74,29 +74,12 @@ impl Progress {
     }
 }
 
-/// Only a landing that can progress except for disk gives claims the
-/// existing idle-queue wait. Container availability still applies.
+/// Whether a run contributes to the disk snapshot's landing wait count.
 pub fn landing_waiting(
     container_held: bool,
     candidates: impl IntoIterator<Item = Progress>,
 ) -> bool {
     !container_held && candidates.into_iter().any(Progress::can_progress)
-}
-
-/// Ordering constraints of the current disk model. The disk snapshot
-/// records this reason alongside the computed capacity.
-pub fn disk_wait(
-    moving: usize,
-    landing_waiting: bool,
-    expected: Option<u64>,
-) -> Option<ClaimsWaitReason> {
-    if moving == 0 && landing_waiting {
-        Some(ClaimsWaitReason::LandingFirst)
-    } else if moving > 0 && expected.is_none() {
-        Some(ClaimsWaitReason::NoSamples)
-    } else {
-        None
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +132,8 @@ pub enum Blocked {
     LandingHeld,
     LandingInProgress,
     LandingTurn,
+    /// This pass's disk budget can admit only one of the competing starts.
+    DiskCompetition,
 }
 
 impl Blocked {
@@ -156,7 +141,6 @@ impl Blocked {
     /// keep their specific reason as the name.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Disk(Some(ClaimsWaitReason::LandingFirst)) => "LandingFirst",
             Self::Disk(Some(ClaimsWaitReason::NoSamples)) => "NoSamples",
             Self::Disk(None) => "Disk",
             Self::TaskHold => "TaskHold",
@@ -180,6 +164,7 @@ impl Blocked {
             Self::LandingHeld => "LandingHeld",
             Self::LandingInProgress => "LandingInProgress",
             Self::LandingTurn => "LandingTurn",
+            Self::DiskCompetition => "DiskCompetition",
         }
     }
 }
@@ -192,13 +177,24 @@ pub struct Resources {
     pub service_down: bool,
     pub claim_hold: Option<Blocked>,
     pub disk_claims: Option<usize>,
-    pub disk_wait: Option<ClaimsWaitReason>,
+    /// The reason for a zero claim budget when it comes from ordering.
+    pub disk_wait: Option<Blocked>,
+    /// Claim capacity after starting the queue's selected landing. No outer
+    /// value means there is no competing disk reservation in the candidates.
+    pub landing_disk: Option<LandingDisk>,
     pub spacing_secs: Option<usize>,
     pub last_claim_ms: Option<i64>,
     pub now_ms: i64,
     pub container_held: bool,
     pub integrating: bool,
     pub landing_turn_busy: bool,
+}
+
+/// The disk snapshot's claim capacity when the selected landing starts.
+#[derive(Clone, Copy, Debug)]
+pub struct LandingDisk {
+    /// None means the worker budget imposes no numeric limit.
+    pub claims: Option<usize>,
 }
 
 /// The existing hold record and its admission reason share the load and
@@ -261,7 +257,23 @@ impl Resources {
     /// Keep the disk calculation's claim budget and named ordering wait.
     pub fn with_disk(mut self, decision: &DiskDecision) -> Self {
         self.disk_claims = decision.claims;
-        self.disk_wait = decision.needs.claims_wait_reason;
+        self.disk_wait = decision
+            .needs
+            .claims_wait_reason
+            .map(|reason| Blocked::Disk(Some(reason)));
+        self
+    }
+
+    /// Retain the chosen landing's reservation for the rest of this pass.
+    pub fn after_landing(mut self) -> Self {
+        if let Some(landing) = self.landing_disk.take() {
+            self.disk_claims = landing.claims;
+            if landing.claims == Some(0) {
+                self.disk_wait.get_or_insert(Blocked::DiskCompetition);
+            } else {
+                self.disk_wait = None;
+            }
+        }
         self
     }
 
@@ -276,7 +288,7 @@ impl Resources {
             } else if self.free_slots == 0 {
                 Some(Blocked::WorkerSlot)
             } else if self.disk_claims == Some(0) {
-                Some(Blocked::Disk(self.disk_wait))
+                Some(self.disk_wait.unwrap_or(Blocked::Disk(None)))
             } else if claim_spacing::waits(
                 claim_spacing::next_claim_ms(self.spacing_secs, self.last_claim_ms),
                 self.now_ms,
@@ -315,8 +327,11 @@ impl Resources {
 
 /// Admit the landing selected by LandingQueue and the worker priority
 /// line, which includes returns from human waits.
-/// Call again with refreshed facts after a start or a failed attempt. A
-/// queued e2e has already passed LandingQueue's worker replacement check.
+/// A runnable landing and claim share the disk budget when it fits. When
+/// they compete for disk, give the higher priority the first start and
+/// give the landing a tie. Call again with refreshed facts after a start
+/// or a failed attempt. A queued e2e has already passed LandingQueue's
+/// worker replacement check.
 pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Decision<T> {
     let mut landings = Vec::new();
     let mut slots = Vec::new();
@@ -334,24 +349,47 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
         starts: Vec::new(),
         blocked: Vec::new(),
     };
-    for candidate in landings
-        .into_iter()
-        .chain(slot_order(slots).into_iter().map(|slot| slot.item))
-    {
-        // LandingQueue already checked the selected entry's own stops.
-        let blocked = match candidate.kind {
-            Kind::Landing { .. } => resources.blocked(candidate.kind),
-            _ => candidate
-                .progress
-                .blocked()
-                .or_else(|| resources.blocked(candidate.kind)),
-        };
+    let slots = slot_order(slots);
+    for landing in landings {
+        let claim_first = resources
+            .landing_disk
+            .is_some_and(|disk| disk.claims == Some(0))
+            && resources.blocked(landing.kind).is_none()
+            && landing.progress.can_progress()
+            && slots
+                .iter()
+                .filter(|slot| {
+                    slot.item.progress.can_progress() && resources.blocked(slot.item.kind).is_none()
+                })
+                .take(resources.free_slots)
+                .find(|slot| slot.kind == SlotKind::Claim)
+                .is_some_and(|claim| claim.priority > landing.priority);
+        if claim_first {
+            resources.disk_claims = Some(1);
+            decision.blocked.push((landing, Blocked::DiskCompetition));
+        } else {
+            decision.consider(landing, &mut resources);
+        }
+    }
+    for slot in slots {
+        decision.consider(slot.item, &mut resources);
+    }
+    decision
+}
+
+impl<T> Decision<T> {
+    fn consider(&mut self, candidate: Candidate<T>, resources: &mut Resources) {
+        let blocked = candidate
+            .progress
+            .blocked()
+            .or_else(|| resources.blocked(candidate.kind));
         if let Some(reason) = blocked {
-            decision.blocked.push((candidate, reason));
-            continue;
+            self.blocked.push((candidate, reason));
+            return;
         }
         match candidate.kind {
             Kind::Landing { needs_worker } => {
+                *resources = resources.after_landing();
                 resources.integrating = true;
                 if needs_worker {
                     resources.free_slots = resources.free_slots.saturating_sub(1);
@@ -367,9 +405,8 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
                 }
             }
         }
-        decision.starts.push(candidate);
+        self.starts.push(candidate);
     }
-    decision
 }
 
 #[cfg(test)]
@@ -419,15 +456,7 @@ mod tests {
             (
                 Resources {
                     disk_claims: Some(0),
-                    disk_wait: Some(ClaimsWaitReason::LandingFirst),
-                    ..open
-                },
-                Some(Blocked::Disk(Some(ClaimsWaitReason::LandingFirst))),
-            ),
-            (
-                Resources {
-                    disk_claims: Some(0),
-                    disk_wait: Some(ClaimsWaitReason::NoSamples),
+                    disk_wait: Some(Blocked::Disk(Some(ClaimsWaitReason::NoSamples))),
                     ..open
                 },
                 Some(Blocked::Disk(Some(ClaimsWaitReason::NoSamples))),
@@ -635,85 +664,162 @@ mod tests {
     }
 
     #[test]
-    fn only_progressing_landings_can_make_an_idle_interrupt_claim_wait() {
-        let open = Progress::default();
-        for (progress, waiting) in [
-            (Progress { held: true, ..open }, false),
-            (open, true), // Release restores the same landing's place.
-            (
-                Progress {
-                    unanswered: true,
-                    ..open
-                },
-                false,
-            ),
-            (
-                Progress {
-                    gates: Gates {
-                        ci: true,
-                        ..Gates::default()
-                    },
-                    ..open
-                },
-                false,
-            ),
-            (
-                Progress {
-                    gates: Gates {
-                        env: true,
-                        ..Gates::default()
-                    },
-                    ..open
-                },
-                false,
-            ),
-            (
-                Progress {
-                    gates: Gates {
-                        branch: true,
-                        ..Gates::default()
-                    },
-                    ..open
-                },
-                false,
-            ),
+    fn landing_and_claim_share_disk_or_take_one_turn_by_priority() {
+        use crate::domain::{RunId, disk::LandingCandidate};
+
+        const GIB: u64 = 1 << 30;
+        const JOINT_NEED: u64 = 45 * GIB;
+        let hi = Priority::High;
+        let irq = Priority::Interrupt;
+        let ready = Progress::default();
+        let held = Progress {
+            held: true,
+            ..ready
+        };
+        let unanswered = Progress {
+            unanswered: true,
+            ..ready
+        };
+        let open = Resources {
+            free_slots: 3,
+            ..Resources::default()
+        };
+        let turn = Resources {
+            landing_turn_busy: true,
+            ..open
+        };
+        let spacing = Resources {
+            spacing_secs: Some(1),
+            last_claim_ms: Some(0),
+            ..open
+        };
+        let both = (&["landing", "claim"][..], None);
+        let landing_wins = (&["landing"][..], Some("claim"));
+        let claim_wins = (&["claim"][..], Some("landing"));
+        let just_landing = (&["landing"][..], None);
+        let just_claim = (&["claim"][..], None);
+        let worker = Some(20 * GIB);
+        for (free, worker, priority, landing_progress, resources, (starts, waits_for_disk)) in [
+            (JOINT_NEED, worker, hi, ready, open, both),
+            (JOINT_NEED, worker, irq, ready, open, both),
+            // One byte short of the joint budget, the reserve still lets
+            // exactly one start. A landing wins a tie.
+            (JOINT_NEED - 1, worker, hi, ready, open, landing_wins),
+            (JOINT_NEED - 1, worker, irq, ready, open, claim_wins),
+            (10 * GIB, worker, hi, ready, open, landing_wins),
+            (10 * GIB, worker, irq, ready, open, claim_wins),
+            (10 * GIB, worker, hi, ready, turn, just_claim),
+            (10 * GIB, worker, hi, held, open, just_claim),
+            (10 * GIB, worker, hi, unanswered, open, just_claim),
+            (10 * GIB, worker, irq, ready, spacing, just_landing),
+            // Below the reserve, neither standalone start fits.
+            (MIN_RESERVE_BYTES - 1, worker, irq, ready, open, (&[], None)),
+            (100 * GIB, None, hi, ready, open, just_landing),
+            (100 * GIB, None, irq, ready, open, claim_wins),
         ] {
+            let run = RunId::new("landing").unwrap();
             let disk = DiskState {
-                free: Some(MIN_RESERVE_BYTES + 80 * (1 << 30)),
+                free: Some(free),
                 total: 0,
-                expected: Some(20 * (1 << 30)),
-                integrator_expected: Some(20 * (1 << 30)),
-                runs: vec![DiskRun {
-                    stage: DiskStage::Waiting,
-                    current: None,
-                }],
+                expected: worker,
+                integrator_expected: worker,
+                runs: vec![],
                 moving: 0,
                 landing_current: None,
-                landing_waiting: landing_waiting(false, [progress]),
+                landing_waiting: landing_waiting(false, [landing_progress]),
                 relaxed: None,
             }
-            .decide(DEFAULT_RESERVE_SHARE, &[], Default::default(), 0);
-            assert_eq!(disk.needs.landing_waiting, waiting, "{progress:?}");
-            assert_eq!(disk.claims, Some(if waiting { 0 } else { 3 }));
-            let result = admit(
-                vec![Candidate::slot(
-                    SlotKind::Claim,
-                    Priority::Interrupt,
-                    "interrupt",
-                )],
-                Resources {
-                    free_slots: 3,
-                    ..Resources::default()
-                }
-                .with_disk(&disk),
+            .decide(
+                DEFAULT_RESERVE_SHARE,
+                &[LandingCandidate {
+                    run: run.clone(),
+                    current: Some(0),
+                    integrating: false,
+                    waiting: true,
+                }],
+                Default::default(),
+                0,
             );
-            assert_eq!(result.starts_work(), !waiting, "{progress:?}");
-            if waiting {
+            let landing = disk.landing(&run).unwrap();
+            let mut resources = resources.with_disk(&disk);
+            resources.landing_disk = Some(LandingDisk {
+                claims: landing.claims_with_landing,
+            });
+            for needs_worker in [false, true] {
+                let mut candidates = vec![
+                    Candidate::slot(SlotKind::Claim, priority, "claim"),
+                    Candidate::slot(SlotKind::Claim, Priority::Normal, "another claim"),
+                ];
+                if landing.allowed {
+                    candidates.push(Candidate {
+                        item: "landing",
+                        kind: Kind::Landing { needs_worker },
+                        priority: hi,
+                        progress: landing_progress,
+                    });
+                }
+                let decision = admit(candidates, resources);
                 assert_eq!(
-                    result.blocked[0].1,
-                    Blocked::Disk(Some(ClaimsWaitReason::LandingFirst))
+                    decision
+                        .starts
+                        .into_iter()
+                        .map(|candidate| candidate.item)
+                        .collect::<Vec<_>>(),
+                    starts,
+                    "free={free}, priority={priority:?}, needs_worker={needs_worker}, progress={landing_progress:?}, resources={resources:?}"
                 );
+                if let Some(waiting) = waits_for_disk {
+                    assert!(
+                        decision.blocked.iter().any(|(candidate, reason)| {
+                            candidate.item == waiting && *reason == Blocked::DiskCompetition
+                        }),
+                        "free={free}, priority={priority:?}, needs_worker={needs_worker}: {waiting} waits for disk"
+                    );
+                }
             }
+        }
+    }
+
+    #[test]
+    fn only_a_claim_with_a_worker_slot_competes_with_the_landing_for_disk() {
+        use Priority::{High, Interrupt, Low};
+
+        let landing = Candidate {
+            item: "landing",
+            kind: Kind::Landing {
+                needs_worker: false,
+            },
+            priority: High,
+            progress: Progress::default(),
+        };
+        let claim = Candidate::slot(SlotKind::Claim, Interrupt, "claim");
+        for (slots, return_priority, starts) in [
+            (1, Interrupt, &["landing", "return"][..]),
+            (2, Interrupt, &["return", "claim"][..]),
+            (1, Low, &["claim"][..]),
+        ] {
+            let decision = admit(
+                vec![
+                    landing.clone(),
+                    claim.clone(),
+                    returning("return", return_priority, 1),
+                ],
+                Resources {
+                    free_slots: slots,
+                    disk_claims: Some(1),
+                    landing_disk: Some(LandingDisk { claims: Some(0) }),
+                    ..Resources::default()
+                },
+            );
+            assert_eq!(
+                decision
+                    .starts
+                    .into_iter()
+                    .map(|candidate| candidate.item)
+                    .collect::<Vec<_>>(),
+                starts,
+                "worker slots={slots}, return priority={return_priority:?}"
+            );
         }
     }
 

@@ -352,7 +352,12 @@ pub fn admission_transition(
 ) -> Option<(EventKind, Value)> {
     use super::admission::{Blocked, hold_reason};
     let record = match end.reason {
-        Some(reason @ (Blocked::Disk(_) | Blocked::Load | Blocked::Authentication)) => {
+        Some(
+            reason @ (Blocked::Disk(_)
+            | Blocked::DiskCompetition
+            | Blocked::Load
+            | Blocked::Authentication),
+        ) => {
             let name = reason.name();
             let details = details.filter(|hold| hold_reason(hold.reason) == reason);
             let legacy_reason = details.map_or(name, |hold| hold.reason.as_str());
@@ -801,7 +806,7 @@ mod tests {
     #[test]
     fn admission_disk_hold_and_candidate_sample_share_the_reason() {
         use crate::domain::{
-            admission::{self, Resources},
+            admission::{self, Blocked, Resources},
             disk::ClaimsWaitReason,
             kpi::{CandidatesSample, ClaimPassEnd},
             slot_order::SlotKind,
@@ -809,8 +814,11 @@ mod tests {
         let token = LeaseToken::new("s");
         for (disk_wait, expected) in [
             (None, "Disk"),
-            (Some(ClaimsWaitReason::LandingFirst), "LandingFirst"),
-            (Some(ClaimsWaitReason::NoSamples), "NoSamples"),
+            (Some(Blocked::DiskCompetition), "DiskCompetition"),
+            (
+                Some(Blocked::Disk(Some(ClaimsWaitReason::NoSamples))),
+                "NoSamples",
+            ),
         ] {
             let reason = admission::probe(
                 SlotKind::Claim,
@@ -1182,18 +1190,21 @@ mod tests {
                 needed: 20,
                 allowed: false,
                 waiting: true,
+                claims_with_landing: Some(0),
             },
             LandingDecision {
                 run: RunId::new("ready").unwrap(),
                 needed: 2,
                 allowed: true,
                 waiting: true,
+                claims_with_landing: Some(0),
             },
             LandingDecision {
                 run: RunId::new("integrating").unwrap(),
                 needed: 6,
                 allowed: false,
                 waiting: false,
+                claims_with_landing: Some(0),
             },
         ];
         let snapshot = json!([
@@ -1223,6 +1234,7 @@ mod tests {
             needed: 3,
             allowed: true,
             waiting: true,
+            claims_with_landing: Some(0),
         });
         let remeasured = disk(Some(2), Some(18), None).unwrap();
         assert!(
@@ -1240,6 +1252,7 @@ mod tests {
             needed: 18,
             allowed: false,
             waiting: true,
+            claims_with_landing: Some(0),
         });
         let (kind, payload) =
             landing_transition(Some(&remeasured), Some(&last), &candidates, &me, |_| true).unwrap();

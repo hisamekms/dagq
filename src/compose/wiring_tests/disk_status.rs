@@ -373,34 +373,8 @@ fn measurements_reach_the_recorded_human_and_json_status() {
 }
 
 #[test]
-fn landing_first_reaches_status_candidates_and_the_kpi_sample() {
-    assert_disk_wait_is_reported(
-        "disk_ordering_landing_wait",
-        "awaiting_integration",
-        EventKind::IntegrationApproved,
-        json!({"ask_id": 1}),
-        "LandingFirst",
-    );
-}
-
-#[test]
 fn no_samples_reaches_status_candidates_and_the_kpi_sample() {
-    assert_disk_wait_is_reported(
-        "disk_ordering_without_samples",
-        "running",
-        EventKind::RunPhaseChanged,
-        json!({"phase": "worker"}),
-        "NoSamples",
-    );
-}
-
-fn assert_disk_wait_is_reported(
-    name: &str,
-    status: &str,
-    kind: EventKind,
-    payload: Value,
-    expected: &str,
-) {
+    let name = "disk_ordering_without_samples";
     let w = Wiring::new(
         name,
         Script {
@@ -413,8 +387,7 @@ fn assert_disk_wait_is_reported(
     w.free.store(80 << 30, Ordering::SeqCst);
     w.ready_task(&[]);
     let mut queue = w.queue();
-    // A live owner keeps the existing run in its current phase while this
-    // supervisor observes either a pending landing or a moving worker.
+    // A live owner keeps the worker moving while the supervisor observes it.
     let owner = LeaseToken::new("disk-ordering-owner");
     queue
         .register_supervisor(&owner, std::process::id(), 1, crate::VERSION)
@@ -425,11 +398,17 @@ fn assert_disk_wait_is_reported(
     };
     connect(&w.db)
         .execute(
-            "UPDATE task_runs SET status=?2, worktree_path='/disk-order/worktree' WHERE id=?1",
-            rusqlite::params![run.id().as_str(), status],
+            "UPDATE task_runs SET status='running', worktree_path='/disk-order/worktree' WHERE id=?1",
+            rusqlite::params![run.id().as_str()],
         )
         .unwrap();
-    queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunPhaseChanged,
+            json!({"phase": "worker"}),
+        )
+        .unwrap();
     let candidate = w.ready_task(&[]);
     let mut observed = None;
     w.supervise_once_while_stoppable(|queue, stop| {
@@ -441,14 +420,14 @@ fn assert_disk_wait_is_reported(
         true
     });
     let (sample, status, holds) = observed.expect("the live pass records a sample");
-    assert_eq!(sample["admission_reason"], expected, "{name}");
+    assert_eq!(sample["admission_reason"], "NoSamples", "{name}");
     assert_eq!(sample["claims_held"], true);
     assert_eq!(sample["candidates"], 1);
     assert_eq!(
-        status["claim_hold"]["admission_reason"], expected,
+        status["claim_hold"]["admission_reason"], "NoSamples",
         "{status}"
     );
     assert_eq!(holds[0]["reason"], "claim_held", "{holds:?}");
-    assert_eq!(holds[0]["record"]["admission_reason"], expected);
+    assert_eq!(holds[0]["record"]["admission_reason"], "NoSamples");
     assert!(queue.show(candidate).unwrap().runs.is_empty());
 }

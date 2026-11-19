@@ -218,7 +218,14 @@ pub(crate) fn admission_records(
             event.id > resumed.id
                 || !matches!(
                     event.payload["admission_reason"].as_str(),
-                    Some("Disk" | "LandingFirst" | "NoSamples" | "Load" | "Authentication")
+                    Some(
+                        "Disk"
+                            | "DiskCompetition"
+                            | "LandingFirst"
+                            | "NoSamples"
+                            | "Load"
+                            | "Authentication"
+                    )
                 )
         });
     }
@@ -454,8 +461,6 @@ pub fn disk_status(
         "reserve_floor"
     } else if decision.free.is_none() {
         "unread"
-    } else if needs.claims_wait_reason == Some(ClaimsWaitReason::LandingFirst) {
-        "landing_first"
     } else if needs.claims_wait_reason == Some(ClaimsWaitReason::NoSamples) {
         "no_samples"
     } else if decision.claim_short {
@@ -1263,7 +1268,7 @@ mod disk_tests {
             landing_waiting: false,
             relaxed: None,
         };
-        let mut decision = state.decide(0.05, &[], DiskEstimate::Recent, 0);
+        let decision = state.decide(0.05, &[], DiskEstimate::Recent, 0);
         let run = run_disk_status(
             &decision.needs,
             RunDiskInput {
@@ -1285,10 +1290,6 @@ mod disk_tests {
         assert!(status.message.contains("single run estimate fallback"));
         assert!(status.message.contains("relax none"));
         state.moving = 0;
-        state.landing_waiting = true;
-        decision = state.decide(0.05, &[], DiskEstimate::Recent, 0);
-        assert_eq!(shown(&decision, vec![], 2).reason, "landing_first");
-        state.landing_waiting = false;
         assert_eq!(
             shown(&state.decide(0.05, &[], DiskEstimate::Recent, 0), vec![], 2).claims,
             1

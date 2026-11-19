@@ -20,7 +20,11 @@ impl Supervisor<'_> {
     /// held for a person since this look. Worker capacity is needed for
     /// the precheck/session exit or outstanding e2e before this run can
     /// join the landing lane; runs already in that lane do not count.
-    pub(super) fn take_up_stranded_landings(&mut self, parallel: usize) -> Result<()> {
+    pub(super) fn take_up_stranded_landings(
+        &mut self,
+        parallel: usize,
+        selected_landing: Option<&RunId>,
+    ) -> Result<()> {
         if self.registration.draining() {
             return Ok(());
         }
@@ -31,7 +35,8 @@ impl Supervisor<'_> {
             if self.used_slots() >= parallel {
                 break;
             }
-            if self.in_slot(run.id()) {
+            // The selected landing is already in this pass's Admission line.
+            if selected_landing == Some(run.id()) || self.in_slot(run.id()) {
                 continue;
             }
             let leased = self.queue.run_lease(run.id())?.is_some();

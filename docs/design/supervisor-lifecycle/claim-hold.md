@@ -100,17 +100,8 @@ fill pass: queue全体の控え → 戻り・再開・復旧job・claimの列 �
 
 控えのlogとeventは必要量の内訳を持ち、掃除中もlogに残す。
 
-- phaseの性質・候補ごとの必要量と可否を一度決め、開始・控え・askが同じ結果を読む入口は`domain::disk::DiskState::decide`。
-- 方式の違いはWとIの出どころだけで、係数を掛けない。
-  方式の入口は`domain::disk::stage_budgets`。
-- W・Iの予測はWORKER・INTEGRATOR各段の直近ピーク標本で求め、標本の無い段は1つの見込みに戻る。
-  段ごとのピークは方式によらず記録する（`domain::disk::StagePeaks`）。
-- 動くrunが0本なら最低ラインだけで進め、着地待ちがあればclaimより着地が先に進む。
-  予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
-  対象は[今進めるrun](#workerのslotと着地の列)。
-- 予約はbuildするか・着地のレーンにいるかで付け替え、残りは予約量から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いて数える。
-  待ちのrunは予約を持たず今の大きさだけを占め、INTEGRATORの枠は着地待ちの有無によらず常に取る。
-  信頼できない今の大きさ（量れない・古い・別のrun）は予約量のまま数える。
+claimと着地の予約の取り方と、両方が同じ回に進める条件は[ディスクの開始判断](disk-admission.md)を読む。
+
 - 動いているrunが想定を初めて超えたときの記録は`domain::disk::size_exceeded_expected`が判断する（再起動後は再度1回を許す）。
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はlocalのsupervisorが各passの資源の読みの前にmain checkoutから読み直す（[Run environment](run-environment.md)）。
@@ -125,13 +116,13 @@ fill pass: queue全体の控え → 戻り・再開・復旧job・claimの列 �
 - 入口は`HostOpsState::check_disk`で、passの初め（drainやhandoffの途中も）に確かめる。
 - 空きがclaimか着地の閾値の大きい方を下回れば掃除を頼み、loopの外のjobが行う（[Run worktrees](run-worktrees.md#loopの外で掃除する)）。
   消す範囲と消さないrunは[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)が持つ。
-- 掃除のjobが終わるまでclaimと着地は控えるが、控えのeventもaskも記録しない。
+- 容量不足で止まった開始は掃除の結果を待ち、その間は容量不足の控えのeventもaskも記録しない。
   そのあいだもclaimはclaimの閾値を、着地は着地の閾値を下回るときだけ控え、満たす側は掃除を待たずに進む。
 - 走っている通常の掃除jobに乗ったときは、そのjobと続く残りのjobの両方を空き容量の掃除とし、残りのjobが終わるまで待つ（`CleanupWatch::for_disk`）。
   掃除の連なりは「乗った通常のjob → 残りのjob」の1回までで、次の頼みは回収から一定の間隔が経つまで出さない（`asks_for_cleanup`）。
   頼みが受けられなかったとき（drainのあいだ）は間隔に数えない。
 - 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、列で待ち、rebaseも検証もしない。
-  `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べ、列の着地の開始（`start_approved_landings`）だけが待つ（[Review](review.md#review-supervisor)）。
+  `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べる（[Review](review.md#review-supervisor)）。
 - resume: workerのsessionが容量不足で落ちたrunは、claimが控える間は復旧jobもaskも無しに`failed`か`interrupted`のまま待ち、控えが解けたpassで同じrunでresumeする（[Triage](triage.md)）。
 - 落とし穴: 着地の控えはhostのものでなく記録したsupervisorの候補のものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
 - 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返し[拾い直し](supervise.md#leaseの解放)に任せる。
@@ -165,7 +156,7 @@ fill pass: queue全体の控え → 戻り・再開・復旧job・claimの列 �
 ### inboxに知らせる
 
 - 掃除の後も（乗った掃除なら残りのjobの後も）最低ライン未満で、自分で終わるrunが無ければ、jobが終わった後の周回でqueueで1件のdiskの`cost`のaskを開く（ADR-0047の決定42）。
-- claimと着地の控えはそれぞれの必要量で判じ、askは最低ラインで判じる。
+- 単独で始めるときの控えはそれぞれの必要量で判じ、askは最低ラインで判じる。
   最低ライン以上なら、前進の保証で進むのでaskを開かない。
   掃除jobの終わりにsuperviseのloopの外で内訳を量り、questionに添える。
   内訳が量れなくてもaskは開く。
