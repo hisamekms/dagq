@@ -176,4 +176,5 @@ supervisorはこれらのためにもqueue DBを開かない（`compose::supervi
 
 [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)。
 CIの見張りを持つsupervisor（`SuperviseOptions::ci_watch`）だけが、答えを持たないか読む手段が無い間はclaim・新しい再開・着地を保留する（[CI watch](ci-watch.md)の「読む手段が無いとき」）。
-着地を始めるか・待つか・drainが人に返すかの判断は、他の保留と合わせて`domain::landing_hold::judge`が持つ。
+着地の開始の判断は[承認とslot](integrate.md#承認とslot)を参照する。
+すでにleaseを持って着地前のe2eを待つrunを進めるか、待たせるか、drainでleaseを返すかは`domain::landing_hold::judge`が決める。
