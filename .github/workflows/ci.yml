@@ -22,9 +22,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether the change is docs only (ADR-t2034-1): every path of git diff --name-only from the
-  # base to this run's commit is under docs/ or a *.md at the root. A pull
-  # request's base is its base. A push's base is the head commit of the latest
+  # Whether the change is docs only (ADR-t2034-1, ADR-t5487-1): every path
+  # from the base to this run's commit is under docs/ outside docs/design/,
+  # or a *.md at the root. Rust unit tests read docs/design/.
+  # A pull request's base is its base. A push's base is the head commit of the latest
   # completed push run of this workflow on main whose checks job ended success
   # or failure, which must be an ancestor of this run's commit (ADR-t2134-1):
   # GitHub cancels a pending run of the same concurrency group when a newer
@@ -85,14 +86,14 @@ jobs:
           fi
           if [ -n "$base" ] && printf '%s' "$base" | grep -q '[^0]' && git cat-file -e "$base^{commit}" 2>/dev/null &&
             files=$(git -c core.quotePath=false diff --no-renames --name-only "$base" "$GITHUB_SHA") &&
-            [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^(docs/.*|[^/]*\.md)$'; then
+            printf '%s' "$files" | sh scripts/ci-docs-only.sh; then
             docs_only=true
           fi
           echo "docs only: $docs_only (base: ${base:-none}, from: ${source:-no run found or read})"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
 
-  # The checks that need no Rust toolchain, the doc checks among them: they
-  # run on every change, docs only or not (ADR-t2034-1). The same macOS
+  # The doc and script checks run on every change (ADR-t2034-1), including
+  # the self-test for the docs-only path rule (ADR-t5487-1). The same macOS
   # runner as the Rust job, where the scripts are known to work.
   docs:
     name: docs / scripts checks
@@ -107,6 +108,9 @@ jobs:
 
       - name: ADR numbers
         run: sh scripts/check-adr-numbers.sh
+
+      - name: Docs-only path rule self-test
+        run: sh scripts/ci-docs-only.sh --self-test
 
       # The ADR index is generated and not committed (ADR-t1967-1); this
       # checks that every ADR's frontmatter can be read into it.
