@@ -32,6 +32,8 @@ related:
 
 # Run environment
 
+> 直し対象（正: `try_recheck`、直す: `task 5356`）。
+
 repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3）が、runごとの環境変数になる。
 読み込みの入口は`src/infrastructure/run_env.rs`の`load_run_env`で、ファイルが無ければ空。
 
