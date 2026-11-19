@@ -1,0 +1,9 @@
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_landing_that_loses_its_turn_leaves_a_disk_hold_until_claims_can_start"
+reason = "境界として実際の supervisor と queue service と SQLite を通し、着地の番を失った回の控え、稼働中の status、容量回復後の解除を同じ supervisor の起動で観測する。着地候補、動いている worker、次の claim を各1本とし、tick は1 msに絞っている。予約の算術は domain::disk の unit test が持つ。"
+task = 5429
+
+[[test]]
+name = "compose::wiring_tests::disk_holds::a_cleanup_for_room_leaves_the_disk_reason_in_the_sample_without_opening_a_hold"
+reason = "境界として実際の supervisor と queue service と SQLite を通し、掃除中の候補標本、キャッシュ削除による容量の回復、控えの区間を開かずに claim が始まることを観測する。1 task と1回の起動、1 msの tick に絞り、掃除を待つかの判断は domain の unit test が持つ。"
+task = 5429

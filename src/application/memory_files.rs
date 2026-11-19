@@ -19,11 +19,13 @@ pub struct MemoryFiles {
     /// bounded; none when unbounded.
     read_limit: Option<u64>,
     busy_locks: Mutex<std::collections::HashSet<PathBuf>>,
+    busy_next_shared_locks: Mutex<std::collections::HashSet<PathBuf>>,
     rejected_suffix: Mutex<Option<String>>,
     /// The directories that are there ([`Self::put_dir`]); none else is.
     dirs: Mutex<std::collections::HashSet<PathBuf>>,
     /// Injected directory measurements; unspecified paths are unmeasured.
     tree_sizes: Mutex<HashMap<PathBuf, u64>>,
+    removed_dir_hooks: Mutex<HashMap<PathBuf, Box<dyn FnOnce() + Send>>>,
     /// The milliseconds the files' `now` moved on since its start, one at
     /// each write, when the files tick ([`Self::ticking`]); `None` keeps
     /// one `now`.
@@ -34,6 +36,14 @@ impl MemoryFiles {
     /// Model a compiler lock held by another process until the test ends.
     pub fn hold_lock(&self, path: &Path) {
         self.busy_locks.lock().unwrap().insert(path.to_owned());
+    }
+
+    /// Simulate an exclusive holder arriving just before the next shared lock.
+    pub fn hold_next_shared_lock(&self, path: &Path) {
+        self.busy_next_shared_locks
+            .lock()
+            .unwrap()
+            .insert(path.to_owned());
     }
 
     /// Files whose reads take at most `limit` bytes each.
@@ -93,6 +103,14 @@ impl MemoryFiles {
             .insert(dir.to_owned(), bytes);
     }
 
+    /// Run a hook after the next recursive removal of this directory.
+    pub fn after_remove_dir_all(&self, dir: &Path, hook: impl FnOnce() + Send + 'static) {
+        self.removed_dir_hooks
+            .lock()
+            .unwrap()
+            .insert(dir.to_owned(), Box::new(hook));
+    }
+
     pub fn put(&self, path: &Path, modified: SystemTime, contents: &str) {
         self.files
             .lock()
@@ -112,6 +130,11 @@ impl RunFiles for MemoryFiles {
     fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
         Ok((!self.busy_locks.lock().unwrap().contains(path))
             .then(|| Box::new(()) as Box<dyn std::any::Any + Send>))
+    }
+
+    fn try_lock_shared(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        let busy = self.busy_next_shared_locks.lock().unwrap().remove(path);
+        Ok((!busy).then(|| Box::new(()) as Box<dyn std::any::Any + Send>))
     }
 
     fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
@@ -261,6 +284,10 @@ impl RunFiles for MemoryFiles {
             .lock()
             .unwrap()
             .retain(|at, _| !at.starts_with(dir));
+        let hook = self.removed_dir_hooks.lock().unwrap().remove(dir);
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(())
     }
     /// A directory with no file under it.

@@ -124,6 +124,64 @@ fn below_the_reserve_no_run_is_claimed_and_with_room_a_new_queue_claims_one_at_a
     );
 }
 
+#[test]
+fn a_cleanup_for_room_leaves_the_disk_reason_in_the_sample_without_opening_a_hold() {
+    use crate::domain::{
+        EventKind,
+        disk::{DiskConfig, DiskEstimate},
+    };
+    use std::time::Duration;
+
+    let wiring = Wiring::new(
+        "a_cleanup_for_room_leaves_the_disk_reason_in_the_sample_without_opening_a_hold",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![verdict("pass", "meets the acceptance")],
+        },
+    )
+    .with_tick(Duration::from_millis(1))
+    .with_disk(DiskConfig {
+        estimate: DiskEstimate::Fixed,
+        run_size: Some(GIB),
+        ..DiskConfig::default()
+    });
+    wiring.free.store(SHORT, Ordering::SeqCst);
+    // The cleanup itself frees room. Removing this cache leaves the
+    // current pass's short reading intact and changes the next reading.
+    let target = crate::application::update::UpdatePaths::under(wiring.db.parent().unwrap()).target;
+    wiring.files.put_dir(&target);
+    wiring.files.set_tree_size(&target, ROOM - SHORT);
+    let free = wiring.free.clone();
+    wiring.files.after_remove_dir_all(&target, move || {
+        free.store(ROOM, Ordering::SeqCst);
+    });
+    let task = wiring.ready_task(&[]);
+    wiring.supervise_once();
+
+    let mut queue = wiring.queue();
+    let events = queue.all_events().unwrap();
+    let sampled = events
+        .iter()
+        .find(|event| event.kind == EventKind::CandidatesSampled)
+        .unwrap();
+    assert_eq!(sampled.payload["claims_held"], true);
+    assert_eq!(sampled.payload["admission_reason"], "Disk");
+    assert_eq!(sampled.payload["candidates"], 1);
+    let repaired = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::AutoRepaired && event.payload["repair"] == "disk_cleanup"
+        })
+        .unwrap();
+    assert_eq!(repaired.payload["bytes"], ROOM - SHORT);
+    assert_eq!(repaired.payload["conditions"]["free_bytes"], SHORT);
+    assert_eq!(repaired.payload["conditions"]["free_bytes_after"], ROOM);
+    assert!(sampled.id < repaired.id);
+    assert!(sampled.id.as_i64() < first_id(&queue.show(task).unwrap(), "run_claimed"));
+    let held = queue_payloads(&queue, "claim_held");
+    assert!(held.is_empty(), "{held:?}");
+}
+
 /// The startup reader wires the fixed method through check_disk into
 /// the hold event and its log breakdown even before the first sample.
 #[test]

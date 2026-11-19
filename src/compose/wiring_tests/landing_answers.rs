@@ -1342,31 +1342,16 @@ fn disk_admission_fixture(
     free_at_admission: u64,
     needs_e2e: bool,
 ) -> (Wiring, TaskId, TaskId, crate::domain::EventId) {
-    use crate::application::{RunFiles, integrate::binding, supervise::PausePoint};
-    use crate::domain::{
-        EventKind, Priority,
-        disk::{DiskConfig, DiskEstimate},
-    };
-    use std::{
-        path::Path,
-        sync::{Arc, atomic::Ordering},
-    };
+    use crate::application::supervise::PausePoint;
+    use std::sync::{Arc, atomic::Ordering};
 
-    let wiring = Wiring::new(
+    let wiring = disk_admission_wiring(
         name,
         Script {
             receipts: vec![],
             verdicts: vec![],
         },
-    )
-    .with_tick(std::time::Duration::from_millis(1))
-    .with_disk(DiskConfig {
-        estimate: DiskEstimate::Fixed,
-        run_size: Some(20 * (1 << 30)),
-        landing_size: Some(20 * (1 << 30)),
-        ..DiskConfig::default()
-    });
-    wiring.git.allow_clean_merges();
+    );
     let free = wiring.free.clone();
     free.store(free_at_admission, Ordering::SeqCst);
     let wiring = wiring.with_pauses(Arc::new(move |point, _| {
@@ -1376,9 +1361,37 @@ fn disk_admission_fixture(
         }
     }));
     wiring.fail_claim_launches(true);
+    let (landing, approval_id) = approved_disk_landing(&wiring, needs_e2e);
+    let claim = wiring.ready_task(&["true"]);
+    (wiring, landing.task_id(), claim, approval_id)
+}
+
+fn disk_admission_wiring(name: &str, script: Script) -> Wiring {
+    use crate::domain::disk::{DiskConfig, DiskEstimate};
+
+    let wiring = Wiring::new(name, script)
+        .with_tick(std::time::Duration::from_millis(1))
+        .with_disk(DiskConfig {
+            estimate: DiskEstimate::Fixed,
+            run_size: Some(20 * (1 << 30)),
+            landing_size: Some(20 * (1 << 30)),
+            ..DiskConfig::default()
+        });
+    wiring.git.allow_clean_merges();
+    wiring
+}
+
+fn approved_disk_landing(
+    wiring: &Wiring,
+    needs_e2e: bool,
+) -> (crate::domain::TaskRun, crate::domain::EventId) {
+    use crate::application::{RunFiles, integrate::binding};
+    use crate::domain::{EventKind, Priority};
+    use std::path::Path;
+
     let mut queue = wiring.queue();
     let landing = direct_landing_fixture(
-        &wiring,
+        wiring,
         &mut queue,
         Priority::High,
         RunStatus::AwaitingIntegration,
@@ -1421,8 +1434,7 @@ fn disk_admission_fixture(
         .find(|event| event.kind == EventKind::IntegrationApproved)
         .unwrap()
         .id;
-    let claim = wiring.ready_task(&["true"]);
-    (wiring, landing.task_id(), claim, approval_id)
+    (landing, approval_id)
 }
 
 #[test]
@@ -1454,6 +1466,148 @@ fn admission_starts_the_queued_landing_and_claim_from_one_disk_reading() {
         payloads(&queue.show(claim).unwrap(), "run_claimed").len(),
         1
     );
+}
+
+#[test]
+fn a_landing_that_loses_its_turn_leaves_a_disk_hold_until_claims_can_start() {
+    use crate::application::{heavy_turn::HeavyTurn, supervise::PausePoint};
+    use crate::domain::{EventKind, SessionRole};
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    const GIB: u64 = 1 << 30;
+    // With the moving worker measured at its budget, standalone claims
+    // need 45 GiB. Sharing with the measured landing needs only 25 GiB.
+    const SHORT: u64 = 44 * GIB;
+    const ROOM: u64 = 100 * GIB;
+    let mut wiring = disk_admission_wiring(
+        "a_landing_that_loses_its_turn_leaves_a_disk_hold_until_claims_can_start",
+        Script {
+            receipts: vec![succeeded, succeeded],
+            verdicts: vec![verdict("pass", "meets the acceptance"); 2],
+        },
+    );
+    let (landing, _) = approved_disk_landing(&wiring, false);
+    wiring.moving_sizes = Arc::new(|path: &Path| {
+        Ok(path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("worktree"))
+            .then_some(20 * GIB))
+    });
+    let worker = wiring.ready_task(&["true"]);
+    let (release, released) = mpsc::channel();
+    wiring.agent.hold_next_turn(released);
+    let files = wiring.files.clone();
+    let turn = HeavyTurn::under(wiring.db.parent().unwrap());
+    let free = wiring.free.clone();
+    free.store(ROOM, Ordering::SeqCst);
+    let allow = Arc::new(AtomicBool::new(false));
+    let allow_landing = allow.clone();
+    let lost_turn = Arc::new(AtomicBool::new(false));
+    let lost_turn_at_start = lost_turn.clone();
+    let landing_run = landing.id().clone();
+    let wiring = wiring.with_pauses(Arc::new(move |point, run| {
+        if point == PausePoint::LandingStart
+            && run == Some(&landing_run)
+            && !allow_landing.load(Ordering::SeqCst)
+        {
+            // Take the turn between the queue selection and landing start.
+            files.hold_next_shared_lock(&turn.turn);
+            if free.load(Ordering::SeqCst) == SHORT {
+                lost_turn_at_start.store(true, Ordering::SeqCst);
+            }
+        }
+    }));
+
+    let mut claim = None;
+    let mut held_id = None;
+    let mut release = Some(release);
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        let Some(task) = claim else {
+            let disk =
+                queue.supervisors().unwrap().first().and_then(|supervisor| {
+                    queue.supervisor_disk_status(&supervisor.token).unwrap()
+                });
+            let Some(disk) = disk else {
+                return false;
+            };
+            // Wait for both observations from the size walk. The worker
+            // has no unused reservation and the landing needs only the reserve.
+            if !running(queue, worker)
+                || disk["needs"]["claim"] != 45 * GIB
+                || disk["needs"]["landing"] != 5 * GIB
+            {
+                return false;
+            }
+            wiring.free.store(SHORT, Ordering::SeqCst);
+            if disk["free"] == SHORT {
+                claim = Some(wiring.ready_task(&["true"]));
+                lost_turn.store(false, Ordering::SeqCst);
+            }
+            return false;
+        };
+        let events = queue.all_events().unwrap();
+        let status = || {
+            wiring.status_at(
+                wiring.generators().clock.system_time(),
+                Some(SessionRole::Inbox),
+            )
+        };
+        if let Some(id) = held_id {
+            let Some(resumed) = events
+                .iter()
+                .find(|event| event.kind == EventKind::ClaimResumed && event.id > id)
+            else {
+                return false;
+            };
+            assert_eq!(resumed.payload["reason"], "disk_space");
+            assert!(!payloads(&queue.show(task).unwrap(), "run_claimed").is_empty());
+            assert_eq!(status()["claim_hold"], Value::Null);
+            stop();
+            release.take().unwrap().send(()).unwrap();
+            return true;
+        }
+        let Some(held) = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == EventKind::ClaimHeld)
+        else {
+            return false;
+        };
+        let sample = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == EventKind::CandidatesSampled)
+            .unwrap();
+        if !lost_turn.load(Ordering::SeqCst) || sample.payload["candidates"] != 1 {
+            return false;
+        }
+        assert_eq!(held.payload["reason"], "disk_space");
+        assert_eq!(held.payload["admission_reason"], "Disk");
+        assert_eq!(held.payload["threshold"], (45 * GIB) as f64);
+        assert_eq!(status()["claim_hold"]["reason"], "disk_space");
+        assert_eq!(sample.payload["claims_held"], true);
+        assert_eq!(sample.payload["admission_reason"], "Disk");
+        assert!(queue.show(task).unwrap().runs.is_empty());
+        assert!(
+            payloads(
+                &queue.show(landing.task_id()).unwrap(),
+                "integration_started"
+            )
+            .is_empty()
+        );
+        held_id = Some(held.id);
+        wiring.free.store(ROOM, Ordering::SeqCst);
+        allow.store(true, Ordering::SeqCst);
+        false
+    });
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(release.is_none());
 }
 
 #[test]
