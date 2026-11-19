@@ -52,6 +52,8 @@ related:
 
 # Supervisor and workspace lifecycle
 
+> 直し対象（正: `LandingQueue`、直す: `task 5356`）。
+
 ```text
 ready task (dependencies completed)
   → claim TaskRun + run lease      ─┐

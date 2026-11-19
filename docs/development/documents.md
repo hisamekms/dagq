@@ -86,6 +86,16 @@ related:
 - 名前・欄・既定値の意味が要るなら、定義のそばのdoc commentに書く。
 - designを書き直すのは、流れ・境界・不変条件・コードから読めない約束が変わったときと、記述が今のコードかacceptedのADRと食い違うときだけ。
   変えた名前がdesignに無いことはずれではない（[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)、下の「workerの文書の照合」）。
+- 直し対象の印は、今のコードかacceptedのADRと食い違う記述の直しを後のtaskに回すときだけ使い、記述の追加の代わりには使わない。
+  対象の節の見出しの直後に、``> 直し対象（正: `<コードの入口>`、直す: `task <ID>`）。``の形で1文1行の引用を置く。
+  見出しの無い箇所では、対象の箇条書きか図のfenced code blockの直前に前後を空行で区切って置き、箇条書きや図の中身は変えない。
+  印は短い指し先にとどめ、食い違う文と今の振る舞いは印を入れたtaskのreceiptに節ごとに1行で書き、直すtaskはそのreceiptを読む。
+  印は1節に1つとし、同じ直すtaskの印が既にある節に後のtaskが印を足さない。
+  印を置くと`sh scripts/check-design-docs.sh`の上限を超えるときは、食い違う句や節だけを削って印の分を空け、同じ文と同じ節に今も有効な約束とコードへの入口を残す。
+  文を丸ごと消せるのはその文の全部が食い違うときだけで、食い違う部分だけを削っても収まらなければ本文に手を加えず印を省く（下の「形と予算」のDL-3）。
+  印とこの削除以外の本文は変えない。
+  task番号は直すtaskが消す一時の指し先としてinline codeで書く（task番号の予算に数えない）。
+  直すtaskが印を消す。
 - designは`updated`・`last_verified`を持たず（下の「frontmatter」）、内容を変える必要がない文書に差分を作らない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 「変更と一緒にdesignも直す」（ADR-t1428-1）は記述を足す義務でなく、差分とdesignの食い違いを無くすことで、場面・分岐ごとの処理や新しい関数・欄の説明はdoc commentに書く（登録の側は[taskの登録](task-registration.md)の「文書の変更を求めるtask」）。
 - 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足す・変えるtaskは、同じ変更で[計測](../design/measurement.md)の「SSOTとビュー」の節に区分（SSOT・ビュー・材料）と今のアダプタを書く（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、元は[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定9）。

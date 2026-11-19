@@ -142,7 +142,9 @@ claimと着地の予約の取り方と、両方が同じ回に進める条件は
 
 ### 人が打つ`integrate`
 
-- 人が打つ`dagq integrate`は、`application::integrate::begin`がleaseを確かめた後、承認を記録してslotを取る前に、supervisorと同じ着地の閾値で確かめる。
+> 直し対象（正: `check_disk_room`、直す: `task 5356`）。
+
+- 人が打つ`dagq integrate`は、`application::integrate::begin`が承認を記録してslotを取る前に、supervisorと同じ着地の閾値で確かめる。
   `[disk]`はcommandのたびにmain checkoutの`dagq.toml`から読む。
 - 足りなければ人が目の前にいるので控えて待たずに断り、承認もrunの状態もleaseも変えず、eventもaskも記録しない。
 - supervisorの着地はこの確かめをせず、上の「判定と掃除」の控えを使う。

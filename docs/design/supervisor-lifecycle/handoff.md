@@ -26,6 +26,9 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
 - **要求**: 引き継ぎを受けられる印（`supervisors`の`handoff_accepted`。`supervise`が登録の直後に付ける）のある登録にだけ、`up`か`install`が`request_handoff(token, binary)`で要求を書く。
   受けられない登録（引き継ぎを知らない前のbinary）には書かず（`false`）、`up`はdrainに、`install`は`not_handed_off`に回す。
   要求をDBに置くのは、signalはlaunchd modeと登録済みのin-cmuxのsupervisorで届け方が違い、区切りまで待たせる必要もあるため。
+
+> 直し対象（正: `Slot::rebuildable`、直す: `task 5356`）。
+
 - **区切り**: ループの各passの先頭で、停止要求（SIGINT/SIGTERM）が無ければ`handoff_request(token)`を読む。
   要求があれば新しいclaim・adopt・resume・triage・observer・plan review・goal reviewの起動を止め、DBとrunのファイルから組み立て直せないslot（検証・e2e・着地が進行中のもの。`Phase::rebuildable`）だけを進める（`tick(true)`）。
   着地slotを待つrunは、着地の保留の有無に依らず着地（とその前のe2e）を始めず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。待つのは要求の時点で既に始まっていた検証・e2e・着地だけ。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)）。

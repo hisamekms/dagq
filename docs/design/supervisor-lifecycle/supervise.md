@@ -102,12 +102,16 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## 検証とreviewと着地
 
+> 直し対象（正: `AfterExit::Land`、直す: `task 5356`）。
+
 - sessionの終わりの行き先は`domain::run::session_end_status`（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)）、receiptの検証はrunごとのthreadで、ループは待たない（[Validation](validation.md#validation)）。
 - `awaiting_integration`のrunはleaseとslotとsessionを持ったままreviewにかかる（[Review (supervisor)](review.md#review-supervisor)、ADR-0054の決定1・6）。
 - `revise`は生きているsessionへ差し戻し、それ以外の結果ではsessionが終わってからwrapperを止める（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の決定3）。
 - 着地は着地スロットをleaseを持ったまま待つ（[integrate](integrate.md)）。
 
 ## leaseの解放
+
+> 直し対象（正: `AfterExit::Land`、直す: `task 5356`）。
 
 - leaseとslotは、runがsupervisorの手を離れて次の担い手を待つ時点で返し（ADR-0054の決定6）、その一覧は`release_lease`（`runtime_store/coordination.rs`）のdoc comment。
 - leaseも閉じていないaskも無く最後のreviewが着地を許す`awaiting_integration`のrunは、fill passがreviewをやり直さずに着地の列に戻す（`take_up_stranded_landings`、判定は`domain::stranded_landing`、[ADR-t3049-1](../../adr/2026-10-21-t3049-1-supervisor-takes-up-a-passed-run-left-awaiting-integration-without-lease-or-ask.md)）。

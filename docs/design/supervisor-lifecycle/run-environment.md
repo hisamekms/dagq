@@ -153,6 +153,8 @@ main checkoutが無いときの各コマンドの扱いは`main_checkout_of`、�
 
 ## `[run.env]`が名指すプログラムの検査
 
+> 直し対象（正: `AfterExit::Land`、直す: `task 5356`）。
+
 プログラムの解決の入口は`run_env::check_run_env_programs`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定8・9）。
 見つからない間はclaim・新しいresume・着地の開始を控え、失敗し続けるcargoで試行を使い切るのを防ぐ。
 検査と遷移の記録は`Supervisor::check_run_env_programs`、着地待ちのleaseとslotの境界は`Phase::AwaitingSlot`が持つ。

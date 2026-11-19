@@ -30,6 +30,8 @@ scratchの命名は `domain::recheck_scratch_name`、restoreの互換は `replan
 
 ## 終わっていないrunのビルド成果物
 
+> 直し対象（正: `Supervisor::landing_worktrees`、直す: `task 5356`）。
+
 人の答えを待つrunなどがビルド成果物を持ち続けると、空き容量が足りずclaimと着地が控えられる（[空き容量](claim-hold.md#空き容量)）。
 待ちのrunのビルド成果物を消すかは、予約の方式と独立の掃除モードが決める。
 既定ではclaimが空き容量で止まるときだけ、待ちに入った古い順に必要量まで消し、人の答え待ちも通常の掃除では残す。

@@ -249,6 +249,7 @@ descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に�
    designに新しい行を求めるときは、入口（知りたいこと→コードの入口1つ）の1行と、変わる約束・境界・不変条件の1行に限る。
    振る舞いの細部（場面・分岐ごとに何をどの順に揃える・書く・読むか、関数・型・欄の追加とその意味）は、designでなく定義のそばのdoc commentを受け入れ条件にする（designに書けば同じ「design」の「書かないもの」のDL-1・DL-2・DL-5に当たる）。
 2. designにtask・goalの番号と「以前は」のような経緯を書かせない（同じ「design」）。
+   [文書の規則](documents.md#書くもの書かないもの)の「直し対象の印」の項に従い、直すtaskが消す一時の指し先の印に限ってdesignにtask番号を求めてよい。
 3. designを含むADR以外の文書に`updated`・`last_verified`の更新を求めない（[文書の規則](documents.md)の「frontmatter」、[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)）。
 4. designの記述を消させるときは、[文書の規則](documents.md)の「形と予算」の1・2・4に合わせる。
    doc commentへ移させるのはコードから読める細かい事実で他に記述の無いものに限り、follow_upに回すだけにせず同じ変更で移させ、地図として要る約束・入口は残すか適切な文書へ移させる。

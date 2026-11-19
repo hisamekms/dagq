@@ -80,6 +80,8 @@ repositoryの移動時の操作手順は[pluginのlocate reference](../../plugin
 
 ## 制御側のコマンド
 
+> 直し対象（正: `control::scope`、直す: `task 5356`）。
+
 Git・検証・agentや自分のプロセスを扱う制御側のコマンドは、queueの読み書きをstepとしてserviceへ送り、DBを開かない。
 hostのCLIもクライアントモードも同じ経路だが、brokerを通る宛てからは送らない（`ControlCaller`）。
 コマンドごとの起動・停止・送り直しの扱いは`application::supervisor_service::control`、stepの定義は`domain::queue_service::ControlParams`を読む。
