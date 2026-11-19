@@ -3141,7 +3141,7 @@ impl Supervisor<'_> {
         if owner_gone || (self.landing.pending_landings.is_empty() && !may_adopt) {
             return Ok(());
         }
-        if let Err(error) = self.start_approved_landings(self.claim.parallel, true, may_adopt) {
+        if let Err(error) = self.start_approved_landings(true, may_adopt) {
             warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
         }
         for run in self.claim.slots.runs() {
@@ -3181,7 +3181,7 @@ impl Supervisor<'_> {
             })
         })
     }
-    /// Refresh capacity before returning waits or admitting work. Earlier
+    /// Refresh landing backpressure before returning waits or admitting work. Earlier
     /// supervisors or direct integrate may have changed the queued set.
     /// Landing selection refreshes it again after applying answers.
     pub(super) fn refresh_landing_backpressure(&mut self) -> Result<()> {
@@ -3195,7 +3195,7 @@ impl Supervisor<'_> {
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             if self
-                .landing_readiness(&run, &history)?
+                .landing_readiness(&run, &history, &events)?
                 .counts_toward_backpressure()
                 && self
                     .run_progress(
@@ -3212,10 +3212,23 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    fn landing_readiness(&self, run: &TaskRun, history: &RunHistory<'_>) -> Result<Resources> {
+    fn landing_readiness(
+        &self,
+        run: &TaskRun,
+        history: &RunHistory<'_>,
+        events: &[RunEvent],
+    ) -> Result<Resources> {
         Ok(Resources {
             preparing: !history.landing_ready(),
             leased: self.queue.run_lease(run.id())?.is_some(),
+            e2e_lease: crate::domain::run_e2e::landing_lease(events),
+            e2e_retry: run.result_commit().is_some_and(|head| {
+                crate::domain::run_e2e::retry_pending(
+                    events,
+                    head.as_str(),
+                    crate::application::unix_millis(self.generators.clock.system_time()),
+                )
+            }),
             fenced: self.queue.turn_fence(run.task_id())?.is_some(),
             ..Default::default()
         })
@@ -3224,18 +3237,14 @@ impl Supervisor<'_> {
     /// Start the selected landing or batch in the domain queue.
     /// All authorizations share effective-priority/time order, including
     /// drain and handoff. Leased runs remain their owner's responsibility.
-    /// E2e takes a worker lease first; after e2e its owner returns it to
-    /// this same queue. Waits beyond the worker parallelism contribute to
-    /// admission backpressure.
+    /// E2e keeps its queue position and spends the landing budget. The
+    /// queue still contributes to claim backpressure.
     pub(super) fn start_approved_landings(
         &mut self,
-        parallel: usize,
         draining: bool,
         drain_may_adopt: bool,
     ) -> Result<()> {
-        if let (Some(landing), _) =
-            self.queued_landing(parallel, draining, drain_may_adopt, None)?
-        {
+        if let (Some(landing), _) = self.queued_landing(draining, drain_may_adopt, None)? {
             let started = self.start_queued_landing(landing)?;
             self.note_landing_admission(started);
         }
@@ -3255,7 +3264,6 @@ impl Supervisor<'_> {
     /// its ordinary point, after the landing recheck has had a turn.
     pub(super) fn queued_landing(
         &mut self,
-        parallel: usize,
         draining: bool,
         drain_may_adopt: bool,
         update: Option<&LoopSettings>,
@@ -3338,7 +3346,7 @@ impl Supervisor<'_> {
                 drain: draining
                     && !self.landing.pending_landings.contains(run.id())
                     && (!drain_may_adopt || history.recovered_landing().is_some()),
-                ..self.landing_readiness(&run, &history)?
+                ..self.landing_readiness(&run, &history, &events)?
             };
             let needs_e2e = crate::domain::run_e2e::required(&events);
             candidates.insert(run.id().clone(), (run, resources, facts, needs_e2e));
@@ -3357,17 +3365,13 @@ impl Supervisor<'_> {
         // Select the eligible prefix independently of the shared heavy
         // turn and of an in-flight landing. A queued successor keeps its
         // priority over an update until the update's wait limit.
-        let worker_full = !self.claim.slots.queued_e2e_has_room(parallel);
         if queued.entries.is_empty() {
             return Ok((None, false));
         }
         let limit = self.verifier.landing_batch_size()?;
         let selected_entries = crate::domain::landing_batch::select(
             &queued,
-            Capacity {
-                worker_full,
-                ..Capacity::default()
-            },
+            Capacity::default(),
             limit,
             |entry| candidates[&entry.run_id].3 || entry.e2e,
             |entry| candidates[&entry.run_id].1,
@@ -3379,8 +3383,7 @@ impl Supervisor<'_> {
         let capacity = Capacity {
             held,
             integrating,
-            turn_busy: self.take_check_turn("landing queue")?.is_none(),
-            worker_full,
+            turn_busy: self.take_check_turn("landing queue", false)?.is_none(),
         };
         let starts = admission::admit(
             selected_entries
@@ -3389,9 +3392,7 @@ impl Supervisor<'_> {
                 .into_iter()
                 .map(|entry| admission::Candidate {
                     item: entry,
-                    kind: admission::Kind::Landing {
-                        needs_worker: entry.e2e,
-                    },
+                    kind: admission::Kind::Landing,
                     priority: entry.priority,
                     progress: Default::default(),
                 })
@@ -3470,12 +3471,7 @@ impl Supervisor<'_> {
             batched,
         } = landing;
         let entry = &entry;
-        self.record_landing_queue_wait(entry, None)?;
-        let kind = admission::Kind::Landing {
-            needs_worker: entry.e2e,
-        };
-        let e2e = entry.e2e;
-        let current_main = self.repository.main_head()?;
+        let main = self.repository.main_head()?;
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): the landing builds them again once it has passed.
         let cleaning = self.host.cleanup().cleaning();
@@ -3486,46 +3482,52 @@ impl Supervisor<'_> {
         }
         // Recheck may have recorded a hold while the former owner returned
         // its lease. Park under the cleanup lock, as an owned slot does.
-        if self.park_queued_by_recheck(&run, &current_main)?.is_some() {
+        if self.park_queued_by_recheck(&run, &main)?.is_some() {
             guard.withdraw(run.id());
             self.claim.slots.remove_unleased_landing_wait();
             return Ok(false);
         }
-        if e2e
-            && (!self.claim.slots.queued_e2e_has_room(self.claim.parallel)
-                || !self.landing_still_admitted(&run, entry, kind)?)
-        {
-            return Ok(false);
-        }
-        let main = (!e2e).then_some(current_main);
-        // A run that still needs its e2e (ADR-t1233-2) runs it in a slot
-        // of its own first, then returns to the same queue.
-        let Some(main) = main else {
+        if entry.e2e {
+            let queue_dir = self
+                .layout
+                .db
+                .parent()
+                .context("queue database has no directory")?;
+            let turn = crate::application::heavy_turn::HeavyTurn::under(queue_dir)
+                .try_e2e(&*self.files, &*self.processes)?;
+            let Ok(turn) = turn else {
+                self.record_landing_queue_wait(entry, Some(landing_queue::Wait::Turn))?;
+                return Ok(false);
+            };
+            if !self.landing_still_admitted(&run, entry)? {
+                return Ok(false);
+            }
+            self.record_landing_queue_wait(entry, None)?;
             let leased = self
                 .queue
                 .lease_for_e2e(run.id(), self.registration.token())?;
+            let Some(run) = leased else {
+                return Ok(false);
+            };
+            guard.withdraw(run.id());
             drop(guard);
-            if let Some(run) = leased {
-                info!(run_id = %run.id(), "run {} runs its e2e before it lands as queued", run.id());
-                self.claim.slots.remove_unleased_landing_wait();
-                self.claim.slots.admit_noting(
-                    Slot::new(run, Phase::AwaitingSlot),
-                    "e2e_leased",
-                    &*self.queue,
-                );
-                return Ok(true);
-            }
-            return Ok(false);
-        };
+            self.claim.slots.admit_noting(
+                Slot::new(run, Phase::AwaitingE2e(Some(turn))),
+                "e2e_leased",
+                &*self.queue,
+            );
+            return Ok(true);
+        }
         self.pause_at(PausePoint::LandingStart, run.id());
         // Selection's probe is only a snapshot. Keep the turn through
         // the start so an update that took it meanwhile can still defer us.
-        let Some(turn) = self.take_check_turn("landing queue")? else {
+        let Some(turn) = self.take_check_turn("landing queue", false)? else {
             return Ok(false);
         };
-        if !self.landing_still_admitted(&run, entry, kind)? {
+        if !self.landing_still_admitted(&run, entry)? {
             return Ok(false);
         }
+        self.record_landing_queue_wait(entry, None)?;
         let directory = self.landing_batch_dir()?;
         let Some(batch_lock) = integration::batch::lock(&*self.files, &directory)? else {
             return Ok(false);
@@ -3535,7 +3537,7 @@ impl Supervisor<'_> {
             for (follower, run) in &selected_followers {
                 if !guard.may_lease(run.id())
                     || self.park_queued_by_recheck(run, &main)?.is_some()
-                    || !self.landing_still_admitted(run, follower, kind)?
+                    || !self.landing_still_admitted(run, follower)?
                 {
                     break;
                 }
@@ -3598,18 +3600,13 @@ impl Supervisor<'_> {
         Ok(true)
     }
     /// Re-read the candidate's stops after acquiring its execution fence.
-    fn landing_still_admitted(
-        &self,
-        run: &TaskRun,
-        entry: &Entry,
-        kind: admission::Kind,
-    ) -> Result<bool> {
+    fn landing_still_admitted(&self, run: &TaskRun, entry: &Entry) -> Result<bool> {
         let asks = self.queue.unclosed_run_asks(run.id())?;
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
         let resources = Resources {
             unanswered: landing_queue::waiting_for_answer(&asks, &history),
-            ..self.landing_readiness(run, &history)?
+            ..self.landing_readiness(run, &history, &events)?
         };
         if LandingQueue::waiting(entry, Capacity::default(), resources).is_some() {
             return Ok(false);
@@ -3618,12 +3615,16 @@ impl Supervisor<'_> {
             vec![admission::Candidate {
                 item: run.id(),
                 progress: Default::default(),
-                kind,
+                kind: admission::Kind::Landing,
                 priority: Priority::Normal,
             }],
             admission::Resources {
                 gates: self.admission_gates(),
                 container_held: self.verification_container_held(),
+                integrating: !self
+                    .queue
+                    .runs_with_status(RunStatus::Integrating)?
+                    .is_empty(),
                 ..Default::default()
             },
         )
@@ -3657,22 +3658,25 @@ impl Supervisor<'_> {
             .join("landing-batch"))
     }
 
-    /// The turn of the landing check `check` (a landing's verification or
-    /// the landing recheck) among the host's heavy jobs (ADR-t2719-1), held
-    /// shared until it drops; `None` while an admitted update in any
-    /// process has reserved its turn or runs its build and e2e gate.
+    /// Take a landing check's turn. An update reservation or gate
+    /// excludes both kinds of check, and run e2e excludes verification.
     /// A wait is logged once per check.
     pub(super) fn take_check_turn(
         &mut self,
         check: &str,
+        recheck: bool,
     ) -> Result<Option<crate::application::heavy_turn::Turn>> {
         let queue_dir = self
             .layout
             .db
             .parent()
             .context("queue database has no directory")?;
-        let taken = crate::application::heavy_turn::HeavyTurn::under(queue_dir)
-            .try_check(&*self.files, &*self.processes)?;
+        let turns = crate::application::heavy_turn::HeavyTurn::under(queue_dir);
+        let taken = if recheck {
+            turns.try_recheck(&*self.files, &*self.processes)?
+        } else {
+            turns.try_check(&*self.files, &*self.processes)?
+        };
         self.host
             .tell_held_check(check, taken.as_ref().err().copied());
         Ok(taken.ok())

@@ -193,16 +193,16 @@ pub enum Phase {
     ClaimHeld,
     /// Its wait ended, and it waits to go back to a slot.
     Returning,
-    /// A run to land waits in its slot to be decided: its e2e, the holds
-    /// of a landing, the integration slot.
+    /// A leased run is being returned to the landing queue.
     AwaitingSlot,
     /// Its review passed and it waits in its slot for the dev of the agent
     /// definitions it changes (ADR-t1728-1 decision 10), its session open:
     /// the round waits for its turn or runs.
     AgentEval,
-    /// It waits for another run's e2e or to try its own again.
+    /// Legacy recorded e2e wait, also used for disk reservations while
+    /// an entry holds the landing turn before its e2e starts.
     AwaitingE2e,
-    /// Its e2e runs on the host.
+    /// Its e2e runs on the host using the landing budget.
     E2e,
     /// It waits only for its landing turn, outside the slots
     /// (ADR-t1591-1), or approved and queued with no lease.
@@ -348,7 +348,7 @@ impl Phase {
                 (B::Queue, H::None)
             }
             Self::AwaitingSlot | Self::AwaitingE2e => (B::Queue, H::WorkerSlot),
-            Self::E2e => (B::Compute, H::WorkerSlot),
+            Self::E2e => (B::Compute, H::LandingSlot),
             Self::Landing => (B::Compute, H::LandingSlot),
             Self::Push { in_slot: true } => (B::External, H::WorkerSlot),
             Self::Push { in_slot: false } => (B::External, H::None),

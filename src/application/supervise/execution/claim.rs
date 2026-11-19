@@ -103,12 +103,7 @@ impl Supervisor<'_> {
         // A claim a held container kept from its verification starts it
         // once the verification may run.
         self.start_awaiting_claims(parallel)?;
-        let (landing, update_polled) = match self.queued_landing(
-            parallel,
-            false,
-            false,
-            Some(options),
-        ) {
+        let (landing, update_polled) = match self.queued_landing(false, false, Some(options)) {
             Ok(admission) => admission,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the landing queue could not be read: {error:#}");
@@ -205,9 +200,7 @@ impl Supervisor<'_> {
             .map_or(0, |landing| landing.run_ids().count());
         if let Some(landing) = landing {
             line.push(Candidate {
-                kind: Kind::Landing {
-                    needs_worker: landing.entry.e2e,
-                },
+                kind: Kind::Landing,
                 priority: landing.entry.priority,
                 progress: Default::default(),
                 item: LineItem::Landing(Box::new(landing)),
@@ -960,25 +953,6 @@ impl Supervisor<'_> {
         };
         self.record_landing_hold(error);
     }
-    /// Record the landing branch's hold (`error` while it does not
-    /// resolve) where it differs from the one this process last recorded.
-    /// What becomes of a run awaiting the landing slot now
-    /// ([`crate::domain::landing_hold::judge`]): the holds are this
-    /// supervisor's, not the run's.
-    pub(super) fn landing_hold(&self, run: &RunId) -> crate::domain::landing_hold::LandingHold {
-        crate::domain::landing_hold::judge(crate::domain::landing_hold::LandingHoldInputs {
-            run_env_missing: self.landing.run_env_missing,
-            container_held: self.verification_container_held(),
-            ci_held: self.observation.ci().held(),
-            ci_unreadable: self.observation.ci().unreadable(),
-            landing_unresolved: self.landing.unresolved,
-            landing_short: self.host.landing_short_for(run),
-            disk_cleaning: self.host.disk_cleaning(),
-            draining: self.registration.draining(),
-            handing_off: self.registration.handing_off(),
-        })
-    }
-
     fn record_landing_hold(&mut self, error: Option<String>) {
         use crate::domain::landing_branch::{LANDING_BRANCH_HOLD, UNRESOLVED_REASON};
         let reason = error.is_some().then_some(UNRESOLVED_REASON);

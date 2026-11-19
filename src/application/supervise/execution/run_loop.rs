@@ -866,8 +866,7 @@ impl Supervisor<'_> {
                 if stopping {
                     self.drain_landing_answers(&paused)?;
                 } else if !self.landing.pending_landings.is_empty()
-                    && let Err(error) =
-                        self.start_approved_landings(self.claim.parallel, true, false)
+                    && let Err(error) = self.start_approved_landings(true, false)
                 {
                     warn!(error = %format_args!("{error:#}"), "a run returned by this drain could not start its landing: {error:#}");
                 }

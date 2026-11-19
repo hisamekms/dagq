@@ -53,27 +53,12 @@ pub fn select(
 ) -> Vec<&Entry> {
     let mut selected = Vec::new();
     for entry in &queue.entries {
-        let facts = resources(entry);
-        // If the e2e's worker slot is its only obstacle, stop an already
-        // selected prefix there. With no prefix, ordinary admission may
-        // still pick an independent successor.
-        let solo = solo(entry);
-        if solo
-            && !selected.is_empty()
-            && LandingQueue::waiting(
-                entry,
-                Capacity {
-                    worker_full: false,
-                    ..capacity
-                },
-                facts,
-            )
-            .is_none()
-        {
-            break;
-        }
-        if LandingQueue::waiting(entry, capacity, facts).is_some() {
+        if LandingQueue::waiting(entry, capacity, resources(entry)).is_some() {
             continue;
+        }
+        let solo = solo(entry);
+        if solo && !selected.is_empty() {
+            break;
         }
         selected.push(entry);
         if solo || selected.len() == limit.get() {

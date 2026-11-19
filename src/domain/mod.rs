@@ -1300,7 +1300,6 @@ pub mod landing_approval;
 pub mod landing_batch;
 pub mod landing_binding;
 pub mod landing_branch;
-pub mod landing_hold;
 pub mod landing_queue;
 pub mod landing_release;
 pub mod landing_verification;

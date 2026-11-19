@@ -197,8 +197,8 @@ pub fn validation(intervals: &[Interval]) -> Option<&Interval> {
 
 /// The phase of today's `land_phases` an interval of the wait to land
 /// falls under. The landing is one phase now, so it is all `verify` and
-/// `rebase` stays 0; the wait for the landing slot after the review and
-/// the e2e (`awaiting_slot`) is `landing_queue`, as it is today; a
+/// `rebase` stays 0; waits in the landing queue (`landing_queue` or
+/// `awaiting_slot`) are grouped as `landing_queue`. A
 /// person's wait for an answer (`waiting`, `landing_answer`) is `ask` and
 /// the hold's (`held`) is `held`; what the phases do not name (the
 /// session's exit, the hand-offs, unattributed time) is `exit`.

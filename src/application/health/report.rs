@@ -76,7 +76,7 @@ pub fn status(
     let disk_relax =
         crate::domain::disk::relax_view(latest_relax.as_ref(), now.saturating_mul(1000));
     let graph = queue.graph_input()?;
-    let landing_queue = landing_queue_view(queue, &graph)?;
+    let landing_queue = landing_queue_view(queue, &graph, control, now)?;
     let landing_batch = landing_batch_view(queue)?;
     let asks = queue
         .asks(AskQuery {
@@ -236,14 +236,11 @@ pub(super) fn runs_slots_and_waits(
 /// `waiting` (`count` of `limit`, with the `returning` among them), and the
 /// runs that wait for a person or for a slot to go back to (ADR-0071
 /// decision 12), from the leases and the run events (`events` by run, read
-/// here for a leased run not in it). `used` counts the
-/// leased runs that do not wait, landing ones included (ADR-t610-1), less
-/// `landing_queue`: those that wait only for their landing turn, up to
-/// `parallel` (ADR-t1591-1). Claims of every change and priority, resumes and
-/// returning runs use the worker-slot count: leased runs without human
-/// waits, excluding integrating runs and up to `parallel` landing-turn
-/// waits. Excess landing-turn waits count as workers. Returning runs go
-/// before new claims. The reporting projection above remains separate.
+/// here for a leased run not in it). `slots.used` counts worker slots
+/// occupied by development, review and other worker stages.
+/// `slots.landing_queue` counts leased landing work, including e2e and
+/// integration. The top-level landing queue also lists unleased entries.
+/// Claim admission separately reserves capacity for excess queued work.
 /// `count` is what
 /// `--max-waiting` bounds (ADR-0071 (f2)): the runs that wait and those
 /// that wait to go back (`state: returning` in `waiting`), with `limit`
@@ -281,9 +278,10 @@ pub(super) fn slots_and_waits(
         };
         // The same wait as the run's `progress.slot` in `runs` ([`crate::domain::run_progress::SlotUse`]).
         let Some(state) = WaitState::of(events) else {
-            entry.0 += 1;
             if crate::domain::run_progress::in_landing_queue(run.status(), events) {
                 entry.1 += 1;
+            } else {
+                entry.0 += 1;
             }
             continue;
         };
@@ -370,17 +368,13 @@ pub(super) fn slots_and_waits(
             let live = !health.stale;
             let mut value = serde_json::to_value(health)?;
             if let Some(registration) = registrations.get(index) {
-                let (held, queued, count) = counts
+                let (workers, queued, count) = counts
                     .get(registration.token.as_str())
                     .copied()
                     .unwrap_or_default();
-                // Up to `parallel` of the landing queue are out of the
-                // slots (ADR-t1591-1).
-                let parallel = usize::try_from(registration.parallel).unwrap_or(0);
-                let landing_queue = crate::domain::light_slots::outside_the_slots(queued, parallel);
                 value["slots"] = json!({
-                    "used": held - landing_queue,
-                    "landing_queue": landing_queue,
+                    "used": workers,
+                    "landing_queue": queued,
                     "parallel": registration.parallel,
                     "source": registration.parallel_source,
                 });
@@ -1305,12 +1299,14 @@ fn landing_batch_view(
 /// `basis` and `judgment` for authorization, and the `e2e` and `disk`
 /// requirements from [`crate::domain::landing_queue::Entry`]. `waiting_for`
 /// is the latest supervisor probe (null means eligible at that probe),
-/// or `lease` while an owner is still finishing review/e2e. An active
-/// landing stays visible with `integrating` until its completion; its
+/// or `lease` while an owner is still preparing the run. Active entries
+/// show `e2e_running` or `integrating` through their execution. An integrating run’s
 /// provenance is reconstructed immediately before integration started.
 fn landing_queue_view(
     queue: &(impl RunLog + TaskReads + SupervisorReads + CoordinationReads + ?Sized),
     graph: &crate::application::GraphInput,
+    control: &dyn ProcessControl,
+    now: i64,
 ) -> Result<Vec<Value>> {
     use crate::domain::landing_queue::{Entry, EntryJournal, LandingQueue, recorded_wait};
     let effective: HashMap<_, _> = crate::application::dependency_graph(graph.clone(), None)
@@ -1357,8 +1353,14 @@ fn landing_queue_view(
                     json!("integrating")
                 } else if awaiting {
                     json!("awaiting_reapproval")
-                } else if queue.run_lease(run.id())?.is_some() {
-                    json!("lease")
+                } else if let Some(lease) = queue.run_lease(run.id())? {
+                    if crate::domain::run_e2e::running(events)
+                        && !lease_is_stale(&lease, now, control)
+                    {
+                        json!("e2e_running")
+                    } else {
+                        json!("lease")
+                    }
                 } else if !RunHistory::from_events(events).landing_ready() {
                     json!("preparing")
                 } else {

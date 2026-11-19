@@ -76,12 +76,6 @@ impl CiWatchState {
     pub(in crate::application::supervise) fn held(&self) -> bool {
         hold_reason(self.config.is_some(), self.available).is_some()
     }
-
-    /// Whether the last answer found the means to read the CI missing (not
-    /// merely none yet): what a drain hands a run back to a person for.
-    pub(in crate::application::supervise) fn unreadable(&self) -> bool {
-        self.config.is_some() && self.available == Some(false)
-    }
 }
 
 impl ObservationState {

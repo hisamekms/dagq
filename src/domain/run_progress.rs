@@ -62,19 +62,10 @@ fn shown(phase: &str, status: RunStatus, lease: Lease, queued: bool) -> bool {
             && (lease == Lease::Stale || queued))
 }
 
-/// How a run uses its supervisor's slot, as `status`' `slots` and
-/// `waiting` count it ([`WaitState`]): a leased run that does not wait
-/// takes a slot (`used`), one that waits only for its landing turn
-/// (`landing_queue`, ADR-t1591-1) leaves room for a light task, one that
-/// waits for a person is out of it (`waiting`), one whose wait ended waits
-/// to go back (`returning`). A run nobody leases has none (`None`).
-/// Counting the `slot` of a supervisor's `run_ids` gives its `slots` and
-/// `waiting`, but for a landing queue longer than `parallel`, whose runs
-/// past `parallel` `slots` counts in `used`; the number of `run_ids` is not `slots.used`.
-/// The supervisor counts its landing queue only for a run whose last look
-/// found another run landing, so while it holds its landings (and its
-/// claims), and before a needed e2e starts, `status`' `landing_queue` may
-/// be more than the supervisor's.
+/// How a run uses its supervisor's capacity. The worker count includes
+/// `used`; leased landing work, including an e2e, is `landing_queue`.
+/// Human waits and returns are counted separately. Unleased runs have no
+/// slot even when shown in the queue-wide landing list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotUse {
@@ -85,6 +76,16 @@ pub enum SlotUse {
 }
 
 impl SlotUse {
+    pub fn from_events(status: RunStatus, leased: bool, events: &[RunEvent]) -> Option<Self> {
+        Self::of(leased, WaitState::of(events).as_ref()).map(|slot| {
+            if slot == Self::Used && in_landing_queue(status, events) {
+                Self::LandingQueue
+            } else {
+                slot
+            }
+        })
+    }
+
     pub fn of(leased: bool, wait: Option<&WaitState>) -> Option<Self> {
         leased.then_some(match wait {
             None => Self::Used,
@@ -94,12 +95,15 @@ impl SlotUse {
     }
 }
 
-/// Whether a run in `status` waits only for its landing turn by its events
-/// (ADR-t1591-1): awaiting integration, in the phase `landing_queue` its
-/// last `run_phase_changed` recorded.
+/// Whether a leased run uses the landing budget or waits in the landing queue.
 pub fn in_landing_queue(status: RunStatus, events: &[RunEvent]) -> bool {
-    status == RunStatus::AwaitingIntegration
-        && current(events, 0).is_some_and(|(phase, _)| phase == LANDING_QUEUE)
+    status == RunStatus::Integrating
+        || (matches!(
+            status,
+            RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+        ) && super::run_e2e::landing_lease(events))
+        || (status == RunStatus::AwaitingIntegration
+            && current(events, 0).is_some_and(|(phase, _)| phase == LANDING_QUEUE))
 }
 
 /// The run's lease as [`Progress::of`] reads it.
@@ -137,21 +141,11 @@ impl Progress {
         let current =
             current(events, now * 1000).filter(|(phase, _)| shown(phase, status, lease, queued));
         let since = current.as_ref().map(|(_, start)| start.div_euclid(1000));
-        let landing_queue = status == RunStatus::AwaitingIntegration
-            && current
-                .as_ref()
-                .is_some_and(|(phase, _)| phase == LANDING_QUEUE);
         Self {
             phase: current.map(|(phase, _)| phase),
             since,
             elapsed_secs: since.map(|since| (now - since).max(0)),
-            slot: SlotUse::of(lease != Lease::None, WaitState::of(events).as_ref()).map(|slot| {
-                if slot == SlotUse::Used && landing_queue {
-                    SlotUse::LandingQueue
-                } else {
-                    slot
-                }
-            }),
+            slot: SlotUse::from_events(status, lease != Lease::None, events),
             legacy: !recorded(events),
         }
     }

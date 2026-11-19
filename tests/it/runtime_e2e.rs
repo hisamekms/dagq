@@ -301,7 +301,7 @@ fn the_runs_of_a_supervisor_run_their_e2e_one_at_a_time() {
 
 /// An e2e past its timeout, and a rerun by name past it, tell nothing of
 /// the change (ADR-t1233-2 decision 3): the run is not sent back to its
-/// worker but waits in its slot and its e2e runs again; the third in a row
+/// worker but waits in the landing queue for its next e2e; the third in a row
 /// that could not run raises the inbox's attention, and the run lands once
 /// its e2e passes.
 #[test]

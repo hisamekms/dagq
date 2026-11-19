@@ -4,7 +4,7 @@
 //! the landing recheck) never run at the same time, whichever process of
 //! the queue runs them (the turns are its lock files,
 //! `application::heavy_turn`). The landing checks still run beside each
-//! other, as they did; only the two kinds take turns.
+//! other. A run’s e2e and landing verification are serial through a separate lock.
 //!
 //! Landing admission gives a runnable landing priority until the queued
 //! update reaches its wait limit (ADR-t5283-4). Only an admitted gate
@@ -33,6 +33,8 @@ pub enum HeavyJob {
     UpdateGate,
     /// A landing's verification commands and the landing recheck.
     LandingCheck,
+    /// A run’s e2e in the landing queue.
+    RunE2e,
 }
 
 impl HeavyJob {
@@ -40,9 +42,8 @@ impl HeavyJob {
     pub const fn describe(self) -> &'static str {
         match self {
             Self::UpdateGate => "the automatic update's build and e2e gate",
-            Self::LandingCheck => {
-                "the landing checks running (a landing's verification or the landing recheck)"
-            }
+            Self::RunE2e => "a run’s e2e in the landing queue",
+            Self::LandingCheck => "the landing checks running (verification, recheck or run e2e)",
         }
     }
 }

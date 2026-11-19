@@ -2,7 +2,7 @@
 //! slot's run and moves it on by its `Phase` (one function across the
 //! phases, so the order of its checks and calls is read in one place),
 //! [`Supervisor::step_awaiting_slot`] the look at a run waiting for the
-//! landing queue (it returns to the queue, runs e2e, is parked or waits) and
+//! landing queue (it returns to the queue or is parked) and
 //! [`Supervisor::step_landing_wait`] that look under the lock of a
 //! cleanup for disk space. `Phase`, the free functions these share with
 //! the other submodules and `tick`, the pass that calls `step`, stay in
@@ -17,9 +17,8 @@ impl Supervisor<'_> {
     /// included ([`Self::park_step`]): not while a cleanup for disk space
     /// has it reserved, removing its build outputs; it can return to the
     /// common queue once the job passed it. The lock is held until the look is
-    /// done, so the job reserves no run this look moves on (a landing, an
-    /// e2e, a park or the lease handed back), and a run moved on is no
-    /// longer the job's to take ([`cleanup::Cleaning::withdraw`]).
+    /// done, so a parked or returned run is no longer the job's to take
+    /// ([`cleanup::Cleaning::withdraw`]).
     fn step_landing_wait(&mut self, slot: &mut Slot) -> Result<Step> {
         let cleaning = self.host.cleanup().cleaning();
         let mut guard = cleanup::lock_cleaning(&cleaning);
@@ -40,70 +39,11 @@ impl Supervisor<'_> {
         step
     }
 
-    /// Finish the selected e2e or adopted landing's preparation, then
-    /// return ownership to the common queue; integration starts only there.
+    /// Return the adopted or interrupted landing to its queue.
     fn step_awaiting_slot(&mut self, slot: &mut Slot) -> Result<Step> {
-        // This phase prepares a queue candidate; it never owns the turn.
-        slot.landing_turn = false;
-        slot.blocked_by = None;
-        if self.e2e_due(&slot.run)?.is_none() {
-            let current = self.queue.run(slot.run.id())?;
-            return Ok(Step::Done(Box::new(
-                self.return_to_landing_queue(&current)?,
-            )));
-        }
-        // Its verification would fail on the missing program, an
-        // unreadable CI, an unresolved landing branch or short disk:
-        // the run stays awaiting integration, leased, and the
-        // integration slot stays free. A supervisor that stops
-        // gives the lease back for a hold that does not end by
-        // itself, leaving the run awaiting integration for a
-        // supervisor that does not drain to take up again
-        // (ADR-t3049-1); one that hands off keeps it, and hands the
-        // run over leased (ADR-t3048-1,
-        // [`crate::domain::landing_hold::judge`]).
-        match self.landing_hold(slot.run.id()) {
-            crate::domain::landing_hold::LandingHold::Proceed => {}
-            crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
-            crate::domain::landing_hold::LandingHold::HandBack(why) => {
-                warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: {why} and this supervisor stops", slot.run.id());
-                self.queue
-                    .release_lease(slot.run.id(), self.registration.token())?;
-                return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
-            }
-        }
-        // An e2e that could not run waits to be tried again; a
-        // supervisor that stops cannot wait for it, and leaves the
-        // run awaiting integration as above (one that hands off
-        // leaves it to the next process, `AwaitingE2e`).
-        if self.registration.draining()
-            && !self.registration.handing_off()
-            && self.e2e_retry_pending(&slot.run)
-        {
-            warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: its e2e could not run and this supervisor stops", slot.run.id());
-            self.queue
-                .release_lease(slot.run.id(), self.registration.token())?;
-            return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
-        }
-        // The e2e a passed run needs runs before it lands
-        // (ADR-t1233-2), whatever the integration slot; a head the
-        // landing recheck found not landing is parked first, as
-        // below, rather than tested.
-        if self.e2e_due(&slot.run)?.is_some() {
-            let current = self.queue.run(slot.run.id())?;
-            let main = self.repository.main_head()?;
-            if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
-                return Ok(Step::Done(Box::new(parked)));
-            }
-        }
-        if let Some(phase) = self.e2e_before_landing(&slot.run)? {
-            slot.transition(phase, "e2e_due", &*self.queue);
-            return Ok(Step::Continue);
-        }
-        // The owner returns a ready run to the common landing queue.
-        // No worker slot may start integration, even when the turn is free.
+        let current = self.queue.run(slot.run.id())?;
         Ok(Step::Done(Box::new(
-            self.return_to_landing_queue(&slot.run)?,
+            self.return_to_landing_queue(&current)?,
         )))
     }
 
@@ -242,10 +182,41 @@ impl Supervisor<'_> {
                 }
                 Ok(Step::Continue)
             }
-            // Decided again as a run awaiting the slot.
-            Phase::AwaitingE2e => {
-                slot.transition(Phase::AwaitingSlot, "e2e_waited", &*self.queue);
-                Ok(Step::Continue)
+            Phase::AwaitingE2e(turn) => {
+                let current = self.queue.run(slot.run.id())?;
+                let main = self.repository.main_head()?;
+                if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
+                    return Ok(Step::Done(Box::new(parked)));
+                }
+                let Some(turn) = turn.take() else {
+                    // A refused start kept its lease for handoff. If the
+                    // request was withdrawn, let the queue select it again.
+                    return Ok(Step::Done(Box::new(
+                        self.return_to_landing_queue(&current)?,
+                    )));
+                };
+                match self.start_e2e(&current, turn) {
+                    Ok(Some(watch)) => {
+                        slot.transition(
+                            Phase::E2e(watch),
+                            EventKind::RunE2eStarted.as_str(),
+                            &*self.queue,
+                        );
+                        Ok(Step::Continue)
+                    }
+                    Ok(None) => Ok(Step::Done(Box::new(
+                        self.return_to_landing_queue(&current)?,
+                    ))),
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::application::HandoffAsked>()
+                            .is_some() =>
+                    {
+                        // The durable start was refused. Keep the lease for handoff.
+                        Ok(Step::Continue)
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Phase::E2e(watch) => {
                 if !watch.finished() {
@@ -261,7 +232,7 @@ impl Supervisor<'_> {
                 else {
                     unreachable!("matched above")
                 };
-                self.finish_e2e(slot, watch, run, &events, &history)
+                self.finish_e2e(watch, run, &events, &history)
             }
             Phase::Landing(_) => unreachable!("joined above"),
             Phase::Recovery(watch) => {

@@ -2312,7 +2312,7 @@ fn landing_precedes_source_update_until_the_shared_wait_expires() {
         heavy_turn::{HeavyTurn, PendingUpdate},
         update,
     };
-    use crate::domain::EventKind;
+    use crate::domain::{EventKind, heavy_turn::HeavyJob};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -2385,6 +2385,12 @@ fn landing_precedes_source_update_until_the_shared_wait_expires() {
         {
             // The child has not taken the lock: the reserved turn alone
             // kept this landing queued on the supervisor's first pass.
+            assert_eq!(
+                turn.try_e2e(&*wiring.files, wiring.processes())
+                    .unwrap()
+                    .err(),
+                Some(HeavyJob::UpdateGate)
+            );
             let held = turn
                 .job_gate(&*wiring.files, pid, |_| {
                     panic!("the build should start immediately")
@@ -2648,7 +2654,7 @@ fn a_queued_e2e_lease_leaves_an_equal_priority_claim_waiting_for_disk() {
         .events
         .iter()
         .find(|event| event.kind == EventKind::LeaseAcquired && event.payload["reason"] == "e2e")
-        .expect("the selected landing took a worker lease for e2e");
+        .expect("the selected landing leased its worktree for e2e");
     let events = queue.all_events().unwrap();
     let sample = events
         .iter()
@@ -2659,6 +2665,169 @@ fn a_queued_e2e_lease_leaves_an_equal_priority_claim_waiting_for_disk() {
     assert_eq!(sample.payload["claims_held"], true);
     assert_eq!(sample.payload["candidates"], 1);
     assert!(queue.show(claim).unwrap().runs.is_empty());
+}
+
+/// A real supervisor pass starts the queue head while its only worker
+/// is still running. The e2e executor is a bounded fake.
+#[test]
+fn queued_e2e_starts_with_all_worker_slots_used() {
+    use crate::application::{
+        install::{E2eOutcome, E2eSettings},
+        supervise::RunE2ePort,
+    };
+    use std::sync::{Arc, Mutex};
+
+    let (release_e2e, e2e_held) = mpsc::channel();
+    let e2e_held = Mutex::new(e2e_held);
+    let (started, e2e_started) = mpsc::channel();
+    let wiring = disk_admission_wiring(
+        "queued_e2e_starts_with_all_worker_slots_used",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![concern()],
+        },
+    )
+    .with_parallel(1)
+    .with_run_e2e(RunE2ePort {
+        prepare: Arc::new(|settings| Ok(Some(settings.clone()))),
+        settings: E2eSettings {
+            command: None,
+            timeout: super::harness::LIMIT,
+            run_env_root: None,
+            queue_dir: None,
+            scratch: Default::default(),
+            log: Default::default(),
+            utc_offset_secs: 0,
+            lock: None,
+            git_env: Vec::new(),
+            ended: None,
+        },
+        run: Arc::new(move |_, _| {
+            started.send(())?;
+            e2e_held
+                .lock()
+                .unwrap()
+                .recv_timeout(super::harness::LIMIT)?;
+            Ok(E2eOutcome {
+                passed: true,
+                ..Default::default()
+            })
+        }),
+        retry: std::time::Duration::ZERO,
+    });
+    let worker = wiring.ready_task(&["true"]);
+    let (release_worker, worker_held) = mpsc::channel();
+    wiring.agent.hold_next_turn(worker_held);
+    let mut landing = None;
+    wiring.supervise_once_while(|queue| {
+        if !running(queue, worker) {
+            return false;
+        }
+        if landing.is_none() {
+            let status = wiring.status();
+            let slots = &status["supervisors"][0]["slots"];
+            assert_eq!(slots["used"], 1);
+            assert_eq!(slots["parallel"], 1);
+            assert_eq!(slots["landing_queue"], 0);
+            landing = Some(approved_disk_landing(&wiring, true).0);
+            return false;
+        }
+        if e2e_started.try_recv().is_err() {
+            return false;
+        }
+        let status = wiring.status();
+        let slots = &status["supervisors"][0]["slots"];
+        assert_eq!(slots["parallel"], 1);
+        assert_eq!(slots["used"], 1);
+        assert_eq!(slots["landing_queue"], 1);
+        let entry = &status["landing_queue"][0];
+        assert_eq!(entry["run_id"], json!(landing.as_ref().unwrap().id()));
+        assert_eq!(entry["position"], 1);
+        assert_eq!(entry["e2e"], true);
+        assert_eq!(entry["waiting_for"], "e2e_running");
+        release_e2e.send(()).unwrap();
+        release_worker.send(()).unwrap();
+        true
+    });
+    let landing = landing.expect("the worker occupied the only worker slot");
+    let detail = wiring.queue().show(landing.task_id()).unwrap();
+    assert_eq!(payloads(&detail, "run_e2e_started").len(), 1);
+    assert_eq!(
+        payloads(&detail, "run_e2e_finished")[0]["outcome"],
+        "passed"
+    );
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+}
+
+/// The same SQLite lease feeds status and the observations behind stats.
+#[test]
+fn status_separates_landing_from_workers_while_stats_counts_the_reservation() {
+    use crate::application::live_inputs::{LiveSources, live_inputs};
+    use crate::domain::{LeaseToken, Priority, Reason, ReasonCode, live_alerts};
+
+    let wiring = Wiring::new(
+        "status_separates_landing_from_workers_while_stats_counts_the_reservation",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    let mut queue = wiring.queue();
+    let run = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::AwaitingIntegration,
+    );
+    wiring.ready_task_after(&[], &[run.task_id()]);
+    let (pid, _) = wiring.processes().start();
+    let live = LeaseToken::new("live");
+    queue.register_supervisor(&live, pid, 2, "test").unwrap();
+    let sources = LiveSources {
+        files: &*wiring.files,
+        signals: &*wiring.agent,
+        config_file: &|| Ok(None),
+    };
+    let idle_slots = |queue: &SqliteQueue| {
+        let now = wiring.generators().clock.now();
+        let events = queue.all_events().unwrap();
+        let inputs = live_inputs(queue, wiring.processes(), now, &events, &sources).unwrap();
+        let judged = live_alerts::judge(&events, now, &inputs);
+        assert_eq!(judged.slot_alerts.len(), 1);
+        assert_eq!(judged.slot_alerts[0].kind, "idle_slots");
+        judged.slot_alerts[0].value
+    };
+    for (token, used, free) in [(live, 1, 1), (LeaseToken::new("by-hand"), 0, 2)] {
+        let landing = queue
+            .begin_integration(run.id(), &token, &wiring.git.main())
+            .unwrap();
+        assert_eq!(landing.status(), RunStatus::Integrating);
+        assert_eq!(
+            wiring.status()["supervisors"][0]["slots"],
+            json!({"used": 0, "landing_queue": used, "parallel": 2, "source": null}),
+            "{token}"
+        );
+        assert_eq!(idle_slots(&queue), free, "{token}");
+
+        let back = queue
+            .abort_integration(
+                run.id(),
+                &token,
+                "awaiting_integration",
+                "back to review",
+                &Reason::new(ReasonCode::Other),
+            )
+            .unwrap();
+        assert_eq!(back.status(), RunStatus::AwaitingIntegration);
+        assert!(queue.lease_for_review(run.id(), &token).unwrap().is_some());
+        assert_eq!(
+            wiring.status()["supervisors"][0]["slots"],
+            json!({"used": used, "landing_queue": 0, "parallel": 2, "source": null}),
+            "{token}"
+        );
+        assert_eq!(idle_slots(&queue), free, "{token}");
+        queue.release_lease(run.id(), &token).unwrap();
+    }
 }
 
 /// A stopped head keeps its queue position while the next entry lands.
@@ -2728,6 +2897,41 @@ fn admission_lands_the_next_entry_while_the_head_waits_for_an_answer() {
         "{:?}",
         payloads(&next, "integration_error")
     );
+}
+
+#[test]
+fn a_named_integrate_can_land_when_the_e2e_host_is_unavailable() {
+    use crate::domain::{EventKind, run_e2e};
+
+    let wiring = Wiring::new(
+        "a_named_integrate_can_land_when_the_e2e_host_is_unavailable",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    wiring.git.allow_clean_merges();
+    let mut queue = wiring.queue();
+    queue.bind_repository("/wiring/repo/.git").unwrap();
+    let (run, _) = approved_disk_landing(&wiring, true);
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunE2eFinished,
+            json!({"commit": run.result_commit().unwrap(), "outcome": run_e2e::UNAVAILABLE}),
+        )
+        .unwrap();
+
+    assert_eq!(
+        wiring.integrate_outcome(run.task_id())["outcome"],
+        "integrated"
+    );
+    let detail = queue.show(run.task_id()).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert!(payloads(&detail, "run_e2e_started").is_empty());
+    let e2e = payloads(&detail, "run_e2e_finished");
+    assert_eq!(e2e.len(), 1);
+    assert_eq!(e2e[0]["outcome"], "unavailable");
 }
 
 /// A named approval is durable even when an earlier resolved resume

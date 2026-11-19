@@ -530,8 +530,8 @@ impl Phase {
     /// slot, or for its session's `/exit` before it lands.
     fn waits_to_land(&self) -> bool {
         match self {
-            // Its e2e (ADR-t1233-2) comes before the slot.
-            Phase::AwaitingSlot | Phase::AwaitingE2e | Phase::E2e(_) => true,
+            // A selected or running e2e still belongs to the landing queue.
+            Phase::AwaitingSlot | Phase::AwaitingE2e(_) | Phase::E2e(_) => true,
             Phase::Exiting(watch) => matches!(watch.then, AfterExit::Land),
             _ => false,
         }
@@ -681,7 +681,7 @@ impl Supervisor<'_> {
         // (ADR-t2719-1), holding its turn until it is recorded: the due
         // recheck waits, as for a landing.
         let Some(turn) =
-            self.take_check_turn(&format!("the landing recheck against main {main}"))?
+            self.take_check_turn(&format!("the landing recheck against main {main}"), true)?
         else {
             return Ok(Start::Later { locked_out: false });
         };

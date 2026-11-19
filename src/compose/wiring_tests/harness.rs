@@ -186,6 +186,7 @@ pub(super) struct Wiring {
     pub(super) sessions: Arc<FakeSessions>,
     /// The CI watch's port; none by default, as `--once` without it.
     ci_watch: Option<supervise::CiWatchPort>,
+    run_e2e: Option<supervise::RunE2ePort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     startup_fault: Option<Arc<super::startup::Fault>>,
     caller_wrap: Option<CallerWrap>,
@@ -296,6 +297,7 @@ impl Wiring {
             tokens,
             sessions,
             ci_watch: None,
+            run_e2e: None,
             pass_probe: None,
             startup_fault: None,
             caller_wrap: None,
@@ -499,6 +501,12 @@ impl Wiring {
         file: supervise::repository_config::RepositoryStartupFile,
     ) -> Self {
         self.repository_startup_file = Some(file);
+        self
+    }
+
+    /// Run queued e2e through the fixture’s port.
+    pub(super) fn with_run_e2e(mut self, port: supervise::RunE2ePort) -> Self {
+        self.run_e2e = Some(port);
         self
     }
 
@@ -1014,6 +1022,7 @@ impl Wiring {
                 tokens: self.tokens.clone(),
                 sessions: self.sessions.clone(),
                 ci_watch: self.ci_watch.clone(),
+                run_e2e: self.run_e2e.clone(),
                 pass_probe: self.pass_probe.clone(),
                 startup_fault: self.startup_fault.clone(),
                 caller_wrap: self.caller_wrap.clone(),
@@ -1115,6 +1124,7 @@ struct Parts {
     tokens: Arc<MemoryTokens>,
     sessions: Arc<FakeSessions>,
     ci_watch: Option<supervise::CiWatchPort>,
+    run_e2e: Option<supervise::RunE2ePort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     startup_fault: Option<Arc<super::startup::Fault>>,
     caller_wrap: Option<CallerWrap>,
@@ -1276,7 +1286,7 @@ impl Parts {
             queue_service: None,
             queue_broker: None,
             broker_relay: None,
-            run_e2e: None,
+            run_e2e: self.run_e2e,
             sccache: None,
             ci_watch: self.ci_watch,
             ledger: None,

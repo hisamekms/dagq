@@ -10,7 +10,8 @@ use std::cmp::Reverse;
 /// `entry_id` and `entered_at` belong to one journaled stay, including
 /// any wait for reapproval. `judgment` and `basis` describe its current
 /// authorization. `priority` is the task's effective priority now.
-/// `e2e` requires worker capacity; `disk` requires the landing disk budget.
+/// The supervisor runs `e2e` on the landing budget before landing the entry.
+/// `disk` requires the landing disk budget.
 /// Status adds a one-based `position` and `waiting_for` from the latest probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Entry {
@@ -304,7 +305,7 @@ pub enum Wait {
     Answer,
     Integrating,
     Turn,
-    Worker,
+    E2eRetry,
     Disk,
     Cleanup,
     Lease,
@@ -323,7 +324,7 @@ impl Wait {
             Self::Answer => "is waiting for an answer",
             Self::Integrating => "is waiting for the active landing to finish",
             Self::Turn => "is waiting for the shared landing turn",
-            Self::Worker => "is waiting for a worker slot to run e2e",
+            Self::E2eRetry => "is waiting to retry an unavailable e2e",
             Self::Disk => "is waiting for enough disk space",
             Self::Cleanup => "is waiting for cleanup to release the worktree",
             Self::Lease => "is waiting for its current lease to be returned",
@@ -351,17 +352,19 @@ pub struct Resources {
     pub disk_short: bool,
     pub cleanup: bool,
     pub leased: bool,
+    pub e2e_lease: bool,
     pub preparing: bool,
     pub fenced: bool,
     pub drain: bool,
+    pub e2e_retry: bool,
 }
 
 impl Resources {
-    /// Whether the entry has returned its lease, is prepared and is
-    /// unfenced. Worker backpressure also requires the run to be able
+    /// Whether the entry is prepared and unfenced, with no lease or
+    /// only a landing e2e lease. Worker backpressure also requires the run to be able
     /// to progress by Admission's predicate.
     pub const fn counts_toward_backpressure(self) -> bool {
-        !self.leased && !self.preparing && !self.fenced
+        (!self.leased || self.e2e_lease) && !self.preparing && !self.fenced
     }
 }
 
@@ -372,7 +375,6 @@ pub struct Capacity {
     pub held: bool,
     pub integrating: bool,
     pub turn_busy: bool,
-    pub worker_full: bool,
 }
 
 /// Sorted entries, reconstructed on every pass. No independent queue state.
@@ -414,8 +416,8 @@ impl LandingQueue {
             Some(Wait::Disk)
         } else if resources.cleanup {
             Some(Wait::Cleanup)
-        } else if entry.e2e && capacity.worker_full {
-            Some(Wait::Worker)
+        } else if entry.e2e && resources.e2e_retry {
+            Some(Wait::E2eRetry)
         } else {
             None
         }
@@ -903,13 +905,10 @@ mod tests {
         }
         assert_eq!(
             queue
-                .select(
-                    Capacity {
-                        worker_full: true,
-                        ..Default::default()
-                    },
-                    |_| Resources::default()
-                )
+                .select(Capacity::default(), |_| Resources {
+                    e2e_retry: true,
+                    ..Default::default()
+                })
                 .unwrap()
                 .judgment
                 .as_i64(),
@@ -952,6 +951,63 @@ mod tests {
                 .as_i64(),
             1
         );
+    }
+
+    #[test]
+    fn e2e_uses_the_landing_budget_even_when_workers_are_full() {
+        use crate::domain::{
+            admission::{self, Candidate, Kind},
+            slot_order::SlotKind,
+        };
+
+        let queue = LandingQueue::new(vec![entry(1, Priority::Normal, true)]);
+        let head = &queue.entries[0];
+        let free = Capacity::default();
+        let resources = Resources::default();
+        let selected = queue.select(free, |_| resources).unwrap();
+        assert!(selected.e2e);
+        for free_slots in [0, 1] {
+            let decision = admission::admit(
+                vec![
+                    Candidate {
+                        item: "e2e",
+                        kind: Kind::Landing,
+                        priority: selected.priority,
+                        progress: Default::default(),
+                    },
+                    Candidate::slot(SlotKind::Claim, Priority::Normal, "worker"),
+                ],
+                admission::Resources {
+                    free_slots,
+                    ..Default::default()
+                },
+            );
+            let starts: Vec<_> = decision.starts.iter().map(|start| start.item).collect();
+            assert_eq!(
+                starts,
+                if free_slots == 0 {
+                    &["e2e"][..]
+                } else {
+                    &["e2e", "worker"][..]
+                }
+            );
+        }
+        let busy = Capacity {
+            turn_busy: true,
+            ..free
+        };
+        assert!(queue.select(busy, |_| resources).is_none());
+        assert_eq!(
+            LandingQueue::explain(head, busy, resources, None),
+            Some(Wait::Turn)
+        );
+        let leased = Resources {
+            leased: true,
+            e2e_lease: true,
+            ..resources
+        };
+        assert!(leased.counts_toward_backpressure());
+        assert_eq!(LandingQueue::waiting(head, free, leased), Some(Wait::Lease));
     }
 
     #[test]

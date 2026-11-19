@@ -423,8 +423,8 @@ impl HostOpsState {
         }
         Ok(())
     }
-    /// The selected landing takes its reservation in the claim budget,
-    /// including when its first step is leasing a worker slot for e2e.
+    /// Claim disk capacity after reserving space for the selected landing,
+    /// including an e2e that starts on the landing budget.
     pub(in crate::application::supervise) fn landing_claims(
         &self,
         run: &RunId,

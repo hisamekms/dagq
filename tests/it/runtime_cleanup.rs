@@ -1082,20 +1082,16 @@ fn drain_free_space(_: &Path) -> Option<u64> {
     Some(if queued { 1 } else { 1 << 40 })
 }
 
-/// Task 648: a stop finishes a disk cleanup before the landing is
-/// decided: it keeps the landing's lease until the fresh reading, then
-/// returns it while still short, its landing not started; the cleanup
+/// Task 648: a stop finishes a disk cleanup while the disk-blocked run
+/// stays unleased in the landing queue. The cleanup
 /// for room goes to its last candidate, the canceled task's worktree
-/// included, and is counted in `auto_repaired` (`disk_cleanup`). A
-/// handoff's drain, which hands the run over leased once the cleanup is
-/// done (ADR-t3077-1), is
+/// included, and is counted in `auto_repaired` (`disk_cleanup`). The
+/// handoff case is
 /// `draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing`'s.
-/// Which job ends after its current worktree on a stop or a handoff, and
-/// whether the drained landing gives its lease back or is handed over,
-/// are the unit tests' of `supervise::cleanup`
+/// Which job ends after its current worktree on a stop or a handoff
+/// is covered by `supervise::cleanup`'s unit tests
 /// (`only_a_stop_or_a_handoff_ends_the_cleanup`,
-/// `ending_keeps_only_the_rest_of_a_cleanup_for_room`), `domain::landing_hold`
-/// and `supervise::host_ops::handoff` (`only_a_handoff_without_a_stop_hands_landings_over`).
+/// `ending_keeps_only_the_rest_of_a_cleanup_for_room`).
 #[test]
 fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
     let (_dir, repo, db) = fixture();
@@ -1284,17 +1280,15 @@ fn rest_passes(db: &Path, count: usize) {
 /// dropped by a handoff: it runs after the job, to its last candidate,
 /// removing the build outputs of a run nobody works on that waits for no
 /// answer (`build_outputs_removed`, `disk_space`), counted in
-/// `auto_repaired` (`disk_cleanup`). The handoff waits for that rest, and
-/// the run short of room to land keeps its lease and starts no landing: it
-/// is handed over leased once the rest is done (ADR-t3077-1), so too when
+/// `auto_repaired` (`disk_cleanup`). The handoff waits for that rest while
+/// the run stays unleased in the landing queue, including when
 /// the rest finished between the reading of the pass it started on and the
 /// handoff, read after the cleanup was polled on that pass (the pass order
 /// of `supervise::execution::run_loop`): the race's representative. A handoff read
 /// first on that pass while the rest is still held differs from it only in
 /// the rest's job not having finished, which
 /// `supervise::cleanup::tests::ending_keeps_only_the_rest_of_a_cleanup_for_room`
-/// counts the same; the other cases (a stop, still short) differ only in
-/// that test's decisions and `domain::landing_hold`'s unit tests.
+/// counts the same.
 #[test]
 fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
     for drain in [Drain::Handoff, Drain::HandoffAfterRest] {

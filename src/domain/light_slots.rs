@@ -54,13 +54,6 @@ impl LightChanges {
     }
 }
 
-/// The landing queue that counts outside the slots: the runs waiting only
-/// for their landing turn, up to `parallel` (the landing is serial, so a
-/// longer queue counts in the slots past it).
-pub fn outside_the_slots(landing_queue: usize, parallel: usize) -> usize {
-    landing_queue.min(parallel)
-}
-
 /// What the next claim may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimRoom {
@@ -79,17 +72,6 @@ pub enum ClaimRoom {
 /// integrating runs, but include review, e2e, revise and resume.
 pub fn worker_slots(active_workers: usize, queued: usize, parallel: usize) -> usize {
     active_workers + queued.saturating_sub(parallel)
-}
-
-/// A queued run takes a worker slot to run e2e. Removing it from the
-/// queue and starting its e2e are one admission: if it replaces an excess
-/// wait, it uses capacity already charged to the queue. Even when direct
-/// approvals grew the queue past the limit, replacements can drain it
-/// without increasing the charge or exceeding the actual worker limit.
-pub fn queued_e2e_has_room(active_workers: usize, queued: usize, parallel: usize) -> bool {
-    active_workers < parallel
-        && worker_slots(active_workers + 1, queued.saturating_sub(1), parallel)
-            <= worker_slots(active_workers, queued, parallel).max(parallel)
 }
 
 #[cfg(test)]
@@ -159,21 +141,11 @@ mod tests {
 
     #[test]
     fn landing_queue_excess_is_worker_backpressure() {
-        assert_eq!(outside_the_slots(5, 3), 3);
         assert_eq!(worker_slots(1, 5, 3), 3);
         assert_eq!(claim_room(3, 3), ClaimRoom::None);
         assert_eq!(worker_slots(0, 6, 3), 3);
         assert_eq!(worker_slots(0, 5, 3), 2);
         assert_eq!(worker_slots(0, 0, 3), 0);
-    }
-
-    #[test]
-    fn queued_e2e_can_replace_excess_but_cannot_overbook_workers() {
-        assert!(queued_e2e_has_room(2, 3, 3));
-        assert!(!queued_e2e_has_room(3, 3, 3));
-        assert!(queued_e2e_has_room(0, 6, 3));
-        assert!(queued_e2e_has_room(2, 7, 3));
-        assert!(!queued_e2e_has_room(3, 7, 3));
     }
 
     #[test]
@@ -183,7 +155,7 @@ mod tests {
         assert_eq!(claim_room(2, 3), ClaimRoom::Any);
         assert_eq!(worker_slots(3, 2, 3), 3);
         assert_eq!(claim_room(3, 3), ClaimRoom::None);
-        // Review and e2e are ordinary workers, not queued landings.
+        // Review still takes a worker slot.
         assert_eq!(worker_slots(3, 0, 3), 3);
     }
 }

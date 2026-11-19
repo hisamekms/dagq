@@ -389,7 +389,10 @@ fn status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot() {
         ("recovery", since("recovery", json!("used"), "00:10:00")),
         // Its supervisor died: it holds the slot, but no review goes on.
         ("dead_review", nothing(json!("used"))),
-        ("integrating", since("landing", json!("used"), "00:12:00")),
+        (
+            "integrating",
+            since("landing", json!("landing_queue"), "00:12:00"),
+        ),
         ("cleanup", nothing(json!("used"))),
         ("queued", since("landing_queue", Value::Null, "00:13:01")),
         ("parked", nothing(Value::Null)),

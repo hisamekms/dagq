@@ -1,12 +1,13 @@
 //! The turns of the host's heavy jobs across the processes of a queue
 //! (ADR-t2719-1): the automatic update's job holds the queue's turn
 //! exclusively while it builds and runs its e2e gate, and each landing
-//! check (a landing's verification, a direct `integrate`'s included, and
-//! the landing recheck) holds it shared while it runs. A job that waits for
-//! its turn says so by holding the queue's waiting lock. The supervisor
-//! reserves that turn only after the landing-first admission decision
-//! (ADR-t5283-4). The reservation covers the gap between spawn and the
-//! child's acquisition of the lock, including for direct integrations.
+//! check (verification, a recheck, or a run's e2e) holds it shared.
+//! A second lock serializes run e2e and landing verification. The
+//! supervisor reserves the update's turn after the landing-first
+//! admission decision (ADR-t5283-4). The reservation covers the gap
+//! between spawn and the child's acquisition of the lock, including
+//! for direct integrations. Who waits for whom is
+//! [`crate::domain::heavy_turn`].
 
 use super::{ProcessControl, RunFiles};
 use crate::domain::heavy_turn::{self, HeavyJob, HeavyLook};
@@ -28,6 +29,8 @@ pub struct HeavyTurn {
     pub turn: PathBuf,
     /// Held exclusively by the update's job while it waits for its turn.
     pub waiting: PathBuf,
+    /// Shared by landing verification and exclusive to one run e2e per queue.
+    landing: PathBuf,
 }
 
 /// A candidate waiting for the next opportunity, shared by the queue's
@@ -72,6 +75,7 @@ impl HeavyTurn {
         Self {
             turn: dir.join("turn"),
             waiting: dir.join("waiting"),
+            landing: dir.join("landing"),
         }
     }
 
@@ -151,9 +155,7 @@ impl HeavyTurn {
         Ok(())
     }
 
-    /// Take a landing check's turn without waiting: the turn shared, or
-    /// what it waits for (the update's gate running or waiting for its
-    /// turn).
+    /// Take a landing check's turn without waiting, or say what holds it.
     pub fn try_check(
         &self,
         files: &dyn RunFiles,
@@ -163,10 +165,64 @@ impl HeavyTurn {
         self.try_check_on(&FileLocks(files), || self.update_reserved(files, processes))
     }
 
-    /// [`Self::try_check`] on `locks`. The probe of the waiting lock is held
-    /// until the turn is taken, so a job cannot start to wait between the
-    /// probe and the turn: once a job waits, no check starts.
+    /// Take the queue's single e2e budget, shared with landing verification
+    /// and the update gate.
+    pub fn try_e2e(
+        &self,
+        files: &dyn RunFiles,
+        processes: &dyn ProcessControl,
+    ) -> Result<Result<Turn, HeavyJob>> {
+        self.make_dir(files)?;
+        self.try_landing_on(&FileLocks(files), true, || {
+            self.update_reserved(files, processes)
+        })
+    }
+
     fn try_check_on(
+        &self,
+        locks: &dyn Locks,
+        reserved: impl FnOnce() -> Result<bool>,
+    ) -> Result<Result<Turn, HeavyJob>> {
+        self.try_landing_on(locks, false, reserved)
+    }
+
+    /// The lightweight recheck still shares the update exclusion with
+    /// other landing work.
+    pub fn try_recheck(
+        &self,
+        files: &dyn RunFiles,
+        processes: &dyn ProcessControl,
+    ) -> Result<Result<Turn, HeavyJob>> {
+        self.make_dir(files)?;
+        self.try_against_update(&FileLocks(files), || self.update_reserved(files, processes))
+    }
+
+    fn try_landing_on(
+        &self,
+        locks: &dyn Locks,
+        e2e: bool,
+        reserved: impl FnOnce() -> Result<bool>,
+    ) -> Result<Result<Turn, HeavyJob>> {
+        let turn = match self.try_against_update(locks, reserved)? {
+            Ok(turn) => turn,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        let (landing, waits_for) = if e2e {
+            (locks.exclusive(&self.landing), HeavyJob::LandingCheck)
+        } else {
+            (locks.shared(&self.landing), HeavyJob::RunE2e)
+        };
+        Ok(
+            match landing.with_context(|| format!("lock {}", self.landing.display()))? {
+                Some(landing) => Ok(Box::new((landing, turn))),
+                None => Err(waits_for),
+            },
+        )
+    }
+
+    /// Hold the probe while checking the update reservation and acquiring
+    /// the turn. An updater needs the waiting lock to publish its reservation.
+    fn try_against_update(
         &self,
         locks: &dyn Locks,
         reserved: impl FnOnce() -> Result<bool>,
@@ -195,8 +251,7 @@ impl HeavyTurn {
         })
     }
 
-    /// Take a landing check's turn, waiting while the update's gate runs or
-    /// waits; `on_wait` is told once what it waits for.
+    /// Wait for the landing check's turn. `on_wait` is told once why it waits.
     pub fn check(
         &self,
         files: &dyn RunFiles,
@@ -428,6 +483,47 @@ mod tests {
         assert_eq!(model.held(&turns.turn).shared, 2);
         drop((first, second));
         assert_eq!(model.held(&turns.turn).shared, 0);
+    }
+
+    #[test]
+    fn e2e_excludes_landing_verification_other_e2e_and_the_update_gate() {
+        let turns = turns();
+        let model = Model::default();
+        let check = turns.try_check_on(&model, || Ok(false)).unwrap().unwrap();
+        let try_e2e = || turns.try_landing_on(&model, true, || Ok(false)).unwrap();
+        assert_eq!(try_e2e().err(), Some(HeavyJob::LandingCheck));
+        drop(check);
+
+        let e2e = try_e2e().unwrap();
+        assert_eq!(
+            turns.try_check_on(&model, || Ok(false)).unwrap().err(),
+            Some(HeavyJob::RunE2e)
+        );
+        assert!(try_e2e().is_err());
+        assert!(model.exclusive(&turns.turn).unwrap().is_none());
+        assert!(
+            turns
+                .try_against_update(&model, || Ok(false))
+                .unwrap()
+                .is_ok()
+        );
+        drop(e2e);
+
+        // The child has been reserved but has yet to acquire its gate.
+        assert_eq!(
+            turns
+                .try_landing_on(&model, true, || Ok(true))
+                .unwrap()
+                .err(),
+            Some(HeavyJob::UpdateGate)
+        );
+        assert_eq!(model.held(&turns.turn).shared, 0);
+        let update = turns
+            .gate_on(&model, |_| panic!("turn is free"), || Ok(()))
+            .unwrap();
+        assert_eq!(try_e2e().err(), Some(HeavyJob::UpdateGate));
+        drop(update);
+        assert!(turns.try_check_on(&model, || Ok(false)).unwrap().is_ok());
     }
 
     #[test]

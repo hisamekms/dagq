@@ -1174,8 +1174,8 @@ fn first_direct_landing(
         entries.push(entry);
     }
     let order = LandingQueue::new(entries);
-    // A person's integrate does not use the supervisor's worker slots or
-    // run e2e, but its observations keep the run's actual e2e requirement.
+    // Direct integration keeps the shared order and records the run's e2e
+    // requirement. Only supervisor admission waits for the e2e retry window.
     let selected = order
         .select(capacity, |entry| runnable[&entry.run_id].1)
         .map(|entry| &entry.run_id);
@@ -1337,7 +1337,7 @@ fn begin(
         ..Default::default()
     };
     first_direct_landing(queue, capacity, target, Some(&run))?;
-    // Leave the run queued while the update owns the common turn. Read
+    // Leave the run queued while other work owns the common turn. Read
     // the order again after waiting, while holding the turn for the start.
     let turn = match ctx.heavy_turn.as_ref() {
         Some(turn) => match turn.try_check(ctx.files, ctx.processes)? {

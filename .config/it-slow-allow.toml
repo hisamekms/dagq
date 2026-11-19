@@ -395,12 +395,6 @@ name = "runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_retry
 reason = "B 境界（Git）: an exhausted precheck on real Git, its conflicting rebase landing parked, and retry_inherit landing with the branch carried over; the used request frontier is seeded, and default counting is covered by domain::resume unit tests"
 task = 1707
 
-# 7.053s, class unknown
-[[test]]
-name = "runtime_recheck::a_run_held_in_its_slot_for_its_e2e_that_a_landing_conflicts_with_is_parked_before_it_lands"
-reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
-task = 1707
-
 # 5.544s, class B
 [[test]]
 name = "runtime_recheck::a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer"

@@ -141,12 +141,6 @@ name = "runtime_verify_retry::a_command_that_fails_on_the_host_again_waits_for_a
 reason = "B 境界（守る境界）: host でまた落ちた検証のコマンドが resume せず人を待つことを、integrate のプロセスと SQLite の ask の配線で確かめる"
 task = 3745
 
-# 16.170s
-[[test]]
-name = "runtime_waiting::a_landing_run_fills_its_supervisors_slot_in_status_and_stats"
-reason = "B 境界（守る境界）: 着地中の run が supervisor の slot を占めることを、lease と supervisor の登録と status の配線で確かめる"
-task = 3745
-
 # 15.782s
 [[test]]
 name = "runtime_waiting::a_run_waiting_for_its_answer_leaves_the_slot_to_another_task"

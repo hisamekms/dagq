@@ -4,7 +4,7 @@
 //! in a [`SlotTable`]), the
 //! landing and its review ([`LandingState`]), the resume ([`ResumeState`]),
 //! the triage and recovery ([`TriageState`]) and the providers
-//! ([`ProviderState`]); the e2e's is [`super::e2e::E2eWaits`]. Each stage's
+//! ([`ProviderState`]). Each stage's
 //! submodules change their own state, and the loop (`execution.rs`) the claim
 //! pass's and the landing branch's holds and the moved workers; the slots
 //! are changed only through [`SlotTable`]'s operations, which every stage
@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 #[derive(Default)]
 pub(super) struct SlotTable {
     slots: Vec<Slot>,
-    /// Capacity snapshot of ready, unfenced landings with no lease. The
+    /// Capacity snapshot of ready, unfenced landings without a worker lease. The
     /// supervisor rebuilds it from the shared queue each pass.
     unleased_landing_waits: usize,
 }
@@ -117,11 +117,9 @@ impl SlotTable {
             .collect()
     }
 
-    /// Worker capacity shared by claim, resume, recovery, adoption, e2e
-    /// and human-wait returns. Review and e2e stay workers. Integrating
-    /// runs and human waits stay outside the count. Landing waits,
-    /// including unleased ready entries, count beyond the first
-    /// `parallel` (ADR-t5107-1 decision 2).
+    /// Admission pressure from active workers and excess landing entries.
+    /// A run e2e is landing work even while a lease protects its worktree.
+    /// Only the excess beyond `parallel` contributes claim backpressure.
     pub(super) fn used(&self, parallel: usize) -> usize {
         light_slots::worker_slots(self.active_workers(), self.queued_landings(), parallel)
     }
@@ -135,17 +133,15 @@ impl SlotTable {
         ) < parallel
     }
 
-    /// The same capacity for an e2e that replaces one waiting entry.
-    pub(super) fn queued_e2e_has_room(&self, parallel: usize) -> bool {
-        light_slots::queued_e2e_has_room(self.active_workers(), self.queued_landings(), parallel)
-    }
-
     fn active_workers(&self) -> usize {
         self.slots
             .iter()
             .filter(|slot| {
                 !slot.out_of_slot()
-                    && !matches!(slot.phase, Phase::Landing(_))
+                    && !matches!(
+                        slot.phase,
+                        Phase::Landing(_) | Phase::AwaitingE2e(_) | Phase::E2e(_)
+                    )
                     && !slot.in_landing_queue()
             })
             .count()
@@ -955,22 +951,23 @@ mod tests {
         claim.slots.slots[1].run = with_status(&claim.slots[1], RunStatus::NeedsSession);
         claim.slots.slots[1].phase = Phase::AwaitingSlot;
         assert_eq!(claim.slots.used(3), 2);
-        // A resume may now take the one free worker slot, as may review/e2e.
-        for phase in [
-            Phase::ReviewHeld {
-                session: None,
-                retried: false,
-                providers: vec![],
-            },
-            Phase::AwaitingE2e,
-        ] {
-            let mut active = slot("active");
-            active.phase = phase;
-            claim.slots.admit(active);
-            assert_eq!(claim.slots.used(3), 3);
-            assert_eq!(claim.room(3), ClaimRoom::None);
-            claim.slots.release(4);
-        }
+        let mut e2e = slot("e2e");
+        e2e.phase = Phase::AwaitingE2e(None);
+        claim.slots.admit(e2e);
+        assert_eq!(claim.slots.used(3), 2);
+        assert_eq!(claim.room(3), ClaimRoom::Any);
+        claim.slots.release(4);
+        // Review takes the one free worker slot.
+        let mut active = slot("review");
+        active.phase = Phase::ReviewHeld {
+            session: None,
+            retried: false,
+            providers: vec![],
+        };
+        claim.slots.admit(active);
+        assert_eq!(claim.slots.used(3), 3);
+        assert_eq!(claim.room(3), ClaimRoom::None);
+        claim.slots.release(4);
         claim.slots.leave_for(0, waiting(Some(1)));
         assert_eq!(claim.slots.used(3), 1);
         assert_eq!(claim.room(3), ClaimRoom::Any);
@@ -998,24 +995,15 @@ mod tests {
         claim.slots.set_unleased_landing_waits(6);
         assert_eq!(claim.slots.used(parallel), 3);
         assert_eq!(claim.room(parallel), ClaimRoom::None);
-        assert!(claim.slots.queued_e2e_has_room(parallel));
 
-        // An e2e replaces one waiting entry already counted against the
-        // worker budget. It uses the same total capacity.
-        claim.slots.remove_unleased_landing_wait();
-        let mut e2e = slot("e2e");
-        e2e.phase = Phase::AwaitingE2e;
-        claim.slots.admit(e2e);
-        assert_eq!(claim.slots.used(parallel), 3);
-        assert_eq!(claim.room(parallel), ClaimRoom::None);
-
-        // As more entries leave the queue, normal claims get room again.
         claim.slots.remove_unleased_landing_wait();
         assert_eq!(claim.slots.used(parallel), 2);
         assert_eq!(claim.room(parallel), ClaimRoom::Any);
-        claim.slots.admit(slot("worker1"));
-        claim.slots.admit(slot("worker2"));
-        assert!(!claim.slots.queued_e2e_has_room(parallel));
+
+        // As more entries leave the queue, normal claims get room again.
+        claim.slots.remove_unleased_landing_wait();
+        assert_eq!(claim.slots.used(parallel), 1);
+        assert_eq!(claim.room(parallel), ClaimRoom::Any);
     }
 
     /// The load windows follow the runs the slots hold.

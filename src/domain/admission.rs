@@ -84,7 +84,7 @@ pub fn landing_waiting(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    Landing { needs_worker: bool },
+    Landing,
     Slot(SlotKind),
 }
 
@@ -99,7 +99,7 @@ pub struct Candidate<T> {
 impl<T> Candidate<T> {
     /// Whether this candidate could start alone using the unspent snapshot.
     /// Callers supply landing candidates selected by LandingQueue, which
-    /// already checked their disk and, for e2e, replacement slot capacity.
+    /// already checked their independent resource constraints.
     pub fn can_start(&self, resources: Resources) -> bool {
         self.progress.can_progress() && resources.blocked(self.kind).is_none()
     }
@@ -313,7 +313,7 @@ impl Resources {
             Kind::Slot(SlotKind::Resume) => self.gates.blocked().or(self.worker_block()),
             Kind::Slot(SlotKind::Recovery) if self.gates.branch => Some(Blocked::LandingBranch),
             Kind::Slot(SlotKind::Recovery | SlotKind::Return { .. }) => self.worker_block(),
-            Kind::Landing { .. } => self.gates.blocked().or({
+            Kind::Landing => self.gates.blocked().or({
                 if self.container_held {
                     Some(Blocked::LandingHeld)
                 } else if self.integrating {
@@ -337,8 +337,7 @@ impl Resources {
 /// A runnable landing and claim share the disk budget when it fits. When
 /// they compete for disk, give the higher priority the first start and
 /// give the landing a tie. Call again with refreshed facts after a start
-/// or a failed attempt. A queued e2e has already passed LandingQueue's
-/// worker replacement check.
+/// or a failed attempt. A queued e2e uses the same budget as a landing.
 pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Decision<T> {
     let has_startable_candidate = candidates
         .iter()
@@ -347,7 +346,7 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
     let mut slots = Vec::new();
     for candidate in candidates {
         match candidate.kind {
-            Kind::Landing { .. } => landings.push(candidate),
+            Kind::Landing => landings.push(candidate),
             Kind::Slot(kind) => slots.push(SlotCandidate {
                 kind,
                 priority: candidate.priority,
@@ -396,12 +395,9 @@ impl<T> Decision<T> {
             return;
         }
         match candidate.kind {
-            Kind::Landing { needs_worker } => {
+            Kind::Landing => {
                 *resources = resources.after_landing();
                 resources.integrating = true;
-                if needs_worker {
-                    resources.free_slots = resources.free_slots.saturating_sub(1);
-                }
             }
             Kind::Slot(kind) => {
                 resources.free_slots -= 1;
@@ -727,9 +723,7 @@ mod tests {
     fn one_shared_turn_gates_the_landing_queue_head() {
         let head = Candidate {
             item: "queue head",
-            kind: Kind::Landing {
-                needs_worker: false,
-            },
+            kind: Kind::Landing,
             priority: Priority::Normal,
             progress: Progress::default(),
         };
@@ -848,37 +842,35 @@ mod tests {
             resources.landing_disk = Some(LandingDisk {
                 claims: landing.claims_with_landing,
             });
-            for needs_worker in [false, true] {
-                let mut candidates = vec![
-                    Candidate::slot(SlotKind::Claim, priority, "claim"),
-                    Candidate::slot(SlotKind::Claim, Priority::Normal, "another claim"),
-                ];
-                if landing.allowed {
-                    candidates.push(Candidate {
-                        item: "landing",
-                        kind: Kind::Landing { needs_worker },
-                        priority: hi,
-                        progress: landing_progress,
-                    });
-                }
-                let decision = admit(candidates, resources);
-                assert_eq!(
-                    decision
-                        .starts
-                        .into_iter()
-                        .map(|candidate| candidate.item)
-                        .collect::<Vec<_>>(),
-                    starts,
-                    "free={free}, priority={priority:?}, needs_worker={needs_worker}, progress={landing_progress:?}, resources={resources:?}"
+            let mut candidates = vec![
+                Candidate::slot(SlotKind::Claim, priority, "claim"),
+                Candidate::slot(SlotKind::Claim, Priority::Normal, "another claim"),
+            ];
+            if landing.allowed {
+                candidates.push(Candidate {
+                    item: "landing",
+                    kind: Kind::Landing,
+                    priority: hi,
+                    progress: landing_progress,
+                });
+            }
+            let decision = admit(candidates, resources);
+            assert_eq!(
+                decision
+                    .starts
+                    .into_iter()
+                    .map(|candidate| candidate.item)
+                    .collect::<Vec<_>>(),
+                starts,
+                "free={free}, priority={priority:?}, progress={landing_progress:?}, resources={resources:?}"
+            );
+            if let Some(waiting) = waits_for_disk {
+                assert!(
+                    decision.blocked.iter().any(|(candidate, reason)| {
+                        candidate.item == waiting && *reason == Blocked::DiskCompetition
+                    }),
+                    "free={free}, priority={priority:?}: {waiting} waits for disk"
                 );
-                if let Some(waiting) = waits_for_disk {
-                    assert!(
-                        decision.blocked.iter().any(|(candidate, reason)| {
-                            candidate.item == waiting && *reason == Blocked::DiskCompetition
-                        }),
-                        "free={free}, priority={priority:?}, needs_worker={needs_worker}: {waiting} waits for disk"
-                    );
-                }
             }
         }
     }
@@ -889,9 +881,7 @@ mod tests {
 
         let landing = Candidate {
             item: "landing",
-            kind: Kind::Landing {
-                needs_worker: false,
-            },
+            kind: Kind::Landing,
             priority: High,
             progress: Progress::default(),
         };

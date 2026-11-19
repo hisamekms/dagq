@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::landing_answers::queued_e2e_starts_with_all_worker_slots_used"
+reason = "境界として実際の supervisor・queue service・SQLite を通し、worker の枠が埋まった回の e2e の開始と、同じ lease を読む status の双方を確かめる。起動は1回、worker と着地 entry は1本ずつ、tick は1 ms、e2e は上限つきの fake に絞った。予算と控えの判定は domain の unit test に分離した。"
+task = 5291

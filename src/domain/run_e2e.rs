@@ -86,6 +86,67 @@ pub fn due(events: &[RunEvent], commit: &str) -> Option<Due> {
     })
 }
 
+/// Whether the current lease belongs to the landing queue's e2e. An old
+/// start or lease cannot turn a later worker session into landing work.
+pub fn landing_lease(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == EventKind::LeaseAcquired
+                || event.kind == EventKind::LeaseReleased
+                || event.kind == EventKind::RunAdopted
+        })
+        .is_some_and(|event| {
+            event.kind == EventKind::LeaseAcquired && event.payload["reason"] == "e2e"
+        })
+}
+
+/// Whether the lease's e2e has started and has no recorded result yet.
+pub fn running(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == EventKind::RunE2eStarted
+                || event.kind == EventKind::RunE2eFinished
+                || event.kind == EventKind::RunE2eFailed
+                || event.kind == EventKind::LeaseReleased
+                || event.kind == EventKind::LeaseAcquired
+                || event.kind == EventKind::RunAdopted
+        })
+        .is_some_and(|event| event.kind == EventKind::RunE2eStarted)
+}
+
+/// The latest attempt's retry record, scoped to the head that ran it.
+fn retry_record<'a>(events: &'a [RunEvent], head: &str) -> Option<&'a RunEvent> {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == EventKind::RunE2eStarted
+                || event.kind == EventKind::RunE2eFinished
+                || event.kind == EventKind::RunE2eFailed
+        })
+        .filter(|event| {
+            event.kind == EventKind::RunE2eFinished
+                && event.payload["outcome"] == UNAVAILABLE
+                && event.payload["commit"] == head
+        })
+}
+
+/// Whether an unavailable e2e for this head is still in its retry window.
+pub fn retry_pending(events: &[RunEvent], head: &str, now_ms: i64) -> bool {
+    retry_record(events, head).is_some_and(|event| {
+        let delay = event.payload["retry_secs"].as_u64().unwrap_or(RETRY_SECS);
+        let Some(started) = super::stats::timestamp_millis(&event.created_at) else {
+            return false;
+        };
+        let elapsed = now_ms.saturating_sub(started).max(0) as u64;
+        elapsed < delay.saturating_mul(1000)
+    })
+}
+
 /// How many of the run's latest e2e could not run, in a row.
 pub fn unavailable_in_a_row(events: &[RunEvent]) -> usize {
     events
@@ -211,6 +272,22 @@ mod tests {
         events.push(validated(false));
         assert_eq!(due(&events, "c"), None);
         assert!(!required(&events));
+    }
+
+    #[test]
+    fn unavailable_e2e_keeps_its_retry_window_after_releasing_its_lease() {
+        let mut unavailable = event(
+            RUN_E2E_FINISHED,
+            json!({"commit": "head", "outcome": UNAVAILABLE, "retry_secs": 2}),
+        );
+        unavailable.created_at = "1970-01-01T00:00:01Z".into();
+        let events = [
+            unavailable,
+            event(EventKind::LeaseReleased.as_str(), json!({})),
+        ];
+        assert!(retry_pending(&events, "head", 2_999));
+        assert!(!retry_pending(&events, "head", 3_000));
+        assert!(!retry_pending(&events, "new-head", 2_999));
     }
 
     #[test]

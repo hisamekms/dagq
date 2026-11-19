@@ -11,7 +11,7 @@ fn gates(bits: u8) -> Gates {
 
 fn candidates() -> impl Strategy<Value = Vec<Candidate<usize>>> {
     let entry = (
-        0_u8..6,
+        0_u8..5,
         any::<i64>(),
         prop::sample::select(Priority::ALL.to_vec()),
         any::<u8>(),
@@ -25,9 +25,7 @@ fn candidates() -> impl Strategy<Value = Vec<Candidate<usize>>> {
                     1 => Kind::Slot(SlotKind::Resume),
                     2 => Kind::Slot(SlotKind::Recovery),
                     3 => Kind::Slot(SlotKind::Return { ended_at }),
-                    _ => Kind::Landing {
-                        needs_worker: kind == 5,
-                    },
+                    _ => Kind::Landing,
                 };
                 // Favor progressing candidates while varying every gate.
                 let progress = if progress < 64 {
@@ -125,7 +123,7 @@ fn expected_startable(candidate: &Candidate<usize>, resources: Resources) -> boo
         Kind::Slot(SlotKind::Resume) => shared_gates_clear && worker_available,
         Kind::Slot(SlotKind::Recovery) => !branch && worker_available,
         Kind::Slot(SlotKind::Return { .. }) => worker_available,
-        Kind::Landing { .. } => {
+        Kind::Landing => {
             shared_gates_clear
                 && !resources.container_held
                 && !resources.integrating

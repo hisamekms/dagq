@@ -88,13 +88,13 @@ supervisor: 着地を許す判断 → 共通の着地の列が候補を選ぶ �
 
 ## 承認とslot
 
-承認されたrunのうちe2eの要らない着地はworkerの空きを待たず、e2eの開始だけがworkerの空きを待つ。
+承認されたrunは着地とその前のe2eを共通の列で待つ。
 着地を許した全てのrunは一本の列に入り、効く優先度が高い順、同じ優先度なら列に入った時刻の順で着地を始める。
 reviewのpassもleaseを返して同じ列を待ち、workerのslotから直接着地を始めない。
 人が直接着地を始めるときも同じ列で選び、先に進めるrunがあれば後続のrunは承認を記録して順番を待つ。
 列はentryごとに今着地できるかと控えの理由を副作用なく判定する。
 バッチの判定の入口は [`domain::landing_batch`](../../../src/domain/landing_batch.rs) にある。
-答え待ちのask、そのrunのディスク不足、e2eに要るworker枠の不足、掃除の予約など、先頭だけに効く控えで後続が独立に進める場合に限り、先頭は順番を保って後続に先を譲る。
+答え待ちのask、そのrunのディスク不足、実行できなかったe2eの再試行待ち、掃除の予約など、先頭だけに効く控えで後続が独立に進める場合に限り、先頭は順番を保って後続に先を譲る。
 控えが解ければ元の順番で選ぶ。
 候補の順番と先を譲る条件は列に集め、Admissionは渡された候補をclaimや資源に照らして、この回に着地を始めるかとclaimとの兼ね合いだけを決める（[ADR-t5292-1](../../adr/2026-11-18-t5292-1-admission-unifies-starts-resources-and-reasons.md)決定1）。
 CIの見張りで読む手段の確認を待つか不足している間、実行環境の必須プログラムが無い間、着地branchを解決できない間、検証用containerを使えない間は、いずれもsupervisorの全候補に控えが効き、Admissionがその回の着地の開始を見送る。
@@ -214,13 +214,12 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 
 ## 着地の前のe2e
 
-- e2eはworkerが流さず、reviewがpassしたrunのうち要るもの（[Validation](validation.md#runtimeが流すe2e)）に、着地slotの前にsupervisorがhostで流す（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。
-  着地のrebaseの後と人の`integrate`では流さない。
-- 自動更新の関門（[Auto-update](auto-update.md)）と同じ`e2e_gate`で、hostで1本ずつ流す。
-  隔離の印はlanding branchのcommitから読むので、workerが足した印は効かない。
-- 印で通らない失敗は`needs_session`のresumeになり、流せなかったときは変更のせいとせず、slotとleaseを持ったまま待って流し直す（[`needs_session`](needs-session.md#needs_session)）。
-- repositoryが宣言したe2eのコマンドを、宣言があればrepositoryによらず流す（ADR-t2257-1決定4）。
-- 落とし穴: e2eに渡すenvは許す名前に絞るので、足りない版が固定バイナリになると全てのrunのe2eが始まらないか落ち続ける（見分け方と戻し方は`infrastructure::e2e_gate::PASSED_ENV`）。
+supervisorは[e2eの要るrun](validation.md#runtimeが流すe2e)で承認された変更を、着地のrebase前にhostで確かめる。
+e2eは着地の列の予算で流れ、workerのslotに数えない。
+着地の検証と自動更新の関門とは着地側の予算で直列に流し、host全体では`e2e_gate`の排他を保つ（[ADR-t5283-4](../../adr/2026-11-18-t5283-4-budget-auto-update-and-e2e-with-landings.md)）。
+隔離の印はlanding branchのcommitから読むので、workerが足した印は効かない。
+人が直接`integrate`するときは、人がe2eを確かめて着地を判断する（[Validation](validation.md#runtimeが流すe2e)）。
+結果と再試行の扱いは`application::supervise::execution::e2e`のmodule docが持つ。
 
 ## landing recheck
 

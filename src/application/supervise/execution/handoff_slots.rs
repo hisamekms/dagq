@@ -763,7 +763,10 @@ mod tests {
         assert!(!landing.rebuildable());
         assert!(landing.stepped(true));
         assert!(landing.stepped(false));
-        let e2e_waits = Slot::new(run(RunStatus::AwaitingIntegration), Phase::AwaitingE2e);
+        let e2e_waits = Slot::new(
+            run(RunStatus::AwaitingIntegration),
+            Phase::AwaitingE2e(Some(Box::new(()))),
+        );
         assert!(e2e_waits.rebuildable());
         assert!(!e2e_waits.stepped(true));
     }

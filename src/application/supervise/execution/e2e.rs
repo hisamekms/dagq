@@ -8,15 +8,18 @@
 //! `e2e-<attempt>.rerun.log`) of the run directory.
 //!
 //! - It passes (flaky tests and tests under a mark included):
-//!   `run_e2e_finished` (`outcome: passed`) and the run goes on to land.
+//!   `run_e2e_finished` (`outcome: passed`) returns the run to the same
+//!   entry. Its required e2e keeps its landing separate from a batch.
 //! - Tests still fail after their rerun under no mark: the run is parked
 //!   for a resume (`run_e2e_failed`, code `e2e_failed`) that names the
-//!   failed tests and the logs.
+//!   failed tests and the logs. It leaves the landing queue and waits for
+//!   worker capacity to resume.
 //! - It could not run or tell anything of the change (it could not start,
 //!   an unreadable `[run.env]`, it or the rerun of its failed tests past
 //!   the timeout, a rerun that could not start), which is not the change's
 //!   fault (ADR-t1233-2 decision 3): `run_e2e_finished` (`outcome:
-//!   unavailable`); the run keeps its slot and lease and tries again after
+//!   unavailable`); the run releases its lease and waits on its landing
+//!   entry with a retry reason. It is tried again after
 //!   [`RunE2ePort::retry`] ([`run_e2e::RETRY_SECS`]), and from the
 //!   [`run_e2e::UNAVAILABLE_ATTENTION`]th in a row the inbox is told
 //!   (`attention: true`, `check the e2e host`).
@@ -31,15 +34,16 @@
 //! and cannot permit landing. Test command overrides win. Custom commands
 //! receive failed test names for reruns through `DAGQ_E2E_RERUN`.
 //!
-//! One run of this supervisor runs its e2e at a time; another waits in its
-//! slot (`run_e2e_waiting`, once per wait). Across processes (another
-//! queue's, the automatic update's gate, `install`) the e2e's lock waits.
+//! A run e2e spends the shared landing budget while it runs. The host
+//! e2e lock also serializes it with other queues and install. The gate
+//! filters inherited environment names through
+//! `infrastructure::e2e_gate::PASSED_ENV`; a missing required name can
+//! prevent runs' e2e commands from starting or passing.
 
 use super::*;
 use crate::application::e2e_verdict;
 use crate::application::install::{E2eOutcome, E2eSettings};
 use crate::domain::{EventKind, e2e_quarantine, run_e2e};
-use std::collections::HashSet;
 
 /// Runs the e2e of a worktree with the settings.
 pub type RunE2e = Arc<dyn Fn(&Path, &E2eSettings) -> Result<E2eOutcome> + Send + Sync>;
@@ -114,20 +118,6 @@ struct E2eUnavailable {
     kind: EventKind,
     outcome: &'static str,
     error: String,
-    next: E2eUnavailableNext,
-}
-
-#[derive(Clone, Copy)]
-enum E2eUnavailableNext {
-    Retry,
-}
-
-impl E2eUnavailableNext {
-    fn phase(self) -> Phase {
-        match self {
-            Self::Retry => Phase::AwaitingSlot,
-        }
-    }
 }
 
 fn unavailable_decision(error: String) -> E2eUnavailable {
@@ -135,7 +125,6 @@ fn unavailable_decision(error: String) -> E2eUnavailable {
         kind: EventKind::RunE2eFinished,
         outcome: run_e2e::UNAVAILABLE,
         error,
-        next: E2eUnavailableNext::Retry,
     }
 }
 
@@ -150,34 +139,6 @@ impl E2eUnavailable {
         }
         base
     }
-}
-
-/// The e2e stage's state: how it runs the e2e, the runs waiting for it,
-/// and when an e2e that could not run is tried again.
-pub(super) struct E2eWaits {
-    /// Runs the e2e of the runs after their review (ADR-t1233-2).
-    port: Option<RunE2ePort>,
-    /// The runs whose `run_e2e_waiting` was recorded for the wait now.
-    waiting: HashSet<RunId>,
-    /// When the e2e of a run could not run, and how long after that it is
-    /// tried again.
-    retry: HashMap<RunId, (Instant, Duration)>,
-}
-
-impl E2eWaits {
-    pub(super) fn new(port: Option<RunE2ePort>) -> Self {
-        Self {
-            port,
-            waiting: HashSet::new(),
-            retry: HashMap::new(),
-        }
-    }
-}
-
-/// Whether an e2e that could not run `since_unavailable` ago still waits to
-/// be tried again `retry` after that: it is tried from `retry` on.
-fn retry_waits(since_unavailable: Duration, retry: Duration) -> bool {
-    since_unavailable < retry
 }
 
 /// The e2e of a run: an executor thread or a preparation failure ready
@@ -209,15 +170,6 @@ impl E2eWatch {
 }
 
 impl Supervisor<'_> {
-    /// Whether `run`'s e2e could not run and waits to be tried again: a
-    /// supervisor that drains or hands off does not wait for it.
-    pub(super) fn e2e_retry_pending(&self, run: &TaskRun) -> bool {
-        self.e2e
-            .retry
-            .get(run.id())
-            .is_some_and(|(at, retry)| retry_waits(self.generators.clock.since(*at), *retry))
-    }
-
     /// The e2e `run` needs before it lands (ADR-t1233-2), at its head;
     /// `None` when it needs none or ran it for that commit.
     pub(super) fn e2e_due(&self, run: &TaskRun) -> Result<Option<run_e2e::Due>> {
@@ -228,22 +180,21 @@ impl Supervisor<'_> {
         Ok(run_e2e::due(&events, commit.as_str()))
     }
 
-    /// For a passed run in its slot before it lands: `None` when it lands
-    /// now (no e2e due), else the phase it goes on in: waiting in
-    /// `AwaitingE2e` (another e2e of this supervisor runs, one that could
-    /// not run waits to be tried again, or a handoff starts none) or
-    /// running its e2e.
-    pub(super) fn e2e_before_landing(&mut self, run: &TaskRun) -> Result<Option<Phase>> {
+    /// Start a selected entry's e2e under its lease and the landing turn.
+    /// Return no watcher when the entry should go back to the queue.
+    pub(super) fn start_e2e(
+        &mut self,
+        run: &TaskRun,
+        turn: crate::application::heavy_turn::Turn,
+    ) -> Result<Option<E2eWatch>> {
         let Some(due) = self.e2e_due(run)? else {
-            self.e2e.waiting.remove(run.id());
-            self.e2e.retry.remove(run.id());
             return Ok(None);
         };
         let commit = run
             .result_commit()
             .context("a run due its e2e has a result commit")?
             .clone();
-        let port = self.e2e.port.clone();
+        let port = self.run_e2e.clone();
         let prepared =
             preparation_decision(port.as_ref().map(|port| (port.prepare)(&port.settings)));
         if matches!(prepared, E2ePreparation::NotConfigured) {
@@ -266,29 +217,6 @@ impl Supervisor<'_> {
             E2ePreparation::Unavailable(decision) => (port.settings.clone(), Some(decision)),
             E2ePreparation::NotConfigured => unreachable!("handled above"),
         };
-        // A handoff starts no e2e: the next process runs it. One asked
-        // after this pass read none is refused by the start's write below.
-        if self.e2e_retry_pending(run) || self.registration.handing_off() {
-            return Ok(Some(Phase::AwaitingE2e));
-        }
-        if self
-            .claim
-            .slots
-            .iter()
-            .any(|slot| matches!(slot.phase, Phase::E2e(_)))
-        {
-            if self.e2e.waiting.insert(run.id().clone()) {
-                self.queue.record_runtime_event(
-                    run.id(),
-                    EventKind::RunE2eWaiting,
-                    json!({"attempt": due.attempt, "commit": commit}),
-                )?;
-                info!(run_id = %run.id(), "run {} waits for the e2e of another run before its own", run.id());
-            }
-            return Ok(Some(Phase::AwaitingE2e));
-        }
-        self.e2e.waiting.remove(run.id());
-        self.e2e.retry.remove(run.id());
         // A container run's e2e runs in its landing worktree, its git
         // guarded (ADR-t2179-1 decisions 5 and 8); running the tree's code
         // on the host stays the e2e's exception (ADR-t2113-3 decision 3).
@@ -319,22 +247,7 @@ impl Supervisor<'_> {
             "log": settings.log,
             "worktree": worktree,
         });
-        match self.begin_e2e(run.id(), started) {
-            Ok(()) => {}
-            // A handoff asked since this pass read none at its start: the
-            // same write refused the e2e (ADR-t3077-1 decision 1), and the
-            // run waits, its lease kept, for the next pass to drain for the
-            // request.
-            Err(error)
-                if error
-                    .downcast_ref::<crate::application::HandoffAsked>()
-                    .is_some() =>
-            {
-                info!(run_id = %run.id(), "run {} runs no e2e: its supervisor was asked to hand off", run.id());
-                return Ok(Some(Phase::AwaitingE2e));
-            }
-            Err(error) => return Err(error),
-        }
+        self.begin_e2e(run.id(), started)?;
         info!(run_id = %run.id(), "run {} runs its e2e at {commit} before it lands (attempt {})", run.id(), due.attempt);
         // The e2e may not start the sccache server (ADR-t2086-1): a missing
         // one is started here, and the gate looks again and guards it.
@@ -369,10 +282,13 @@ impl Supervisor<'_> {
                 },
             )));
         }
-        let handle = unavailable
-            .is_none()
-            .then(|| spawn_traced(move || (port.run)(&worktree, &thread_settings)));
-        Ok(Some(Phase::E2e(E2eWatch {
+        let handle = unavailable.is_none().then(|| {
+            spawn_traced(move || {
+                let _turn = turn;
+                (port.run)(&worktree, &thread_settings)
+            })
+        });
+        Ok(Some(E2eWatch {
             handle,
             unavailable,
             attempt: due.attempt,
@@ -381,7 +297,7 @@ impl Supervisor<'_> {
             requirement: due.requirement,
             started,
             steps,
-        })))
+        }))
     }
 
     /// Record the start of the e2e of `id` (`run_e2e_started`, with
@@ -403,19 +319,17 @@ impl Supervisor<'_> {
 
     /// Record that the e2e of `run` could not run (`run_e2e_finished`,
     /// `outcome: unavailable`, with `payload` and why), and have the run
-    /// wait in its slot to try again; from the
+    /// wait in the landing queue to try again; from the
     /// [`run_e2e::UNAVAILABLE_ATTENTION`]th in a row the event carries
     /// `attention: true`.
     fn e2e_unavailable(
         &mut self,
-        slot: &mut Slot,
         (run, events): (TaskRun, &[RunEvent]),
         payload: Value,
         decision: E2eUnavailable,
     ) -> Result<Step> {
         let retry = self
-            .e2e
-            .port
+            .run_e2e
             .as_ref()
             .map_or(Duration::from_secs(run_e2e::RETRY_SECS), |port| port.retry);
         let in_a_row = run_e2e::unavailable_in_a_row(events) + 1;
@@ -423,21 +337,15 @@ impl Supervisor<'_> {
         self.queue
             .record_runtime_event(run.id(), decision.kind, payload)?;
         warn!(run_id = %run.id(), "run {}: its e2e could not run ({in_a_row} in a row); trying again in {}s: {}", run.id(), retry.as_secs(), decision.error);
-        self.e2e
-            .retry
-            .insert(run.id().clone(), (self.generators.clock.monotonic(), retry));
-        slot.run = run;
-        slot.transition(decision.next.phase(), decision.kind.as_str(), &*self.queue);
-        Ok(Step::Continue)
+        Ok(Step::Done(Box::new(self.return_to_landing_queue(&run)?)))
     }
 
-    /// Act on the e2e `watch` ran for the run of `slot`, with `run` and
-    /// its `events` as the queue has them now and `history` the e2e gates'
+    /// Act on the e2e `watch` ran for `run`, with its current `events`
+    /// and `history` the e2e gates'
     /// latest events ([`e2e_verdict::HISTORY`]), all read before the e2e
     /// left the slot (see the module).
     pub(super) fn finish_e2e(
         &mut self,
-        slot: &mut Slot,
         mut watch: E2eWatch,
         run: TaskRun,
         events: &[RunEvent],
@@ -463,7 +371,7 @@ impl Supervisor<'_> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                return self.e2e_unavailable(slot, (run, events), base, error);
+                return self.e2e_unavailable((run, events), base, error);
             }
         };
         // What its commands' steps left is sent now, again at the sweeps.
@@ -524,7 +432,7 @@ impl Supervisor<'_> {
                 }
                 payload["rerun"] = value;
             }
-            return self.e2e_unavailable(slot, (run, events), payload, unavailable_decision(why));
+            return self.e2e_unavailable((run, events), payload, unavailable_decision(why));
         }
         // The marks of the landing branch's committed tree, not those of
         // the run's worktree the gate read (ADR-t1233-2 decision 5).
@@ -580,13 +488,7 @@ impl Supervisor<'_> {
             self.queue
                 .record_runtime_event(run.id(), EventKind::RunE2eFinished, payload)?;
             info!(run_id = %run.id(), "run {}: its e2e passed at {}; it lands next", run.id(), watch.commit);
-            slot.run = run;
-            slot.transition(
-                Phase::AwaitingSlot,
-                EventKind::RunE2eFinished.as_str(),
-                &*self.queue,
-            );
-            return Ok(Step::Continue);
+            return Ok(Step::Done(Box::new(self.return_to_landing_queue(&run)?)));
         }
         let reason = verdict
             .failure
@@ -744,7 +646,6 @@ mod tests {
                 panic!("an unreadable configuration must neither run nor permit landing");
             };
             assert_eq!(decision.kind, EventKind::RunE2eFinished);
-            assert!(matches!(decision.next.phase(), Phase::AwaitingSlot));
             let payload = decision.payload(json!({"attempt": 1, "commit": "reviewed"}), 1, retry);
             assert_eq!(payload["outcome"], "unavailable");
             assert_eq!(payload["retry_secs"], 17);
@@ -819,17 +720,6 @@ mod tests {
                 .unwrap(),
             &json!({"after_dashdash": 3})
         );
-    }
-
-    /// An e2e that could not run waits until 1 ms before its retry and is
-    /// tried at it.
-    #[test]
-    fn an_unavailable_e2e_waits_until_its_retry() {
-        let retry = Duration::from_secs(run_e2e::RETRY_SECS);
-        let ms = Duration::from_millis(1);
-        assert!(retry_waits(Duration::ZERO, retry));
-        assert!(retry_waits(retry - ms, retry));
-        assert!(!retry_waits(retry, retry));
     }
 
     /// The run's `run_e2e_finished` says how its e2e went; it names no

@@ -188,12 +188,11 @@ claimと着地の予約の取り方と、両方が同じ回に進める条件は
 
 ## workerのslotと着地の列
 
-[共通の列](integrate.md#承認とslot)は答え待ちを含む候補ごとの控えを見て、進める最初の着地を選ぶ。
+[共通の列](integrate.md#承認とslot)は答え待ちを含む候補ごとの控えを見て、順に進める着地を選ぶ。
 Admissionは選ばれた着地を共通の資源とclaimに照らして始めるか決める。
-着地中はworkerのslotに数えない。
-着地待ちは並列度を超えた分だけworkerのslotを占め、lease返却後もclaimに背圧を掛ける。
-review・e2e・revise・resumeの途中はworkerのslotに残す。
-承認された着地でworkerの空きを待つのはe2eの開始だけで、e2eの要らない後続の着地を止めない。
+statusは実行中のworkerの使用数と、e2eを含む着地の列を分けて示す。
+review・revise・resumeはworkerのslotを使い、着地とその前のe2eは着地側の予算を使う。
+claimにはworkerの並列度を超えた着地待ちの分だけ背圧を掛ける。
 claimはchangeによらず同じslotを使い、進める戻りは同じ優先度以下のclaimに先行する。
 load・ディスク・claimの間隔の関門はすべてのclaimに効き、着地はloadで止めない。
 `stats`の空きslotと`kpi`のslot使用率にも着地待ちを数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。

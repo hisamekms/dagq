@@ -723,8 +723,8 @@ impl Supervisor<'_> {
             | Phase::ReviewHeld { .. }
             | Phase::Exiting(_)
             | Phase::AwaitingSlot
-            | Phase::AgentEval(_)
-            | Phase::AwaitingE2e => {}
+            | Phase::AwaitingE2e(_)
+            | Phase::AgentEval(_) => {}
         }
         // The review left as it stands waits for the park in place of its
         // jobs; were the park not to happen after all, it starts again.

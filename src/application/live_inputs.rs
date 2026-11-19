@@ -238,11 +238,10 @@ fn slot_snapshot(
         .sum();
     // A run that waits for a person, or waits to go back to its slot,
     // holds no slot (ADR-0071 decision 13), nor does a claim of
-    // `already_satisfied` resting on its ask (ADR-t1818-1). Every other run a registered
-    // supervisor leases holds its slot as the supervisor counts it, landing,
-    // in review or resumed alike; an unfinished run under no such lease holds
-    // one unless it is landed under a token no supervisor registered (a
-    // person's `integrate`) (ADR-t610-1).
+    // `already_satisfied` resting on its ask (ADR-t1818-1). Stats counts
+    // registered supervisors’ leases, including landing work, for its
+    // idle-slot alert. Unfinished runs under other tokens count too,
+    // except for direct integrations (ADR-t610-1).
     let supervisor_leases: HashSet<RunId> = queue
         .run_leases()?
         .into_iter()

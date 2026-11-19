@@ -1477,7 +1477,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             timer_finishes_held: Vec::new(),
             moved: HashMap::new(),
         },
-        e2e: e2e::E2eWaits::new(ports.run_e2e.clone()),
+        run_e2e: ports.run_e2e.clone(),
 
         notice_failures: HashMap::new(),
         planning: PlanningState::new(ports, pid),
@@ -1572,8 +1572,8 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   its submodules through their passes.
 /// - execution and landing: by stage ([`stages`]), the slot assignment
 ///   `claim` (its slots change only through [`stages::SlotTable`]'s
-///   operations), `landing`, `resume`, `triage`, `provider` and `e2e`
-///   ([`e2e::E2eWaits`]), each changed by its stage's submodules; and on
+///   operations), `landing`, `resume`, `triage`, and `provider`,
+///   each changed by its stage's submodules; and on
 ///   the loop, the steps of the slots' phases (each slot's [`Phase`] is
 ///   held in the [`stages::SlotTable`]) and what spans the stages
 ///   (`finished`, `errors`, `stall`, `notice_failures`, `job_ends`,
@@ -1776,9 +1776,8 @@ struct Supervisor<'a> {
     resume: stages::ResumeState,
     triage: stages::TriageState,
     provider: stages::ProviderState,
-    /// The e2e stage's state: its port, the runs waiting for the e2e, and
-    /// when one that could not run is tried again.
-    e2e: e2e::E2eWaits,
+    /// The port for running a queue entry’s e2e on the host.
+    run_e2e: Option<RunE2ePort>,
     /// 計画管理's state.
     planning: PlanningState,
     /// 観測と分析's state.
@@ -1854,27 +1853,18 @@ enum Phase {
     Exiting(ExitWatch),
     /// A resumed session of a `needs_session` run (ADR-0019).
     Resume(ResumeWatch),
-    /// A run to land (a passed review, or an approved resolved resume)
-    /// waits for the single integration slot, keeping its lease.
-    /// Missing run.env programs keep the lease here without taking the
-    /// integration slot; a later pass finding them starts landing. Drain or
-    /// stopped claims release the lease instead of waiting, for adoption;
-    /// handoff retains it for the next process. An approve_landing land
-    /// answer still closes its ask and queues the run immediately; only
-    /// start_approved_landings waits for the programs.
+    /// An owned run being returned to the shared landing queue. A
+    /// handoff may carry the outstanding lease to the next process.
     AwaitingSlot,
     /// A passed run that changes an agent's definition waits, its session
     /// open and its lease and slot kept, for the dev of the landing
     /// branch's cases before its precheck (ADR-t1728-1 decision 10).
     AgentEval(eval_gate::EvalGateWatch),
-    /// A passed run waits for its e2e to start (ADR-t1233-2): another
-    /// run's e2e runs, one that could not run waits to be tried again, or a
-    /// handoff starts none. Like `AwaitingSlot`, a handoff need not wait
-    /// for it: the next process rebuilds the run as an adopted one, which
-    /// waits for the slot again.
-    AwaitingE2e,
+    /// The selected entry leases its worktree and holds the landing turn
+    /// until its next step starts e2e or a handoff takes over the lease.
+    AwaitingE2e(Option<crate::application::heavy_turn::Turn>),
     /// The e2e of a passed run runs on the host off the loop before it
-    /// lands (ADR-t1233-2); the run keeps its lease and slot.
+    /// lands; its lease protects the worktree while it uses the landing budget.
     E2e(e2e::E2eWatch),
     /// The run lands off the loop, like validation; the landing releases
     /// the lease itself.
@@ -1928,7 +1918,7 @@ impl Phase {
             Self::Exiting(_) => P::Exiting,
             Self::AwaitingSlot => P::AwaitingSlot,
             Self::AgentEval(_) => P::AgentEval,
-            Self::AwaitingE2e => P::AwaitingE2e,
+            Self::AwaitingE2e(_) => P::AwaitingE2e,
             Self::E2e(_) => P::E2e,
         }
     }
@@ -1957,7 +1947,7 @@ impl Phase {
             | Phase::Exiting(_)
             | Phase::Resume(_)
             | Phase::AwaitingSlot
-            | Phase::AwaitingE2e => false,
+            | Phase::AwaitingE2e(_) => false,
         }
     }
     /// The phase `run_phase_changed` records for this one, whose tags are
@@ -1981,7 +1971,7 @@ impl Phase {
             Phase::Resume(watch) => stages::in_slot_wait(Recorded::Resume, watch.awaits_answer),
             Phase::AwaitingSlot => Recorded::AwaitingSlot,
             Phase::AgentEval(_) => Recorded::AgentEval,
-            Phase::AwaitingE2e => Recorded::AwaitingE2e,
+            Phase::AwaitingE2e(_) => Recorded::LandingQueue,
             Phase::E2e(_) => Recorded::E2e,
             Phase::Landing(_) => Recorded::Landing,
             Phase::Recovery(_) => Recorded::Recovery,
@@ -2580,8 +2570,12 @@ mod tests {
             );
         }
         assert_eq!(
-            crate::domain::disk::disk_usage(super::Phase::AwaitingE2e.disk_phase(), true, true)
-                .stage,
+            crate::domain::disk::disk_usage(
+                super::Phase::AwaitingE2e(None).disk_phase(),
+                true,
+                true
+            )
+            .stage,
             DiskStage::Worker
         );
         assert_eq!(
@@ -2610,7 +2604,7 @@ mod tests {
         assert!(!offered_for_room(&Phase::AwaitingSlot, false, false, true));
         for phase in [
             Phase::Landing(None),
-            Phase::AwaitingE2e,
+            Phase::AwaitingE2e(None),
             Phase::Validating(None, None),
             Phase::ReviewHeld {
                 session: None,
