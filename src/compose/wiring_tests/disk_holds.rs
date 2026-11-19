@@ -94,7 +94,13 @@ fn below_the_reserve_no_run_is_claimed_and_with_room_a_new_queue_claims_one_at_a
 
     wiring.free.store(ROOM, Ordering::SeqCst);
     wiring.supervise_once();
-    assert_eq!(queue_payloads(&queue, "claim_held").len(), 1);
+    let held = queue_payloads(&queue, "claim_held");
+    assert_eq!(
+        held.iter()
+            .filter(|hold| hold["reason"] == "disk_space")
+            .count(),
+        1
+    );
     let first = queue.show(first).unwrap();
     let second = queue.show(second).unwrap();
     for detail in [&first, &second] {
@@ -694,16 +700,17 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
         "an ended run has no disk stage to measure"
     );
     let mut queue = wiring.queue();
-    let held = queue_payloads(&queue, "claim_held");
-    assert!(
-        held.iter().all(|hold| hold["reason"] == "disk_space"),
-        "{held:?}"
-    );
+    // Ordering waits may follow this hold. Its measurements describe
+    // only the wait for capacity while the first worker was moving.
+    let held = queue_payloads(&queue, "claim_held")
+        .into_iter()
+        .find(|hold| hold["reason"] == "disk_space")
+        .expect("a hold while the worker was moving");
     assert_eq!(
-        held[0]["threshold"],
+        held["threshold"],
         serde_json::json!((5 * GIB + 3 * EXPECTED) as f64)
     );
-    let disk = &held[0]["disk"];
+    let disk = &held["disk"];
     assert_eq!(disk["expected"], EXPECTED);
     assert_eq!(disk["sample_count"], 1);
     assert_eq!(disk["moving"], 1);
@@ -717,12 +724,12 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
     assert_eq!(disk["integrators"], 0);
     assert_eq!(disk["integrator_expected"], EXPECTED);
     assert!(
-        held[0]["message"].as_str().unwrap().contains(
+        held["message"].as_str().unwrap().contains(
             "stages worker 1, waiting 0, integrator 0; W 10.0 GiB, I 10.0 GiB, U 10.0 GiB"
         )
     );
     assert_eq!(disk["claims_wait_reason"], Value::Null);
-    let message = held[0]["message"].as_str().unwrap();
+    let message = held["message"].as_str().unwrap();
     assert!(
         message.contains("expected 10.0 GiB (recent; samples 1)"),
         "{message}"

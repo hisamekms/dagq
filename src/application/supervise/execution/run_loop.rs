@@ -704,7 +704,11 @@ impl Supervisor<'_> {
                     self.note_handoff_drain(stopping);
                 }
                 if let Some(binary) = self.registration.handoff().map(str::to_owned) {
-                    self.sample_candidates(self.claim.parallel, true);
+                    self.sample_candidates(
+                        self.claim.parallel,
+                        ClaimPassEnd::blocked(admission::Blocked::Handoff),
+                        None,
+                    );
                     // A landing recheck in progress is waited for: its
                     // command would go on in the scratch worktree the next
                     // process uses (ADR-0068). None starts meanwhile (this
@@ -808,10 +812,14 @@ impl Supervisor<'_> {
                 HashSet::new()
             };
             if self.claim.claiming && !stopping {
-                let held = self.fill_slots(self.claim.parallel, options.sweep_interval)?;
-                self.sample_candidates(self.claim.parallel, held);
+                self.fill_slots(self.claim.parallel, options.sweep_interval)?;
             } else {
-                self.sample_candidates(self.claim.parallel, true);
+                let reason = if stopping {
+                    admission::Blocked::Draining
+                } else {
+                    admission::Blocked::ProvisioningFailed
+                };
+                self.sample_candidates(self.claim.parallel, ClaimPassEnd::blocked(reason), None);
                 // A draining supervisor still frees the integration slot a
                 // dead landing holds: its own runs waiting to land, and so
                 // the drain, would wait for it forever (task 1118).

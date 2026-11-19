@@ -34,6 +34,22 @@ struct ClaimPass {
     trial: WorkerTrial,
     /// The pass's gates and its remaining disk budget for new claims.
     resources: Resources,
+    end: ClaimPassEnd,
+    started: bool,
+}
+
+impl ClaimPass {
+    fn no_candidate(&self, any_candidates: bool) -> ClaimPassEnd {
+        if self.started {
+            ClaimPassEnd::default()
+        } else {
+            ClaimPassEnd::blocked(if any_candidates {
+                Blocked::CandidatesDeferred
+            } else {
+                Blocked::NoCandidates
+            })
+        }
+    }
 }
 
 /// How a claim loop of a fill pass ended.
@@ -48,11 +64,10 @@ pub(super) enum ClaimStep {
 impl Supervisor<'_> {
     /// Adopt the runs other supervisors left behind, then claim and
     /// provision candidates until every slot is taken or nothing is
-    /// claimable. Returns whether claims were held, for the KPI sample
-    /// ([`ClaimPassEnd::claims_held`]).
+    /// claimable. Records the decision for status and KPI.
     /// `main` is reread per claim so a task released by
     /// `integrate` starts from the main that contains its predecessor.
-    pub(super) fn fill_slots(&mut self, parallel: usize, sweep_interval: Duration) -> Result<bool> {
+    pub(super) fn fill_slots(&mut self, parallel: usize, sweep_interval: Duration) -> Result<()> {
         const CALLER: &str = "claim.fill_slots";
         let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         // A run that waits for a person is adopted without a free slot
@@ -198,7 +213,10 @@ impl Supervisor<'_> {
             service_down: !self.host.service_up(),
             ..gates_only
         };
-        if admission::probe(SlotKind::Claim, claim_gates).is_none() {
+        let mut end = admission::probe(SlotKind::Claim, claim_gates)
+            .map_or_else(ClaimPassEnd::default, ClaimPassEnd::blocked);
+        let mut hold_details = None;
+        if end.reason.is_none() {
             // Read once per pass, so turning the trial on or off takes
             // effect without a restart; a file that cannot be read
             // claims outside it (provisioning reports the file's error).
@@ -210,31 +228,38 @@ impl Supervisor<'_> {
                 WorkerTrial::default()
             });
             // The runs in flight go on; only new claims wait (task 327).
-            let resources = self.read_claim_resources(claim_gates)?;
-            if admission::probe(SlotKind::Claim, resources).is_some() {
+            let (resources, details) = self.read_claim_resources(claim_gates);
+            hold_details = details;
+            if let Some(reason) = admission::probe(SlotKind::Claim, resources) {
+                end = ClaimPassEnd::blocked(reason);
                 // Neither provider can take a worker: the candidates are
                 // deferred for it too (ADR-t813-2 decision 6).
                 if self.routes().is_empty() {
                     self.claimable(&graph, None, &trial.providers)?;
                 }
             } else {
-                let providers = trial.providers.clone();
-                claims = Some(ClaimPass {
+                // Only while there is room for a claim, as the claim loop
+                // reads the candidates only then.
+                let capacity = self.admission_capacity(parallel)?;
+                let reason = admission::probe(SlotKind::Claim, capacity);
+                let mut pass = ClaimPass {
                     spaced_since,
                     host: None,
                     plugin: None,
                     trial,
                     resources,
-                });
-                // Only while there is room for a claim, as the claim loop
-                // reads the candidates only then.
-                let capacity = self.admission_capacity(parallel)?;
-                if admission::probe(SlotKind::Claim, capacity).is_none() {
+                    end: ClaimPassEnd::default(),
+                    started: false,
+                };
+                if let Some(reason) = reason {
+                    pass.end = ClaimPassEnd::blocked(reason);
+                } else {
                     // A held task is no candidate (the ready query leaves
                     // it out); its record says why (ADR-t1879-1).
                     self.note_held_claims()?;
                     free_slot = true;
-                    let claimable = self.claimable(&graph, None, &providers)?;
+                    let claimable = self.claimable(&graph, None, &pass.trial.providers)?;
+                    pass.end = pass.no_candidate(!graph.candidates.is_empty());
                     // One transaction loop per effective-priority band.
                     // The ready order, including aging, is reread in it.
                     let mut priorities = HashSet::new();
@@ -245,12 +270,12 @@ impl Supervisor<'_> {
                         }
                     }
                 }
+                claims = Some(pass);
             }
         }
         if !free_slot {
             self.claim.defer.no_free_slot();
         }
-        let may_claim = claims.is_some();
         // The claims of one priority run together: the claim loop takes
         // every candidate of that priority or higher, in its own order.
         let mut preceding_priority = None;
@@ -269,6 +294,12 @@ impl Supervisor<'_> {
             let mut starts = decision.starts.into_iter();
             let Some(candidate) = starts.next() else {
                 for (candidate, reason) in decision.blocked {
+                    if matches!(candidate.item, LineItem::Claim)
+                        && let Some(pass) = claims.as_mut()
+                        && !pass.started
+                    {
+                        pass.end = ClaimPassEnd::blocked(reason);
+                    }
                     if let LineItem::Resume(resume) = candidate.item
                         && reason == Blocked::WorkerSlot
                     {
@@ -312,14 +343,29 @@ impl Supervisor<'_> {
         }
         // The slots as the pass leaves them.
         self.note_admission_slots_full(parallel)?;
-        Ok(ClaimPassEnd {
-            may_claim,
-            claiming: self.claim.claiming,
-            landing_resolved: !self.landing.unresolved,
-            route_left: !self.routes().is_empty(),
+        if let Some(pass) = claims {
+            end = pass.end;
+            if !self.claim.claiming {
+                end = ClaimPassEnd::blocked(Blocked::ProvisioningFailed);
+            } else if self.routes().is_empty() && !end.claims_held() {
+                end = ClaimPassEnd::blocked(Blocked::NoProvider);
+            }
         }
-        .claims_held())
+        // A cleanup already reclaiming space may relieve this wait before
+        // it becomes a hold interval. Its reason is still in the sample.
+        let hold = if self.host.disk_cleaning()
+            && hold_details
+                .as_ref()
+                .is_some_and(|hold| hold.reason == claim_hold::HoldReason::DiskSpace)
+        {
+            None
+        } else {
+            self.with_env(|env| env.claim_hold_transition(end, hold_details.as_ref()))?
+        };
+        self.sample_candidates(parallel, end, hold);
+        Ok(())
     }
+
     pub(super) fn admission_gates(&self) -> Gates {
         Gates {
             ci: self.observation.ci().held(),
@@ -386,7 +432,10 @@ impl Supervisor<'_> {
                 gates: self.admission_gates(),
                 ..pass.resources
             };
-            if admission::probe(SlotKind::Claim, resources).is_some() {
+            if let Some(reason) = admission::probe(SlotKind::Claim, resources) {
+                if !pass.started {
+                    pass.end = ClaimPassEnd::blocked(reason);
+                }
                 return Ok(ClaimStep::Stop);
             }
             // Highest effective priority, then most-releasing, then lowest
@@ -408,6 +457,7 @@ impl Supervisor<'_> {
             let mut order = claimable.order.clone();
             order.retain(|id| effective.get(id).is_some_and(|priority| *priority >= floor));
             if order.is_empty() {
+                pass.end = pass.no_candidate(!graph.candidates.is_empty());
                 return Ok(ClaimStep::Next);
             }
             // While the load hold is on, a claim waits for the spacing
@@ -435,12 +485,10 @@ impl Supervisor<'_> {
                     ..resources
                 },
             );
-            if !decision.starts_work() {
-                if decision
-                    .blocked
-                    .first()
-                    .is_some_and(|(_, reason)| *reason == Blocked::ClaimSpacing)
-                {
+            if let Some((_, reason)) = decision.blocked.first() {
+                pass.end = ClaimPassEnd::blocked(*reason);
+                if *reason == Blocked::ClaimSpacing {
+                    pass.end.spacing_secs = spacing;
                     if pass.spaced_since.is_none() {
                         info!(
                             event = "claim_spaced",
@@ -477,6 +525,7 @@ impl Supervisor<'_> {
                             event = "claim_landing_branch_unresolved",
                             "claim held after the landing branch stopped resolving during the pass"
                         );
+                        pass.end = ClaimPassEnd::blocked(Blocked::LandingBranch);
                         return Ok(ClaimStep::Stop);
                     }
                     return Err(error);
@@ -534,11 +583,16 @@ impl Supervisor<'_> {
                 &self.routes(),
             )? {
                 ClaimOutcome::Claimed { run } => *run,
-                ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
+                ClaimOutcome::NoReadyTask => {
+                    pass.end = pass.no_candidate(false);
+                    return Ok(ClaimStep::Next);
+                }
             };
             if let Some(left) = pass.resources.disk_claims.as_mut() {
                 *left = left.saturating_sub(1);
             }
+            pass.started = true;
+            pass.end = ClaimPassEnd::default();
             self.claim.defer.claimed();
             if self.provision_claimed(&run, attributes.load_avg)? == ClaimStep::Stop {
                 return Ok(ClaimStep::Stop);
@@ -599,14 +653,19 @@ impl Supervisor<'_> {
     /// Record `candidates_sampled` (ADR-0051 decision 3) when this pass's
     /// claimable ready tasks (by the rule's order, the deferred ones
     /// included: [`CandidatesSample::candidates`]), free slots or ready
-    /// tasks or whether claims are held differ from the sample this process
+    /// tasks or the admission decision differ from the sample this process
     /// recorded last, a draining or handing-off pass included, and on its
     /// first pass ([`ObservationState::record_candidates`]).
-    pub(super) fn sample_candidates(&mut self, parallel: usize, claims_held: bool) {
+    pub(super) fn sample_candidates(
+        &mut self,
+        parallel: usize,
+        end: ClaimPassEnd,
+        hold: Option<(EventKind, Value)>,
+    ) {
         let sample = self.queue.graph_input().map(|input| {
             let graph = dependency_graph(input, None);
             CandidatesSample {
-                claims_held,
+                end,
                 candidates: graph.candidates.len(),
                 free_slots: parallel.saturating_sub(self.used_slots()),
                 ready: graph
@@ -616,7 +675,7 @@ impl Supervisor<'_> {
                     .count(),
             }
         });
-        self.on_observation(|observation, env| observation.record_candidates(env, sample));
+        self.on_observation(|observation, env| observation.record_candidates(env, sample, hold));
     }
     /// Whether the free disk space this pass read lets no claim go
     /// ([`crate::domain::disk::DiskState::claims`]): short of what a claim
@@ -626,14 +685,15 @@ impl Supervisor<'_> {
     pub(super) fn claims_short_of_disk(&mut self) -> Result<bool> {
         Ok(self.host.disk_claims() == Some(0))
     }
-    /// Read the disk verdict and record the load/disk/authentication
-    /// hold transition at the existing claim observation boundary.
-    fn read_claim_resources(&mut self, mut resources: Resources) -> Result<Resources> {
+    /// Carry the measurements for a hold alongside Admission's inputs.
+    fn read_claim_resources(&self, mut resources: Resources) -> (Resources, Option<ClaimHold>) {
         let decision = self.host.disk_decision();
         let short = decision.as_ref().and_then(|d| d.claim_hold());
-        let cleaning = self.host.disk_cleaning() && short.is_some();
-        if !cleaning {
-            let hold = admission::claim_hold(
+        let hold = if self.host.disk_cleaning() && short.is_some() {
+            // Cleanup is already acting on the disk shortage.
+            short
+        } else {
+            admission::claim_hold(
                 short,
                 &HoldInputs {
                     queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
@@ -644,14 +704,15 @@ impl Supervisor<'_> {
                     max_load: self.host.max_load(),
                     ..HoldInputs::default()
                 },
-            );
-            self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))?;
-            resources.claim_hold = hold.map(|hold| admission::hold_reason(hold.reason));
-        }
+            )
+        };
+        resources.claim_hold = hold
+            .as_ref()
+            .map(|hold| admission::hold_reason(hold.reason));
         if let Some(decision) = decision {
             resources = resources.with_disk(&decision);
         }
-        Ok(resources)
+        (resources, hold)
     }
 
     /// Check the programs `[run.env]` names on this process's PATH

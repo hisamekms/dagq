@@ -307,32 +307,100 @@ pub fn transition_of(
     token: &LeaseToken,
     live: impl Fn(&str) -> bool,
 ) -> Option<(EventKind, Value)> {
+    transition_payload(
+        kinds,
+        hold.map(|hold| {
+            (hold.reason.as_str(), None, move || {
+                hold_payload(kinds, hold, token)
+            })
+        }),
+        last,
+        token,
+        live,
+    )
+}
+
+fn hold_payload(kinds: HoldKinds, hold: &ClaimHold, token: &LeaseToken) -> Value {
+    let mut payload = json!({
+        "reason": hold.reason,
+        "value": hold.value,
+        "threshold": hold.threshold,
+        "message": hold.message_for(kinds),
+        "supervisor": token,
+    });
+    if let Some(needs) = hold.disk {
+        payload["disk"] = json!(needs);
+    }
+    if let Some(status) = &hold.disk_status {
+        payload["disk_status"] = json!(status);
+        payload["message"] = json!(format!("{}\n{}", hold.message_for(kinds), status.message));
+    }
+    if let Some(ask_id) = hold.ask_id {
+        payload["ask_id"] = json!(ask_id);
+    }
+    payload
+}
+
+/// Record the queue-wide resource hold selected by Admission. Other
+/// reasons belong to the supervisor's candidate sample, including spacing.
+pub fn admission_transition(
+    end: super::kpi::ClaimPassEnd,
+    details: Option<&ClaimHold>,
+    last: Option<&RunEvent>,
+    token: &LeaseToken,
+    live: impl Fn(&str) -> bool,
+) -> Option<(EventKind, Value)> {
+    use super::admission::{Blocked, hold_reason};
+    let record = match end.reason {
+        Some(reason @ (Blocked::Disk(_) | Blocked::Load | Blocked::Authentication)) => {
+            let name = reason.name();
+            let details = details.filter(|hold| hold_reason(hold.reason) == reason);
+            let legacy_reason = details.map_or(name, |hold| hold.reason.as_str());
+            Some((legacy_reason, Some(name), move || {
+                let mut payload = details.map_or_else(
+                    || json!({"reason": name, "message": format!("claims held ({name})"), "supervisor": token}),
+                    |hold| hold_payload(CLAIMS, hold, token),
+                );
+                payload["admission_reason"] = json!(name);
+                payload
+            }))
+        }
+        None
+        | Some(
+            Blocked::WorkerSlot
+            | Blocked::Returning
+            | Blocked::ClaimSpacing
+            | Blocked::NoCandidates
+            | Blocked::CandidatesDeferred
+            | Blocked::NoProvider
+            | Blocked::ProvisioningFailed,
+        ) => None,
+        // Local gates do not establish that the queue's resources are clear.
+        // A branch that stops resolving during the pass leaves the hold alone too.
+        Some(_) => return None,
+    };
+    transition_payload(CLAIMS, record, last, token, live)
+}
+
+fn transition_payload(
+    kinds: HoldKinds,
+    record: Option<(&str, Option<&str>, impl FnOnce() -> Value)>,
+    last: Option<&RunEvent>,
+    token: &LeaseToken,
+    live: impl Fn(&str) -> bool,
+) -> Option<(EventKind, Value)> {
     let held = last.filter(|event| event.kind == kinds.held);
-    let held_reason = in_place(kinds, last, |holder| {
+    let in_place = in_place(kinds, last, |holder| {
         holder == token.as_str() || live(holder)
-    })
-    .and_then(|event| text(event, "reason"));
-    match hold {
-        Some(hold) if held_reason != Some(hold.reason.as_str()) => {
-            let mut payload = json!({
-                "reason": hold.reason,
-                "value": hold.value,
-                "threshold": hold.threshold,
-                "message": hold.message_for(kinds),
-                "supervisor": token,
-            });
-            if let Some(needs) = hold.disk {
-                payload["disk"] = json!(needs);
-            }
-            if let Some(status) = &hold.disk_status {
-                payload["disk_status"] = json!(status);
-                payload["message"] =
-                    json!(format!("{}\n{}", hold.message_for(kinds), status.message));
-            }
-            if let Some(ask_id) = hold.ask_id {
-                payload["ask_id"] = json!(ask_id);
-            }
-            Some((kinds.held, payload))
+    });
+    match record {
+        Some((reason, admission_reason, payload))
+            if !in_place.is_some_and(|event| {
+                text(event, "reason") == Some(reason)
+                    && text(event, "admission_reason") == admission_reason
+            }) =>
+        {
+            Some((kinds.held, payload()))
         }
         // Another live supervisor's own hold is its to end.
         None if kinds.own
@@ -342,10 +410,13 @@ pub fn transition_of(
         {
             None
         }
-        None if held.is_some() => Some((
-            kinds.resumed,
-            json!({"reason": held.and_then(|event| text(event, "reason")), "supervisor": token}),
-        )),
+        None if held.is_some() => {
+            let mut payload = json!({"reason": held.and_then(|event| text(event, "reason")), "supervisor": token});
+            if let Some(reason) = held.and_then(|event| text(event, "admission_reason")) {
+                payload["admission_reason"] = json!(reason);
+            }
+            Some((kinds.resumed, payload))
+        }
         _ => None,
     }
 }
@@ -725,6 +796,159 @@ mod tests {
             created_at: format!("2026-09-26T01:{at}.000Z"),
             actor: None,
         }
+    }
+
+    #[test]
+    fn admission_disk_hold_and_candidate_sample_share_the_reason() {
+        use crate::domain::{
+            admission::{self, Resources},
+            disk::ClaimsWaitReason,
+            kpi::{CandidatesSample, ClaimPassEnd},
+            slot_order::SlotKind,
+        };
+        let token = LeaseToken::new("s");
+        for (disk_wait, expected) in [
+            (None, "Disk"),
+            (Some(ClaimsWaitReason::LandingFirst), "LandingFirst"),
+            (Some(ClaimsWaitReason::NoSamples), "NoSamples"),
+        ] {
+            let reason = admission::probe(
+                SlotKind::Claim,
+                Resources {
+                    free_slots: 1,
+                    disk_claims: Some(0),
+                    disk_wait,
+                    ..Resources::default()
+                },
+            )
+            .unwrap();
+            let end = ClaimPassEnd::blocked(reason);
+            let sample = CandidatesSample {
+                end,
+                ..CandidatesSample::default()
+            }
+            .transition(None)
+            .unwrap();
+            let (kind, payload) = admission_transition(end, None, None, &token, |_| true).unwrap();
+            assert_eq!(kind, EventKind::ClaimHeld);
+            assert_eq!(payload["admission_reason"], expected);
+            assert_eq!(sample["admission_reason"], expected);
+            assert_eq!(sample["claims_held"], true);
+            let opened = event(1, CLAIM_HELD, payload, "00:00");
+            assert_eq!(
+                admission_transition(end, None, Some(&opened), &token, |_| true),
+                None
+            );
+            let (kind, payload) =
+                admission_transition(ClaimPassEnd::default(), None, Some(&opened), &token, |_| {
+                    true
+                })
+                .unwrap();
+            assert_eq!(kind, EventKind::ClaimResumed);
+            assert_eq!(payload["admission_reason"], expected);
+        }
+    }
+
+    #[test]
+    fn a_gate_blocked_pass_leaves_queue_resource_holds_in_place() {
+        use crate::domain::{admission::Blocked, kpi::ClaimPassEnd};
+
+        for hold_reason in ["load_average", "disk_space"] {
+            let held = event(
+                1,
+                CLAIM_HELD,
+                json!({"reason": hold_reason, "supervisor": "a"}),
+                "00:00",
+            );
+            for reason in [
+                Blocked::Ci,
+                Blocked::Environment,
+                Blocked::LandingBranch,
+                Blocked::RepositoryConfig,
+                Blocked::QueueService,
+            ] {
+                for supervisor in ["a", "b"] {
+                    assert_eq!(
+                        admission_transition(
+                            ClaimPassEnd::blocked(reason),
+                            None,
+                            Some(&held),
+                            &LeaseToken::new(supervisor),
+                            |owner| owner == "a",
+                        ),
+                        None,
+                        "{reason:?} in {supervisor} must leave the {hold_reason} hold in place",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spacing_is_sampled_without_opening_a_stats_or_observer_hold() {
+        use crate::domain::{
+            admission::{self, Resources},
+            kpi::{CandidatesSample, ClaimPassEnd},
+            live_alerts::{self, LiveInputs},
+            slot_order::SlotKind,
+            stats::SlotSnapshot,
+        };
+        let reason = admission::probe(
+            SlotKind::Claim,
+            Resources {
+                free_slots: 1,
+                spacing_secs: Some(30),
+                last_claim_ms: Some(1_000),
+                now_ms: 2_000,
+                ..Resources::default()
+            },
+        )
+        .unwrap();
+        let end = ClaimPassEnd {
+            spacing_secs: Some(30),
+            ..ClaimPassEnd::blocked(reason)
+        };
+        assert_eq!(
+            admission_transition(end, None, None, &LeaseToken::new("s"), |_| true),
+            None
+        );
+        let payload = CandidatesSample {
+            end,
+            ..CandidatesSample::default()
+        }
+        .transition(None)
+        .unwrap();
+        assert_eq!(payload["admission_reason"], "ClaimSpacing");
+        assert_eq!(payload["claims_held"], false);
+        assert_eq!(payload["claim_spacing"], 30);
+        let events = [event(
+            1,
+            crate::domain::kpi::CANDIDATES_SAMPLED,
+            payload,
+            "00:00",
+        )];
+        let stats = claim_holds(&events, EventId::new(0), EventId::new(1), 3_000, |_| true);
+        assert_eq!(stats.count, 0);
+        assert!(stats.held.is_none());
+        let observed = live_alerts::judge(
+            &events,
+            3,
+            &LiveInputs {
+                slots: SlotSnapshot {
+                    free_slots: 1,
+                    candidates: 1,
+                    ready: 1,
+                },
+                config: super::super::stats::StallConfigReport {
+                    config: Default::default(),
+                    source: "default",
+                },
+                runs: vec![],
+                outliers: Default::default(),
+                positions: Default::default(),
+            },
+        );
+        assert!(observed.slot_alerts.is_empty());
     }
 
     /// An own hold is recorded once where it starts, again only for
@@ -1130,6 +1354,15 @@ mod tests {
         assert_eq!(in_place(CLAIMS, Some(&held), |holder| holder == "t"), None);
         assert_eq!(in_place(CLAIMS, Some(&resumed), |_| true), None);
         assert_eq!(in_place(CLAIMS, None, |_| true), None);
+        let old_stats = claim_holds(
+            &[held.clone(), resumed],
+            EventId::new(0),
+            EventId::new(2),
+            i64::MAX,
+            |_| true,
+        );
+        assert_eq!(old_stats.by_reason["disk_space"].secs, 10);
+        assert!(old_stats.held.is_none());
         let unnamed = event(3, CLAIM_HELD, json!({"reason": "disk_space"}), "00:00");
         assert_eq!(in_place(CLAIMS, Some(&unnamed), |_| true), None);
         // The supervisor that records reads it by the same rule: a hold

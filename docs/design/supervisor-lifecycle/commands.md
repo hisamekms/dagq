@@ -85,6 +85,8 @@ related:
 - `status`・`doctor --full`・`watch`のsupervisorの項目は同じ基礎の情報（`application::health::SupervisorHealth`）から作り、`status`はそれにslotと待ちと控えの欄を足す。
   `status`と`doctor`は一覧に並べるrunを同じ選び方で選ぶ。
   その選び方は表示のためだけのもので、自動の復旧・adopt・`stats`は使わない。
+- `status`と`candidates`は、生きているsupervisorが記録した最新のclaimの理由を示す。
+  claimの間隔を待つ理由も、その記録から読む（[claimの間隔](claim-hold.md#claimの間隔)）。
 - 表示のコマンドはstaleな登録とleaseを報告するだけで消さない。
 - attentionは全てinbox宛てで、plannerはattentionを受けない。
 - `events`と`watch`は1つのeventの判定を返し、`status`は今の状態から判定するので、両者が食い違うときは`status`の判定を正とする。

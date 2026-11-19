@@ -2,7 +2,7 @@
 //! claims and the unfinished runs (observation and analysis).
 
 use super::*;
-use crate::domain::EventKind;
+use crate::{application::claim_view, domain::EventKind};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -61,6 +61,15 @@ pub fn status(
     let (runs, supervisors, waiting) =
         runs_slots_and_waits(queue, control, &registrations, &leases, now)?;
     let claim_hold = claim_hold_in_place(queue, &registrations, control, now)?;
+    let shown_claim_hold = claim_hold.as_ref().map(hold_view).or_else(|| {
+        let mut live = supervisors
+            .iter()
+            .filter(|entry| entry["registered"] == true && entry["stale"] == false);
+        let first = live.next()?;
+        (live.all(|entry| entry["claim_admission"]["claims_held"] == true))
+            .then(|| claim_view::admission_hold(&first["claim_admission"]))
+            .flatten()
+    });
     // Fetch just the newest relaxation record; both outputs share it.
     let latest_relax =
         queue.latest_queue_event(&crate::domain::disk::RELAX_KINDS.map(EventKind::as_str))?;
@@ -120,7 +129,7 @@ pub fn status(
             .collect::<Vec<_>>(),
         // The queue-wide hold on new claims in place now, whichever
         // supervisor recorded it, null while none holds them.
-        "claim_hold": claim_hold.as_ref().map(hold_view),
+        "claim_hold": shown_claim_hold,
         // Active terms and provenance for every role, null after expiry or clear.
         "disk_relax": disk_relax,
         "asks": asks,
@@ -345,6 +354,13 @@ pub(super) fn slots_and_waits(
             )?,
         ),
     ];
+    let live_tokens: Vec<_> = registrations
+        .iter()
+        .zip(&health)
+        .filter(|(_, health)| !health.stale)
+        .map(|(registration, _)| registration.token.as_str())
+        .collect();
+    let admission = claim_view::admission_records(queue, &live_tokens)?;
     let supervisors = health
         .into_iter()
         .enumerate()
@@ -372,7 +388,20 @@ pub(super) fn slots_and_waits(
                     "limit": registration.max_waiting,
                     "source": registration.max_waiting_source,
                 });
-                if let Some(spacing) = claim_spacing(registration, last_claim.as_ref(), now) {
+                let decision = admission
+                    .iter()
+                    .find(|event| event.payload["supervisor"] == registration.token.as_str());
+                if let Some(decision) = decision {
+                    let view = claim_view::admission_view(decision);
+                    if let Some(hold) = claim_view::admission_hold(&view) {
+                        value["claim_hold"] = hold;
+                    }
+                    value["claim_admission"] = view;
+                }
+                if let Some(mut spacing) = claim_spacing(registration, last_claim.as_ref(), now) {
+                    if let Some(decision) = decision {
+                        claim_view::show_spacing_decision(&mut spacing, decision);
+                    }
                     value["claim_spacing"] = spacing;
                 }
                 if let Some(classes) = claim_classes(registration) {
@@ -549,9 +578,9 @@ pub(super) fn claim_spacing(
 /// queue's latest `run_env_program_missing` of a live supervisor or of none
 /// named, then each live supervisor's own holds (`ci_watch_held`,
 /// `landing_branch_unresolved`, `repository_config_held`) by its own latest record,
-/// however many the others recorded since, then each live supervisor's
-/// wait for its claim spacing. A hold no supervisor records is not shown,
-/// nor guessed at.
+/// however many the others recorded since. The candidate samples supply
+/// the admission reasons, including actual spacing waits. A registration
+/// with only legacy samples keeps its original spacing view.
 pub fn claim_holds(
     queue: &(impl crate::application::RunLog + crate::application::SupervisorReads + ?Sized),
     control: &dyn ProcessControl,
@@ -572,6 +601,8 @@ pub fn claim_holds(
         claim_hold_in_place(queue, &registrations, control, now)?,
         on(&RUN_ENV_PROGRAM_KINDS, EventKind::RunEnvProgramMissing)?,
     ];
+    let tokens: Vec<&str> = live.iter().map(|r| r.token.as_str()).collect();
+    let admission = claim_view::admission_records(queue, &tokens)?;
     let last_claim = queue.latest_event_of(event_kind::RUN_CLAIMED)?;
     let spacing = live
         .iter()
@@ -579,6 +610,12 @@ pub fn claim_holds(
             claim_spacing(registration, last_claim.as_ref(), now).map(|spacing| {
                 let mut spacing = spacing;
                 spacing["supervisor"] = json!(registration.token);
+                if let Some(decision) = admission
+                    .iter()
+                    .find(|event| event.payload["supervisor"] == registration.token.as_str())
+                {
+                    claim_view::show_spacing_decision(&mut spacing, decision);
+                }
                 spacing
             })
         })
@@ -594,10 +631,6 @@ pub fn claim_holds(
     };
     let mut records: Vec<RunEvent> = records.into_iter().flatten().filter(of_live).collect();
     // Each live supervisor's own holds, by its own latest record.
-    let tokens: Vec<&str> = live
-        .iter()
-        .map(|registration| registration.token.as_str())
-        .collect();
     for kinds in [
         crate::domain::claim_hold::REPOSITORY_CONFIG_HOLD,
         crate::domain::ci_watch::CI_WATCH_HOLD,
@@ -609,7 +642,29 @@ pub fn claim_holds(
                 .filter_map(|registration| own_held(kinds, &own, registration.token.as_str())),
         );
     }
-    Ok(held(live.is_empty(), records, spacing))
+    let decisions = admission
+        .iter()
+        .filter(|event| {
+            let reason = &event.payload["admission_reason"];
+            !reason.is_null()
+                && reason != "ClaimSpacing"
+                && !records.iter().any(|record| {
+                    record.kind == EventKind::ClaimHeld
+                        && record.payload["supervisor"] == event.payload["supervisor"]
+                        && record.payload["admission_reason"] == *reason
+                })
+        })
+        .map(|event| {
+            json!({
+                "reason": "claim_admission",
+                "since": event.created_at,
+                "record": claim_view::admission_view(event),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut view = held(live.is_empty(), records, spacing);
+    view.extend(decisions);
+    Ok(view)
 }
 
 /// Whether the supervisor of `registration` is alive at `now` with a

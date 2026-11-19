@@ -138,11 +138,50 @@ pub enum Blocked {
     Load,
     Authentication,
     ClaimSpacing,
+    NoCandidates,
+    CandidatesDeferred,
+    NoProvider,
+    ProvisioningFailed,
+    Draining,
+    Handoff,
     RepositoryConfig,
     QueueService,
     LandingHeld,
     LandingInProgress,
     LandingTurn,
+}
+
+impl Blocked {
+    /// Stable names in the claim observation records. Disk ordering waits
+    /// keep their specific reason as the name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Disk(Some(ClaimsWaitReason::LandingFirst)) => "LandingFirst",
+            Self::Disk(Some(ClaimsWaitReason::NoSamples)) => "NoSamples",
+            Self::Disk(None) => "Disk",
+            Self::TaskHold => "TaskHold",
+            Self::Answer => "Answer",
+            Self::Ci => "Ci",
+            Self::Environment => "Environment",
+            Self::LandingBranch => "LandingBranch",
+            Self::WorkerSlot => "WorkerSlot",
+            Self::Returning => "Returning",
+            Self::Load => "Load",
+            Self::Authentication => "Authentication",
+            Self::ClaimSpacing => "ClaimSpacing",
+            Self::NoCandidates => "NoCandidates",
+            Self::CandidatesDeferred => "CandidatesDeferred",
+            Self::NoProvider => "NoProvider",
+            Self::ProvisioningFailed => "ProvisioningFailed",
+            Self::Draining => "Draining",
+            Self::Handoff => "Handoff",
+            Self::RepositoryConfig => "RepositoryConfig",
+            Self::QueueService => "QueueService",
+            Self::LandingHeld => "LandingHeld",
+            Self::LandingInProgress => "LandingInProgress",
+            Self::LandingTurn => "LandingTurn",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -164,7 +203,7 @@ pub struct Resources {
 }
 
 /// The existing hold record and its admission reason share the load and
-/// authentication inputs. Disk ordering waits have no hold record.
+/// authentication inputs. Disk ordering waits come from the disk budget.
 pub fn claim_hold(
     disk: Option<ClaimHold>,
     authentication: &HoldInputs,

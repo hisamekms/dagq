@@ -101,8 +101,8 @@ taskは`completed`（着地したrunがあればそのpushの終わり）か`can
 
 taskの台帳は`task_created`から始まる。
 claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重ねて読む（ADR-t1662-1決定6）。
-区間の行は`domain::pre_claim::pre_claim_intervals`が作る。
-どの区間も始まりを書いた1つのsupervisorに属し、終わりは1通りに決まる（区間の種類ごとの始まりと終わりは`domain::pre_claim`のmodule doc）。
+区間は始まりを書いたsupervisorに属し、終わりは一意に決まる（`domain::pre_claim::pre_claim_intervals`）。
+候補の標本は控えとAdmissionの理由を共有し、間隔の待ちは控えの区間に数えない。
 `run_claimed`の欄と意味は`domain::claim_facts`のmodule docが持つ。
 
 ### supervisorの一生

@@ -198,6 +198,64 @@ pub fn claim_view<T>(
     }
 }
 
+/// The latest Admission observation for each live supervisor. Older
+/// samples still count for KPI and leave the legacy status views in use.
+pub(crate) fn admission_records(
+    queue: &(impl crate::application::RunLog + ?Sized),
+    tokens: &[&str],
+) -> anyhow::Result<Vec<crate::domain::RunEvent>> {
+    use crate::domain::{EventKind, claim_hold::CLAIMS};
+    let mut records =
+        queue.latest_events_by_supervisor(&[crate::domain::kpi::CANDIDATES_SAMPLED], tokens)?;
+    records.retain(|event| event.payload.get("admission_reason").is_some());
+    if !records.is_empty()
+        && let Some(resumed) = queue.latest_queue_event(&CLAIMS.kinds())?
+        && resumed.kind == EventKind::ClaimResumed
+    {
+        // An older candidate sample cannot reopen a queue-wide resource
+        // hold. The local decisions of other supervisors still apply.
+        records.retain(|event| {
+            event.id > resumed.id
+                || !matches!(
+                    event.payload["admission_reason"].as_str(),
+                    Some("Disk" | "LandingFirst" | "NoSamples" | "Load" | "Authentication")
+                )
+        });
+    }
+    Ok(records)
+}
+
+/// The decision and its timestamp, shared by status and candidates.
+pub(crate) fn admission_view(event: &crate::domain::RunEvent) -> serde_json::Value {
+    let mut view = event.payload.clone();
+    view["since"] = serde_json::json!(event.created_at);
+    view
+}
+
+/// A supervisor-local hold has no queue-wide hold event.
+pub(crate) fn admission_hold(view: &serde_json::Value) -> Option<serde_json::Value> {
+    (view["claims_held"] == true).then(|| {
+        let mut hold = view.clone();
+        hold["reason"] = hold["admission_reason"].clone();
+        hold
+    })
+}
+
+/// Whether a modern supervisor last waited for spacing. Its elapsed
+/// deadline alone says nothing about whether Admission reached that gate.
+pub(crate) fn show_spacing_decision(
+    spacing: &mut serde_json::Value,
+    event: &crate::domain::RunEvent,
+) {
+    let reason = &event.payload["admission_reason"];
+    let waiting = reason == crate::domain::admission::Blocked::ClaimSpacing.name();
+    spacing["waiting"] = serde_json::json!(waiting);
+    if waiting {
+        spacing["admission_reason"] = reason.clone();
+        spacing["secs"] = event.payload["claim_spacing"].clone();
+    }
+}
+
 /// How many task IDs each reason of [`ClaimExclusions`] lists, lowest
 /// first.
 pub const EXCLUDED_TASK_IDS: usize = 5;
@@ -507,6 +565,24 @@ pub(crate) fn disk_measured_at(clock: &dyn crate::application::Clock) -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_spacing_uses_the_recorded_wait() {
+        let mut event: crate::domain::RunEvent = serde_json::from_value(json!({
+            "id": 1, "kind": "candidates_sampled", "created_at": "2026-01-01 00:00:00",
+            "payload": {"admission_reason": "ClaimSpacing", "claims_held": false, "claim_spacing": 30},
+        })).unwrap();
+        let mut spacing = json!({"waiting": false, "secs": 30});
+        show_spacing_decision(&mut spacing, &event);
+        assert_eq!(
+            spacing,
+            json!({"waiting": true, "secs": 30, "admission_reason": "ClaimSpacing"})
+        );
+        event.payload["admission_reason"] = json!("WorkerSlot");
+        let mut spacing = json!({"waiting": true, "secs": 30});
+        show_spacing_decision(&mut spacing, &event);
+        assert_eq!(spacing, json!({"waiting": false, "secs": 30}));
+    }
 
     /// The deferrals shown under the queue-wide hold name it; with no such
     /// hold (none, or only another kind in `held`) they are left alone.

@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::disk_holds::below_the_reserve_no_run_is_claimed_and_with_room_a_new_queue_claims_one_at_a_time"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、同じ ready の2 taskが容量不足で止まり、容量回復後に先の着地を待って次をclaimすることを確かめる。区間と開始の順を実際のeventで比較するため、2 taskと容量回復前後の2回のsuperviseが必要になる。容量と順序待ちの判断はdomainのunit testで確かめる。"
+task = 5295

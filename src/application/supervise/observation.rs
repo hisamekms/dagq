@@ -173,34 +173,49 @@ impl ObservationState {
             || (drain_pushes && self.push.busy())
     }
 
-    /// Record `candidates_sampled` when `sample` differs from the sample
-    /// this process recorded last, and on its first claim pass. A failure
-    /// is logged: the sample is bookkeeping for `kpi`, and the next pass
-    /// tries again (a record kept to be sent is no failure).
+    /// Publish the hold transition and candidate sample together when both
+    /// change. A failed write is retried from the next pass's decision.
     pub(super) fn record_candidates(
         &mut self,
         env: &mut ObservationEnv<'_>,
         sample: Result<CandidatesSample>,
+        hold: Option<(EventKind, Value)>,
     ) {
         let result = sample.and_then(|sample| {
-            if let Some(mut payload) = sample.transition(self.candidates.as_ref()) {
-                payload["supervisor"] = json!(env.token);
-                // A record kept to be sent is this sample's.
-                match env
-                    .queue
-                    .record_queue_event(EventKind::CandidatesSampled, payload)
-                {
-                    Err(error) if !crate::application::supervisor_service::resend::kept(&error) => {
-                        return Err(error);
-                    }
-                    _ => {}
-                }
-                self.candidates = Some(sample);
+            let hold_log = hold.as_ref().map(|(kind, payload)| {
+                (
+                    *kind,
+                    payload["message"].as_str().unwrap_or_default().to_owned(),
+                )
+            });
+            let sampled = sample
+                .transition(self.candidates.as_ref())
+                .map(|mut payload| {
+                    payload["supervisor"] = json!(env.token);
+                    (EventKind::CandidatesSampled, payload)
+                });
+            let records: Vec<_> = hold.into_iter().chain(sampled).collect();
+            if records.is_empty() {
+                return Ok(());
             }
+            // Recompute on the next pass if the service is unavailable.
+            // Replaying an old sample could supersede a newer decision.
+            env.queue.record_queue_events(records)?;
+            match hold_log {
+                Some((EventKind::ClaimHeld, message)) => warn!("{message}"),
+                Some(_) => info!("claims resume: the queue-wide hold ended"),
+                None if sample.end.reason != self.candidates.and_then(|last| last.end.reason) => {
+                    if let Some(reason) = sample.end.reason {
+                        tracing::debug!(admission_reason = reason.name(), "new claims wait");
+                    }
+                }
+                None => {}
+            }
+            self.candidates = Some(sample);
             Ok(())
         });
         if let Err(error) = result {
-            warn!(error = %format_args!("{error:#}"), "the candidates could not be sampled: {error:#}");
+            warn!(error = %format_args!("{error:#}"), "the claim decision could not be recorded: {error:#}");
         }
     }
 }
