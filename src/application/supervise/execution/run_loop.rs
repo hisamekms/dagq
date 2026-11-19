@@ -13,6 +13,34 @@
 use super::*;
 
 impl Supervisor<'_> {
+    /// Publish only transitions. Resent records keep their original identity.
+    fn record_admission_pass(&mut self) -> Result<()> {
+        let before = self.claim.admission_stall;
+        let pass = &self.claim.admission_pass;
+        let Some(kind) = self
+            .claim
+            .admission_stall
+            .observe(pass, self.claim.admission_stall_passes)
+        else {
+            return Ok(());
+        };
+        let payload = json!({
+            "supervisor": self.registration.token(),
+            "reasons": pass.reasons(),
+        });
+        match self.queue.record_queue_event(kind, payload) {
+            Ok(_) => Ok(()),
+            Err(error) if crate::application::supervisor_service::resend::kept(&error) => {
+                warn!("{error:#}");
+                Ok(())
+            }
+            Err(error) => {
+                self.claim.admission_stall = before;
+                Err(error)
+            }
+        }
+    }
+
     /// Local files are reread before any resource measurement or claim. The
     /// compose reader resolves flags; failed reads preserve all three values.
     /// The same read's local layer is then recorded when it changed
@@ -165,6 +193,7 @@ impl Supervisor<'_> {
                         && !options.once =>
                 {
                     warn!(error = %format_args!("{error:#}"), "the queue service did not answer: no new run starts until it does: {error:#}");
+                    self.claim.admission_stall.break_streak();
                     self.unanswered.lost();
                     self.host.queue_service_unreached();
                     let reports = self.observation.reports();
@@ -364,6 +393,7 @@ impl Supervisor<'_> {
         // Why a `--once` call went on to its next pass, as last logged.
         let mut goes_on = None;
         loop {
+            self.claim.admission_pass = Default::default();
             let pass = options.passes.fetch_add(1, Ordering::SeqCst) + 1;
             // Every record of a `--once` call's pass names the pass.
             let _pass = options
@@ -419,6 +449,7 @@ impl Supervisor<'_> {
             // loop: what is held is kept for the next supervisor.
             self.held_left = !self.service.send_held()?;
             if self.service.holds_for_busy_queue() && !options.stop.load(Ordering::SeqCst) {
+                self.claim.admission_stall.break_streak();
                 if self.owner_gone_ends(options) {
                     break;
                 }
@@ -725,6 +756,9 @@ impl Supervisor<'_> {
                             .queue
                             .take_handoff(self.registration.token(), &binary)?
                         {
+                            if let Err(error) = self.record_admission_pass() {
+                                warn!(error = %format_args!("{error:#}"), "the admission pass could not be recorded before exec");
+                            }
                             let runs = self.prepare_handoff();
                             info!(
                                 "supervisor {} execs {binary}, handing over {runs} run(s)",
@@ -781,6 +815,7 @@ impl Supervisor<'_> {
                         });
                         self.agent_eval_pass(false);
                         self.agent_cases_pass(false);
+                        self.record_admission_pass()?;
                         self.tick(true, &HashSet::new())?;
                         self.unanswered.look();
                         thread::sleep(options.tick);
@@ -837,6 +872,7 @@ impl Supervisor<'_> {
                     warn!(error = %format_args!("{error:#}"), "a run returned by this drain could not start its landing: {error:#}");
                 }
             }
+            self.record_admission_pass()?;
             self.poll_observer();
             self.record_session_turns(false);
             let rechecked = self.recheck_pass();

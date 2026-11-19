@@ -69,6 +69,9 @@ impl ClaimState {
                 return Ok(());
             }
         };
+        self.admission_stall_passes = config
+            .admission_stall_passes
+            .unwrap_or(crate::domain::slot_limits::DEFAULT_ADMISSION_STALL_PASSES);
         let to = SlotLimits::resolve(self.slot_flags, &config);
         let light = config.light_changes();
         let Some(mut payload) =

@@ -177,6 +177,7 @@ pub struct LoopSettings {
     /// `[supervisor] light_changes` at the start (ADR-t1591-1), read again
     /// each pass.
     pub light_changes: crate::domain::light_slots::LightChanges,
+    pub admission_stall_passes: u32,
     /// `[provider_fallback]` at the start (ADR-t1857-1), read again each
     /// pass.
     pub provider_fallback: crate::domain::provider_switch::ProviderFallback,
@@ -1318,6 +1319,19 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         })(),
     )?
     .is_none();
+    let admission_stall = if settings.handoff_token.is_some() {
+        let latest = queue.latest_events_by_supervisor(
+            &crate::domain::admission::STALL_EVENTS,
+            &[token.as_str()],
+        )?;
+        crate::domain::admission::Stall::with_open_attention(
+            latest
+                .iter()
+                .any(|event| event.kind == EventKind::AdmissionStalled),
+        )
+    } else {
+        Default::default()
+    };
     // The heartbeat that stops sets the end's deadline at once, whatever
     // the loop does then.
     let heartbeat = {
@@ -1433,6 +1447,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             supervisor_error: None,
             repository_config_missing: false,
             light_changes: settings.light_changes.clone(),
+            admission_stall_passes: settings.admission_stall_passes,
+            admission_pass: Default::default(),
+            admission_stall,
             spaced_since: None,
             claiming: true,
             provisioning_error: None,

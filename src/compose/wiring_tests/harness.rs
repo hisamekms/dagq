@@ -687,11 +687,15 @@ impl Wiring {
     /// What `dagq status` shows of this test's queue now, attention and
     /// all, as a person reads it.
     pub(super) fn status(&self) -> Value {
+        self.status_for(None)
+    }
+
+    pub(super) fn status_for(&self, role: Option<crate::domain::SessionRole>) -> Value {
         crate::application::health::status(
             &self.queue(),
             &*self.processes,
             &*self.generators.clock,
-            None,
+            role,
             None,
             None,
         )
@@ -1378,6 +1382,7 @@ fn settings(
         limits: SlotLimits::resolve(slot_flags, &Default::default()),
         slot_flags,
         light_changes: Default::default(),
+        admission_stall_passes: crate::domain::slot_limits::DEFAULT_ADMISSION_STALL_PASSES,
         provider_fallback: crate::domain::provider_switch::ProviderFallback {
             workers: worker_fallback,
             ..Default::default()

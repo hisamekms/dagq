@@ -201,6 +201,9 @@ load・ディスク・claimの間隔の関門はすべてのclaimに効き、着
 着地の開始後は、着地で閉じるaskを答え待ちに数えない。
 hold中のrunがディスクに占めるのは現在の大きさだけとし、進行中の工程はその区切りまで続ける。
 
+進める候補と足りる資源があるのに開始しない回が続けば、始めない理由つきのattentionを一度出し、何か始まれば閉じる。
+検出の入口は `Supervisor::record_admission_pass`。
+
 ## 調査中の計画の上限
 
 Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了のSpikeか`open`のSpike起点の依頼が残るあいだ調査中の計画で、`[supervisor] max_investigations`がその同時の数を絞る（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定7）。

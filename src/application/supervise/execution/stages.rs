@@ -507,6 +507,9 @@ pub(super) struct ClaimState {
     /// waits for the spacing after the queue's latest claim (ADR-t1479-1);
     /// `None` while none waits.
     pub(super) spaced_since: Option<i64>,
+    pub(super) admission_stall_passes: u32,
+    pub(super) admission_pass: crate::domain::admission::Pass,
+    pub(super) admission_stall: crate::domain::admission::Stall,
     /// Cleared after a provisioning failure so an unavailable cmux or Git
     /// does not burn through every candidate.
     pub(super) claiming: bool,
@@ -816,6 +819,9 @@ mod tests {
             supervisor_error: None,
             repository_config_missing: false,
             light_changes: light,
+            admission_stall_passes: crate::domain::slot_limits::DEFAULT_ADMISSION_STALL_PASSES,
+            admission_pass: Default::default(),
+            admission_stall: Default::default(),
             spaced_since: None,
             claiming: true,
             provisioning_error: None,

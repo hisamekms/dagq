@@ -2583,6 +2583,8 @@ pub enum AttentionNext {
     /// Stop the faulty server on the host; let the supervisor start its
     /// replacement so the recorded start clears restart-failure attention.
     CheckSccache,
+    /// Inspect the admission reasons recorded by the stalled supervisor.
+    CheckAdmission,
     /// The team version's control side could not verify the repository's
     /// rulesets (`runner_rulesets_held`, [`ruleset_gate`]): a person who
     /// administers the repository fixes them or the deployment settings;
@@ -2811,6 +2813,9 @@ impl fmt::Display for AttentionNext {
             Self::ReportRequest => f.write_str("report the request's proposal"),
             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
+            Self::CheckAdmission => {
+                f.write_str("check why the supervisor could not start admitted work")
+            }
             Self::CheckSccache => f.write_str("stop sccache on the host; the supervisor starts it"),
             Self::FixRulesets => f.write_str("fix the repository's rulesets"),
             Self::InstallTool => f.write_str("install tool"),
@@ -2856,6 +2861,7 @@ impl Serialize for AttentionNext {
 /// also depends on its payload, see [`event_attention`].
 pub const ATTENTION_KINDS: &[&str] = &[
     "container_oom_attention",
+    EventKind::AdmissionStalled.as_str(),
     "validation_finished",
     "supervision_finished",
     "integration_deferred",
@@ -3247,6 +3253,7 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (Some(EventKind::UpdateInstalled), _) => Some(AttentionNext::ReportUpdate),
+        (Some(EventKind::AdmissionStalled), _) => Some(AttentionNext::CheckAdmission),
         (Some(EventKind::SupervisorHeartbeatFailed), _) => Some(AttentionNext::ReportSupervisorEnd),
         // A throughput review's conclusion is a notice too (ADR-t996-1),
         // but for a quiet hour's (ADR-t1172-1 decision 3).

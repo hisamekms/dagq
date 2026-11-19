@@ -93,6 +93,8 @@ related:
 - `status`は開いている着地のentryを共通列の順に示し、それぞれが待つ理由を読めるようにする。
   照合の再承認待ちと着地中のrunも同じ表示に残り、列の出入りは`events`で辿れる。
 - `status`の`cursor`は状態を読む前に取るので、`watch --after <cursor>`はその後の遷移を取りこぼさない（重複はありうる）。
+- 進める候補と足りる資源があるのに開始しない回が続けば、inboxに始めない理由つきのattentionを一度届け、何か始まれば閉じる。
+  表示の入口は `application::health::attention`。
 - 知らせるだけのattentionはaskにならず、claimと着地を止めない。
 - 読む側はこのbinaryの知らないkindのeventを落とさずに読み、attentionにもclaimの保留にもしない。
 - `review`は資料をファイルに書いてpathと差分の大きさだけを返し、呼んだsessionはpathをsubagentに渡して差分の全文を自分のcontextで読まない。

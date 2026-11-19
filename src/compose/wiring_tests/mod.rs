@@ -10,6 +10,7 @@
 //! started; no external process, Git, SQLite file or sleep of the test's
 //! own is used.
 
+mod admission_stall;
 mod agent;
 mod git;
 mod harness;

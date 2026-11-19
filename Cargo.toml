@@ -78,6 +78,7 @@ postgres = ["dep:bytes", "dep:postgres", "dep:tokio-postgres-rustls", "dep:webpk
 security-framework = "3"
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 # Generate fresh RSA App keys and TLS fixtures in memory for deployment tests.
 # RSA generation needs rcgen's aws-lc backend; the runtime still uses ring.
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }

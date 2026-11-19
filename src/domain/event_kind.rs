@@ -539,6 +539,11 @@ event_kinds! {
     SupervisorDraining => "supervisor_draining",
     SupervisorHandedOff => "supervisor_handed_off",
     SupervisorHeartbeatFailed => "supervisor_heartbeat_failed",
+    /// A supervisor exceeded the tolerated passes with startable work
+    /// and no start. The payload lists the reasons observed on that pass.
+    AdmissionStalled => "admission_stalled",
+    /// The first start after the same supervisor reported a stall.
+    AdmissionResumed => "admission_resumed",
     SupervisorHeartbeatRetried => "supervisor_heartbeat_retried",
     /// A supervisor's read of the main checkout's `dagq.local.toml`
     /// changed from its read before: the layer began, changed, expired, was
@@ -813,6 +818,8 @@ impl EventKind {
                 // and why one stopped, which ends its supervisor.
                 | SupervisorHeartbeatRetried
                 | SupervisorHeartbeatFailed
+                | AdmissionStalled
+                | AdmissionResumed
                 // A change of the main checkout's uncommitted layer
                 // (ADR-t5108-1 decision 7).
                 | SupervisorLocalConfigChanged
@@ -1723,6 +1730,8 @@ mod tests {
     #[test]
     fn each_kind_writes_the_text_it_always_wrote() {
         let table = [
+            (EventKind::AdmissionResumed, "admission_resumed"),
+            (EventKind::AdmissionStalled, "admission_stalled"),
             (EventKind::AgentCasesBuilt, "agent_cases_built"),
             (EventKind::AgentCasesDecided, "agent_cases_decided"),
             (EventKind::AgentCasesLabeled, "agent_cases_labeled"),

@@ -564,6 +564,7 @@ impl SuperviseOptions {
             retry_unreadable_review: self.retry_unreadable_review,
             limits,
             light_changes: Default::default(),
+            admission_stall_passes: crate::domain::slot_limits::DEFAULT_ADMISSION_STALL_PASSES,
             provider_fallback: Default::default(),
             fresh_session: Default::default(),
             review_jobs: Default::default(),
@@ -1248,6 +1249,9 @@ pub fn supervise_with_reviewer(
     let settings = LoopSettings {
         conflicts_error,
         light_changes,
+        admission_stall_passes: supervisor_config
+            .admission_stall_passes
+            .unwrap_or(crate::domain::slot_limits::DEFAULT_ADMISSION_STALL_PASSES),
         provider_fallback,
         fresh_session,
         review_jobs,

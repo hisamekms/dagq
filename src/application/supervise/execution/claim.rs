@@ -337,6 +337,7 @@ impl Supervisor<'_> {
                 self.read_claim_spacing(&mut resources)?;
             }
             let mut decision = admission::admit(line, resources);
+            self.claim.admission_pass.observe(&decision);
             let landing_waits_for_claim = decision.blocked.iter().any(|(candidate, reason)| {
                 matches!(candidate.item, LineItem::Landing(_))
                     && *reason == Blocked::DiskCompetition
@@ -386,6 +387,7 @@ impl Supervisor<'_> {
                             self.queue.run(&run)?.status() == RunStatus::Integrating
                         }
                     };
+                    self.note_landing_admission(started);
                     if let Some(pass) = claims.as_mut() {
                         if started {
                             pass.resources = pass.resources.after_landing();
@@ -402,10 +404,22 @@ impl Supervisor<'_> {
                         candidate.priority,
                         preceding_priority,
                     )?;
+                    let before = self.claim.slots.len();
                     self.resume_run(*resume)?;
+                    if self.claim.slots.len() > before {
+                        self.claim.admission_pass.started();
+                    } else {
+                        self.claim.admission_pass.declined("ResumeStartDeclined");
+                    }
                 }
                 LineItem::Recovery(run) => {
+                    let before = self.claim.slots.len();
                     self.triage_run(*run)?;
+                    if self.claim.slots.len() > before {
+                        self.claim.admission_pass.started();
+                    } else {
+                        self.claim.admission_pass.declined("RecoveryStartDeclined");
+                    }
                 }
                 LineItem::Claim => {
                     let pass = claims.as_mut().expect("admitted claim has a pass");
@@ -582,6 +596,7 @@ impl Supervisor<'_> {
                 vec![Candidate::slot(SlotKind::Claim, floor, order)],
                 resources,
             );
+            self.claim.admission_pass.observe(&decision);
             if let Some((_, reason)) = decision.blocked.first() {
                 pass.end = ClaimPassEnd::blocked(*reason);
                 if *reason == Blocked::ClaimSpacing {
@@ -597,12 +612,12 @@ impl Supervisor<'_> {
                 }
                 return Ok(ClaimStep::Stop);
             }
-            let order = decision
-                .starts
-                .into_iter()
-                .next()
-                .expect("admitted claim")
-                .item;
+            let Some(candidate) = decision.starts.into_iter().next() else {
+                // The pass already recorded the inconsistent decision.
+                pass.end = ClaimPassEnd::blocked(Blocked::CandidatesDeferred);
+                return Ok(ClaimStep::Stop);
+            };
+            let order = candidate.item;
             let spacing = spacing.map(|secs| ClaimSpacing {
                 claim_spacing: secs,
                 claim_spacing_wait_secs: pass
@@ -681,6 +696,9 @@ impl Supervisor<'_> {
             )? {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => {
+                    self.claim
+                        .admission_pass
+                        .declined(Blocked::NoCandidates.name());
                     pass.end = pass.no_candidate(false);
                     return Ok(ClaimStep::Next);
                 }
@@ -688,6 +706,7 @@ impl Supervisor<'_> {
             if let Some(left) = pass.resources.disk_claims.as_mut() {
                 *left = left.saturating_sub(1);
             }
+            self.claim.admission_pass.started();
             pass.started = true;
             pass.end = ClaimPassEnd::default();
             self.claim.defer.claimed();

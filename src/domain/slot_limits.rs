@@ -69,6 +69,9 @@ impl SettingSource {
     }
 }
 
+/// Default tolerated consecutive passes before reporting an admission stall.
+pub const DEFAULT_ADMISSION_STALL_PASSES: u32 = 5;
+
 /// `[supervisor]` of `dagq.toml`: each key it sets.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SupervisorConfig {
@@ -80,6 +83,10 @@ pub struct SupervisorConfig {
     pub runtime_planners: Option<usize>,
     /// Seconds; 0 spaces no claim.
     pub claim_spacing: Option<usize>,
+    /// `[supervisor].admission_stall_passes` is a nonnegative u32, default 5.
+    /// Report after more than this many consecutive passes with a startable
+    /// candidate and no start. Zero reports on the first such pass.
+    pub admission_stall_passes: Option<u32>,
     /// The repository's classification of light changes, independent of
     /// claim capacity; omission classifies none as light. It has no flag, so every
     /// supervisor reads it again on each pass, even one given all four
@@ -104,7 +111,7 @@ pub struct SupervisorConfig {
 
 impl SupervisorConfig {
     /// The keys `[supervisor]` may set.
-    pub const KEYS: [&'static str; 8] = [
+    pub const KEYS: [&'static str; 9] = [
         "parallel",
         "max_waiting",
         "runtime_planners",
@@ -113,6 +120,7 @@ impl SupervisorConfig {
         "max_spikes",
         "class_aging",
         "max_investigations",
+        "admission_stall_passes",
     ];
 
     /// `light_changes`, empty when not set.
@@ -280,6 +288,7 @@ mod tests {
             max_waiting: Some(0),
             runtime_planners: Some(2),
             claim_spacing: Some(60),
+            admission_stall_passes: None,
             light_changes: None,
             max_spikes: Some(1),
             class_aging: Some(900),
@@ -408,6 +417,7 @@ mod tests {
                 max_waiting: None,
                 runtime_planners: Some(2),
                 claim_spacing: Some(0),
+                admission_stall_passes: None,
                 light_changes: None,
                 max_spikes: Some(1),
                 class_aging: None,

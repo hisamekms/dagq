@@ -745,7 +745,9 @@ impl Supervisor<'_> {
             free_slots: self.claim.parallel.saturating_sub(self.used_slots()),
             ..Resources::default()
         };
-        for candidate in admission::admit(self.return_candidates(&effective)?, resources).starts {
+        let decision = admission::admit(self.return_candidates(&effective)?, resources);
+        self.claim.admission_pass.observe(&decision);
+        for candidate in decision.starts {
             // The preceding return's records may have taken time to write.
             let index = candidate.item;
             if self
@@ -761,8 +763,10 @@ impl Supervisor<'_> {
     pub(super) fn regain_waiting_run(&mut self, index: usize) {
         let now = self.generators.clock.monotonic();
         let Some(waiting) = self.claim.slots.regain(index, &*self.files, now) else {
+            self.claim.admission_pass.declined("ReturnStartDeclined");
             return;
         };
+        self.claim.admission_pass.started();
         self.claim
             .slots
             .note_phase(index, EventKind::RunSlotRegained.as_str(), &*self.queue);

@@ -97,6 +97,13 @@ pub struct Candidate<T> {
 }
 
 impl<T> Candidate<T> {
+    /// Whether this candidate could start alone using the unspent snapshot.
+    /// Callers supply landing candidates selected by LandingQueue, which
+    /// already checked their disk and, for e2e, replacement slot capacity.
+    pub fn can_start(&self, resources: Resources) -> bool {
+        self.progress.can_progress() && resources.blocked(self.kind).is_none()
+    }
+
     pub fn slot(kind: SlotKind, priority: Priority, item: T) -> Self {
         Self {
             item,
@@ -218,12 +225,10 @@ pub fn hold_reason(reason: HoldReason) -> Blocked {
     }
 }
 
-/// Probe one potential slot start before reading its candidate list.
+/// Check the gates before reading a slot candidate list. The real admission
+/// decision still sees the candidates when these gates allow the read.
 pub fn probe(kind: SlotKind, resources: Resources) -> Option<Blocked> {
-    admit(vec![Candidate::slot(kind, Priority::Normal, ())], resources)
-        .blocked
-        .first()
-        .map(|(_, reason)| *reason)
+    resources.blocked(Kind::Slot(kind))
 }
 
 /// Apply the worker line's return precedence when a claim group rereads
@@ -244,6 +249,8 @@ pub fn claim_room(resources: Resources) -> super::light_slots::ClaimRoom {
 #[derive(Debug)]
 pub struct Decision<T> {
     pub starts: Vec<Candidate<T>>,
+    /// At least one candidate could start before any resource is spent.
+    pub has_startable_candidate: bool,
     pub blocked: Vec<(Candidate<T>, Blocked)>,
 }
 
@@ -333,6 +340,9 @@ impl Resources {
 /// or a failed attempt. A queued e2e has already passed LandingQueue's
 /// worker replacement check.
 pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Decision<T> {
+    let has_startable_candidate = candidates
+        .iter()
+        .any(|candidate| candidate.can_start(resources));
     let mut landings = Vec::new();
     let mut slots = Vec::new();
     for candidate in candidates {
@@ -347,6 +357,7 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
     }
     let mut decision = Decision {
         starts: Vec::new(),
+        has_startable_candidate,
         blocked: Vec::new(),
     };
     let slots = slot_order(slots);
@@ -354,13 +365,10 @@ pub fn admit<T>(candidates: Vec<Candidate<T>>, mut resources: Resources) -> Deci
         let claim_first = resources
             .landing_disk
             .is_some_and(|disk| disk.claims == Some(0))
-            && resources.blocked(landing.kind).is_none()
-            && landing.progress.can_progress()
+            && landing.can_start(resources)
             && slots
                 .iter()
-                .filter(|slot| {
-                    slot.item.progress.can_progress() && resources.blocked(slot.item.kind).is_none()
-                })
+                .filter(|slot| slot.item.can_start(resources))
                 .take(resources.free_slots)
                 .find(|slot| slot.kind == SlotKind::Claim)
                 .is_some_and(|claim| claim.priority > landing.priority);
@@ -408,6 +416,101 @@ impl<T> Decision<T> {
         self.starts.push(candidate);
     }
 }
+
+/// Evidence from the decisions and starts of a single supervisor pass.
+#[derive(Default)]
+pub struct Pass {
+    started: bool,
+    stalled: bool,
+    reasons: Vec<&'static str>,
+}
+
+impl Pass {
+    pub fn observe<T>(&mut self, decision: &Decision<T>) {
+        if self.started {
+            return;
+        }
+        if decision.has_startable_candidate && !decision.starts_work() {
+            self.stalled = true;
+            if decision.blocked.is_empty() {
+                self.reason("MissingAdmissionReason");
+            }
+        }
+        for &(_, reason) in &decision.blocked {
+            self.reason(reason.name());
+        }
+    }
+
+    /// An admitted start was attempted, but did not start.
+    pub fn declined(&mut self, reason: &'static str) {
+        if !self.started {
+            self.stalled = true;
+            self.reason(reason);
+        }
+    }
+
+    pub fn started(&mut self) {
+        self.started = true;
+    }
+
+    pub fn reasons(&self) -> &[&'static str] {
+        &self.reasons
+    }
+
+    fn reason(&mut self, reason: &'static str) {
+        if !self.reasons.contains(&reason) {
+            self.reasons.push(reason);
+        }
+    }
+}
+
+pub const STALL_EVENTS: [&str; 2] = [
+    super::EventKind::AdmissionStalled.as_str(),
+    super::EventKind::AdmissionResumed.as_str(),
+];
+
+/// The last completed passes of one supervisor. An ineligible pass breaks
+/// the streak. Once open, attention stands until a start.
+#[derive(Clone, Copy, Default)]
+pub struct Stall {
+    consecutive: u64,
+    open: bool,
+}
+
+impl Stall {
+    /// Carry an attention through an exec under the same registration.
+    pub fn with_open_attention(open: bool) -> Self {
+        Self {
+            open,
+            consecutive: 0,
+        }
+    }
+
+    /// An interrupted pass cannot extend a streak of completed passes.
+    pub fn break_streak(&mut self) {
+        self.consecutive = 0;
+    }
+
+    pub fn observe(&mut self, pass: &Pass, limit: u32) -> Option<super::EventKind> {
+        self.consecutive = if pass.stalled && !pass.started {
+            self.consecutive.saturating_add(1)
+        } else {
+            0
+        };
+        if pass.started && self.open {
+            self.open = false;
+            Some(super::EventKind::AdmissionResumed)
+        } else if self.consecutive > u64::from(limit) && !self.open {
+            self.open = true;
+            Some(super::EventKind::AdmissionStalled)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod properties;
 
 #[cfg(test)]
 mod tests {

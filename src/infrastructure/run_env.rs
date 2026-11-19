@@ -2442,6 +2442,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     let secs = parse_whole(rest.trim()).with_context(with)?;
                     let secs = u32::try_from(secs).with_context(with)?;
                     config.supervisor.claim_spacing = Some(usize::try_from(secs)?);
+                } else if key == "admission_stall_passes" {
+                    let passes = parse_whole(rest.trim()).with_context(with)?;
+                    config.supervisor.admission_stall_passes =
+                        Some(u32::try_from(passes).with_context(with)?);
                 } else if key == "light_changes" {
                     let changes = parse_string_array(rest.trim())
                         .with_context(with)?
@@ -3353,6 +3357,10 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig> {
 
 /// `[supervisor]` of the `dagq.toml` in `root` (task 698), `None` when
 /// there is no file; no table or no key sets nothing.
+///
+/// The optional `admission_stall_passes` key is a nonnegative u32. Omission
+/// uses 5. Attention opens when the streak of startable passes without a
+/// start exceeds this count.
 pub fn load_supervisor_config(root: &Path) -> Result<Option<SupervisorConfig>> {
     load_supervisor_config_at(root, config_now_millis())
 }
@@ -10371,6 +10379,24 @@ enabled = true
     }
 
     #[test]
+    fn parses_the_admission_stall_limit_as_a_nonnegative_pass_count() {
+        for (value, count) in [
+            ("0", Some(0)),
+            ("2", Some(2)),
+            ("4294967295", Some(u32::MAX)),
+        ] {
+            let loaded =
+                parse_config(&format!("[supervisor]\nadmission_stall_passes = {value}\n")).unwrap();
+            assert_eq!(loaded.supervisor.admission_stall_passes, count);
+        }
+        for value in ["-1", "1.5", "4294967296"] {
+            let error = parse_config(&format!("[supervisor]\nadmission_stall_passes = {value}\n"))
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("value of admission_stall_passes"));
+        }
+    }
+
+    #[test]
     fn parses_and_loads_the_supervisor_table() {
         let config =
             parse_config("[supervisor] # slots\nparallel = 3 # build is heavy\nmax_waiting = 0\nruntime_planners = 2\nclaim_spacing = 120 # secs\n")
@@ -10382,6 +10408,7 @@ enabled = true
                 max_waiting: Some(0),
                 runtime_planners: Some(2),
                 claim_spacing: Some(120),
+                admission_stall_passes: None,
                 light_changes: None,
                 max_spikes: None,
                 class_aging: None,
@@ -10404,6 +10431,7 @@ enabled = true
                 max_waiting: Some(2),
                 runtime_planners: None,
                 claim_spacing: None,
+                admission_stall_passes: None,
                 light_changes: None,
                 max_spikes: None,
                 class_aging: None,
@@ -10518,6 +10546,7 @@ enabled = true
                 max_waiting: None,
                 runtime_planners: None,
                 claim_spacing: None,
+                admission_stall_passes: None,
                 light_changes: None,
                 max_spikes: None,
                 class_aging: None,

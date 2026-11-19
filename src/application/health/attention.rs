@@ -82,6 +82,13 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
+    if event.kind == EventKind::AdmissionStalled {
+        for key in ["supervisor", "reasons"] {
+            if let Some(value) = payload.get(key) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
     if event.kind == EventKind::SupervisorHeartbeatFailed {
         // Which supervisor ended on its heartbeat, and why: a queue that
         // stayed busy (`busy`) is told from any other failure, with how
@@ -235,6 +242,40 @@ pub fn attention(
         )?
     };
     let mut attention = supervisor_attention_with(&pulses, &failures);
+    let live: Vec<_> = pulses.iter().filter(|pulse| !pulse.stale).collect();
+    if !live.is_empty() {
+        let tokens: Vec<_> = live.iter().map(|pulse| pulse.token.as_str()).collect();
+        for event in
+            queue.latest_events_by_supervisor(&crate::domain::admission::STALL_EVENTS, &tokens)?
+        {
+            if event.kind != EventKind::AdmissionStalled {
+                continue;
+            }
+            let reasons = event.payload["reasons"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pid = live
+                .iter()
+                .find(|pulse| event.payload["supervisor"].as_str() == Some(pulse.token.as_str()))
+                .map(|pulse| pulse.pid);
+            attention.push(Attention {
+                run_id: None,
+                task_id: None,
+                pid,
+                ask_id: None,
+                reason_category: None,
+                status: "stalled".into(),
+                kind: event.kind.to_string(),
+                last_error: Some(reasons),
+                last_error_code: None,
+                next: AttentionNext::CheckAdmission,
+            });
+        }
+    }
     let no_claude = registrations.iter().any(|r| {
         !crate::domain::SupervisorPulse::judge(r, control.alive(r.pid), now).stale
             && r.claude_disabled()

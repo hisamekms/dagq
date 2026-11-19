@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::admission_stall::a_stalled_admission_notifies_the_inbox_once_and_closes_on_a_start"
+reason = "境界: 実際のsupervisor・queue service・SQLiteを通し、開始できない回の通知がinboxのwatchとstatusに届き、claim後に同じsupervisorのstatusから消えることを確かめる。通知前後のeventと生きた登録を読むため、memdbの初期化と複数のpassが必要。連続回数の判断はdomainのunit testで確かめる。"
+task = 5297

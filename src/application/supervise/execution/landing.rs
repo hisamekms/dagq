@@ -3216,9 +3216,18 @@ impl Supervisor<'_> {
         drain_may_adopt: bool,
     ) -> Result<()> {
         if let Some(landing) = self.queued_landing(parallel, draining, drain_may_adopt)? {
-            self.start_queued_landing(landing)?;
+            let started = self.start_queued_landing(landing)?;
+            self.note_landing_admission(started);
         }
         Ok(())
+    }
+
+    pub(super) fn note_landing_admission(&mut self, started: bool) {
+        if started {
+            self.claim.admission_pass.started();
+        } else {
+            self.claim.admission_pass.declined("LandingStartDeclined");
+        }
     }
 
     pub(super) fn queued_landing(
@@ -3355,6 +3364,7 @@ impl Supervisor<'_> {
                 ..Default::default()
             },
         );
+        self.claim.admission_pass.observe(&starts);
         let selected = starts
             .starts
             .first()
