@@ -109,8 +109,9 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 引き継ぎでは、既にleaseを返したrunはそのまま列に残り、検証のやり直しの前で区切った着地は所有者が引き継ぐ。
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
-- 人とinboxの`integrate`の承認は、その時のrunの差分の組に結んで記録する（`integrate::binding::of_run`）。
-  承認が立っていても差分の組が変わっていれば、打ち直しは今の組で承認し直す（`approved_as_bound`）。
+- 人とinboxが直接打つ`dagq integrate`は、今の差分に結んで承認を記録する（`integrate::approvable`）。
+  今の差分への直接の承認が有効なら再利用し、別の差分への承認なら今の差分で、照合で失効した承認なら差分が同じでも承認し直せる。
+- 着地直前の照合は、run自身の差分の同一性を確かめ、承認を持ち越すか聞き直すかを決める（`integrate::binding::compare_landing`、下の「判断との照合」）。
 - 検証のコマンドは自動更新のjobの関門（buildとe2e）と同時に流れず、関門が走るか番を待つ間、supervisorは着地を次のpassに回し、`land_integrating`は番を取れるまで待つ（ADR-t2719-1、[Auto-update](auto-update.md)の「着地の検証との順番」）。
 
 ## receiptの検査とrebase
@@ -134,8 +135,8 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 - pathsの検査の後、承認元とmainを衝突なく重ねた結果が着地する内容と同じなら、同じfileの別の箇所をmainが変えた場合も、差分の外だけを変えた場合も承認を持ち越す。
   run自身のcommitの変更、衝突の解消、手直しで同じfile内の変更箇所を移した場合や、同一性を確かめられない場合は聞き直す。
   receiptが名指さないcommitで承認した変更が変わった場合は、sessionに戻す前に照合の不一致を記録する。
-- 変更後のblob hashの組だけを持つ判断は、最終の差分にその組が一致するときに使える。
-  照合に守るpathの一覧が渡されていれば、そのpathに当たる変更をmainに取り込むときは承認を持ち越さず、人に聞き直す。
+- run自身の差分の証拠を持たない旧形式のbindingは、最終の差分の変更後のblob hashの組が一致することを求める。
+  照合に守るpathの一覧が渡され、そのpathに当たる変更の承認時と着地時の基点が同じと確かめられなければ、人に聞き直す。
   現在、照合に渡す一覧は空。
 - 判断の後にbranchを変えるもの（着地のrebase・番号の振り直し・sessionの衝突の解消・reviewの手直し・resumeの解消か直し・sessionを開かずに解決済みとして進むresume）は、前後のheadと組を持つ別の変更として、その状態の変更と同じtransactionで監査に書く（`landing_binding::resume_rewrite`）。
   前後の組を読めない間はその記録も次への進行もせず、次の周に読み直す（ADR-t4840-2決定6と7）。
