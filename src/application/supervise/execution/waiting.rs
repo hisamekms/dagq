@@ -9,6 +9,7 @@
 use super::reopen::Reopen;
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::admission::{self, Candidate, Kind, Progress, Resources};
 use crate::domain::{
     Ask,
     waiting::{
@@ -46,7 +47,7 @@ pub(super) fn held_worktrees(
 /// This is a mark on the slot, not a change to the run status or phase:
 /// Session, Exiting, Revise and Resume watches continue where they stopped.
 /// Revise/Resume clocks alone restart on return. Waiting slots stay in the
-/// table, so the drive loop, including drain, continues while they remain.
+/// table and are reconstructed from the journal by the next supervisor.
 pub(super) struct Waiting {
     /// The asks the wait holds, oldest first.
     pub(super) asks: Vec<(AskId, AskKind)>,
@@ -228,13 +229,16 @@ impl Supervisor<'_> {
     /// Both ongoing and returning waits consume the limit: both keep a session.
     /// A deferred run keeps progressing in its phase and can wait next tick
     /// once room opens; `run_waiting_started` records an admitted wait.
-    pub(super) fn start_waits(&mut self) {
+    pub(super) fn start_waits(&mut self, paused: &HashSet<RunId>) {
         // No run waits without a limit: its asks are not read.
         if wait_move(self.claim.max_waiting, 0, true) == WaitMove::Stay {
             return;
         }
         let mut candidates = Vec::new();
         for index in 0..self.claim.slots.len() {
+            if paused.contains(self.claim.slots[index].run.id()) {
+                continue;
+            }
             match self.wait_candidate(&self.claim.slots[index]) {
                 Ok(Some(ask)) => candidates.push((ask.id, ask.kind, ask.created_at, index)),
                 Ok(None) => {}
@@ -714,23 +718,30 @@ impl Supervisor<'_> {
     /// The drive loop calls this each pass before handoff and fill_slots,
     /// even with claiming stopped. The current phase resumes; a worker
     /// question's answer is submitted as the next turn after return.
-    pub(super) fn return_waiting_runs(&mut self) {
-        let mut returning: Vec<(i64, usize)> = self
-            .claim
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                slot.waiting
-                    .as_ref()
-                    .and_then(|w| w.ended)
-                    .map(|(at, _)| (at, index))
-            })
-            .collect();
-        returning.sort_unstable();
-        for (_, index) in returning {
-            if self.used_slots() >= self.claim.parallel {
-                break;
+    pub(super) fn return_waiting_runs(&mut self) -> Result<()> {
+        let decision = admission::admit(
+            self.return_candidates()?,
+            Resources {
+                free_slots: self.claim.parallel.saturating_sub(self.used_slots()),
+                ..Resources::default()
+            },
+        );
+        for mut candidate in decision.starts {
+            let index = candidate.item;
+            // The preceding return can take time to record. A hold may
+            // have arrived before this run regains its worker slot.
+            candidate.progress =
+                self.run_progress(&self.claim.slots[index].run, Default::default(), false)?;
+            if !admission::admit(
+                vec![candidate],
+                Resources {
+                    free_slots: self.claim.parallel.saturating_sub(self.used_slots()),
+                    ..Resources::default()
+                },
+            )
+            .starts_work()
+            {
+                continue;
             }
             let now = self.generators.clock.monotonic();
             let Some(waiting) = self.claim.slots.regain(index, &*self.files, now) else {
@@ -745,6 +756,89 @@ impl Supervisor<'_> {
                 warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: its return to a slot could not be recorded: {error:#}");
             }
         }
+        Ok(())
+    }
+
+    pub(super) fn return_candidates(&self) -> Result<Vec<Candidate<usize>>> {
+        self.claim
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let (ended_at, _) = slot.waiting.as_ref()?.ended?;
+                // The wait ended even if its ask is still open, for
+                // example when a revise produced a receipt on its own.
+                Some(
+                    self.run_progress(&slot.run, Default::default(), false)
+                        .map(|progress| Candidate {
+                            item: index,
+                            kind: Kind::Return { ended_at },
+                            priority: Priority::Normal,
+                            progress,
+                        }),
+                )
+            })
+            .collect()
+    }
+
+    /// A stop finishes work in progress and waits that can proceed. It
+    /// leaves stopped waits and their leases intact for normal adoption.
+    pub(super) fn drain_paused_waits(&self) -> Result<HashSet<RunId>> {
+        use crate::domain::run_phase::Phase as Recorded;
+
+        let waits: Vec<_> = self
+            .claim
+            .slots
+            .iter()
+            .filter_map(|slot| match slot.recorded_phase() {
+                Recorded::Waiting { .. } => Some((&slot.run, true)),
+                Recorded::Returning => Some((&slot.run, false)),
+                _ => None,
+            })
+            .collect();
+        if waits.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let unanswered = self.unanswered_runs()?;
+        let mut paused = HashSet::new();
+        for (run, waiting) in waits {
+            let progress = self.run_progress(
+                run,
+                Default::default(),
+                waiting && unanswered.contains_key(run.id()),
+            )?;
+            if !progress.can_progress() {
+                paused.insert(run.id().clone());
+            }
+        }
+        Ok(paused)
+    }
+
+    pub(super) fn unanswered_runs(&self) -> Result<HashMap<RunId, Vec<Ask>>> {
+        let mut runs = HashMap::<_, Vec<_>>::new();
+        for ask in self.queue.asks(AskQuery {
+            open: true,
+            ..Default::default()
+        })? {
+            if let Some(run) = &ask.run_id {
+                runs.entry(run.clone()).or_default().push(ask);
+            }
+        }
+        Ok(runs)
+    }
+
+    /// Read the task's hold alongside the stops that apply to this phase.
+    pub(super) fn run_progress(
+        &self,
+        run: &TaskRun,
+        gates: admission::Gates,
+        unanswered: bool,
+    ) -> Result<Progress> {
+        Ok(Progress {
+            held: self.queue.hold_guard(run.task_id())?.is_some(),
+            unanswered,
+            gates,
+        })
     }
 
     /// Rebuild the wait of a run taken over after an adoption or a handoff
@@ -782,9 +876,10 @@ impl Supervisor<'_> {
 
             ended: state.ended.map(|(ms, cause)| (ms.div_euclid(1000), cause)),
         };
+        let held = self.queue.hold_guard(slot.run.task_id())?.is_some();
         let restore = restore_wait(
             slot.wait_phase().is_some(),
-            as_waiting,
+            as_waiting || held,
             waiting.ended.is_some(),
         );
         let WaitRestore::Regain { end } = restore else {
@@ -813,20 +908,20 @@ impl Supervisor<'_> {
         self.regain_slot(slot, used)
     }
 
-    /// Whether the run waits by its events, and has room to be adopted as
-    /// a wait (decision 11): a run that waits needs no free slot while the
-    /// waits are under their limit.
-    pub(super) fn adopts_as_waiting(&self, run: &RunId) -> Result<bool> {
+    /// Adoption keeps a held wait outside worker capacity, even when
+    /// the rest of the waits already reach the waiting limit.
+    pub(super) fn adopts_as_waiting(&self, run: &TaskRun) -> Result<bool> {
         let (limit, waiting) = (self.claim.max_waiting, self.waiting_runs());
-        // Its events are read only while there is room for a wait.
-        if !crate::domain::waiting::room_for_a_wait(limit, waiting) {
+        let held = self.queue.hold_guard(run.task_id())?.is_some();
+        if !held && !crate::domain::waiting::room_for_a_wait(limit, waiting) {
             return Ok(false);
         }
-        Ok(crate::domain::waiting::adopts_as_waiting(
-            limit,
-            waiting,
-            WaitState::of(&self.queue.run_events(run)?).as_ref(),
-        ))
+        let state = WaitState::of(&self.queue.run_events(run.id())?);
+        Ok(if held {
+            state.is_some()
+        } else {
+            crate::domain::waiting::adopts_as_waiting(limit, waiting, state.as_ref())
+        })
     }
 }
 

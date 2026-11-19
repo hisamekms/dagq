@@ -44,15 +44,13 @@ hostの負荷・空き容量・providerの壁で止まるときはqueue全体の
 
 ```text
 passの初め（[run.env]の検査の次）: 空き容量 → 足りなければ掃除のjob → それでも足りなければinboxにask
-fill pass（adopt・answerの適用・resume・triage・sweepの後）
-  └─ claimの前: queue全体の控え（provider → 空き容量 → load average）→ 控えるならこのpassはclaimしない
-       └─ claimのloop: claimの間隔 → workerのslotの空き → 候補ごとの控え（worker → build → hotspot）
-            └─ 残りの候補を実行区分の上限とagingで並べる → claim → 進行中のrunを読み直して次の周
+fill pass: queue全体の控え → 再開・復旧job・claimの列 → Admissionがslotを渡す
+  └─ claimのloop: 候補ごとの控えと順位 → Admissionの許可 → claim → 次の候補を読み直す
 ```
 
 ## 責務と境界
 
-- queue全体の控えの判定は`domain::claim_hold::ClaimHold::judge`で、supervisorの側は`Supervisor::hold_claims`である。
+- queue全体の控えはAdmissionが開始の可否に使い、supervisorが控えの遷移を記録する。
 - 候補ごとの控えの判定は`domain::claim_defer`（hotspot・worker）と`domain::build_wait`、supervisorの側は`application/supervise/execution/claim_defer.rs`である。
 - claimの間隔は`domain::claim_spacing`、workerのslotは`domain::light_slots`、実行区分の上限とagingは`domain::claim_order`、調査中の計画は`domain::investigation`が持つ。
 - 空き容量の閾値は`domain::disk`、確かめと掃除と着地の控えは`application/supervise/host_ops/disk.rs`が持つ。
@@ -108,7 +106,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
   段ごとのピークは方式によらず記録する（`domain::disk::StagePeaks`）。
 - 動くrunが0本なら最低ラインだけで進め、着地待ちがあればclaimより着地が先に進む。
   予測方式で標本が無ければqueueは1本ずつ進む（ADR-t5059-1）。
-  taskがholdされているrunはこの着地待ちから除き、解除後のpassから再び数える。
+  対象は[今進めるrun](#workerのslotと着地の列)。
 - 予約はbuildするか・着地のレーンにいるかで付け替え、残りは予約量から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いて数える。
   待ちのrunは予約を持たず今の大きさだけを占め、INTEGRATORの枠は着地待ちの有無によらず常に取る。
   信頼できない今の大きさ（量れない・古い・別のrun）は予約量のまま数える。
@@ -194,15 +192,18 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ## workerのslotと着地の列
 
-着地は[共通の列](integrate.md#承認とslot)から選ぶ。
+[共通の列](integrate.md#承認とslot)は答え待ちを含む候補ごとの控えを見て、進める最初の着地を選ぶ。
+Admissionは選ばれた着地を共通の資源とclaimに照らして始めるか決める。
 着地中はworkerのslotに数えない。
-着地の順番待ちをworkerのslotの外に数えるのはworkerの並列度までで、leaseを返したrunも超過分を数えてclaimに背圧を掛ける。
+着地待ちは並列度を超えた分だけworkerのslotを占め、lease返却後もclaimに背圧を掛ける。
 review・e2e・revise・resumeの途中はworkerのslotに残す。
 承認された着地でworkerの空きを待つのはe2eの開始だけで、e2eの要らない後続の着地を止めない。
 軽い枠は無く、claimの可否はchangeによらずworkerのslotの空きで決まり、人の待ちからの戻りを新しいclaimより先にする。
 load・ディスク・claimの間隔の関門はすべてのclaimに効き、着地はloadで止めない。
-`stats`の空きslotと`kpi`のslotの使用率は着地待ちを含めて数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
-数え方の入口は `domain::light_slots::worker_slots`、claimの可否は `domain::light_slots::claim_room`。
+`stats`の空きslotと`kpi`のslot使用率にも着地待ちを数える（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
+着地待ち・戻り待ち・ディスクの動作と予約は、holdも答え待ちもなくCI・環境・着地branchで止まっていないrunから数える。
+着地の開始後は、着地で閉じるaskを答え待ちに数えない。
+hold中のrunがディスクに占めるのは現在の大きさだけとし、進行中の工程はその区切りまで続ける。
 
 ## 調査中の計画の上限
 

@@ -394,8 +394,8 @@ impl Supervisor<'_> {
             }
             // An owner gone stops this process like a stop request, with
             // its own reason, but waits for nobody's answer: its runs are
-            // let go and the loop ends within the grace. Looked for in a
-            // drain too, which would otherwise wait for those answers.
+            // let go and the loop ends within the grace. Checked throughout
+            // a drain so an owner that disappears still bounds its end.
             if self.registration.owner_gone_since().is_none()
                 && handoff::owner_gone(options.owner, |pid| self.processes.alive(pid))
             {
@@ -530,8 +530,9 @@ impl Supervisor<'_> {
             self.on_observation(|observation, env| observation.resources_pass(env, held));
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
-            use crate::domain::{disk::disk_usage, run_phase};
+            use crate::domain::{admission, disk::disk_usage, landing_queue, run_phase};
             let mut moving = Vec::new();
+            let unanswered = self.unanswered_runs()?;
             // Read only current stages, never the queue's historical runs.
             // A run may advance between these reads; keep its newer row once.
             let mut disk_runs = self.queue.active_runs()?;
@@ -553,12 +554,22 @@ impl Supervisor<'_> {
                     .slots
                     .iter()
                     .find(|slot| slot.run.id() == run.id());
-                let events = if slot.is_none() {
+                let asks = unanswered
+                    .get(run.id())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let events = if slot.is_none()
+                    || asks.iter().any(|ask| ask.kind == AskKind::ApproveLanding)
+                {
                     self.queue.run_events(run.id())?
                 } else {
                     Vec::new()
                 };
-                let phase = if let Some(slot) = slot {
+                let phase = if run.status() == RunStatus::Integrating {
+                    // The start transaction occupies the integrator even
+                    // before the owner records its first landing phase.
+                    run_phase::Phase::Landing
+                } else if let Some(slot) = slot {
                     let recorded = slot.recorded_phase();
                     if matches!(
                         recorded,
@@ -580,41 +591,52 @@ impl Supervisor<'_> {
                 // remain landing candidates after resolution.
                 let awaiting_slot = slot.is_some_and(|s| matches!(s.phase, Phase::AwaitingSlot));
                 let history = RunHistory::from_events(&events);
-                let ready_to_land = awaiting_slot
-                    || (slot.is_none()
-                        && history.can_queue_landing(run.status())
-                        && history.landing_ready());
-                let waiting = crate::domain::task_hold::waiting_to_land(
-                    ready_to_land,
-                    self.queue.hold_guard(run.task_id())?,
-                );
+                let ready_to_land = phase != run_phase::Phase::Landing
+                    && (awaiting_slot
+                        || (slot.is_none()
+                            && history.can_queue_landing(run.status())
+                            && history.landing_ready()));
+                // A named integrate can already be verifying while it
+                // still has asks to close at the end of the landing.
+                let waits_for_answer = !matches!(
+                    phase,
+                    run_phase::Phase::Landing | run_phase::Phase::Returning
+                ) && landing_queue::waiting_for_answer(asks, &history);
+                let progress = self.run_progress(
+                    &run,
+                    if ready_to_land || run.status() == RunStatus::NeedsSession {
+                        self.admission_gates()
+                    } else {
+                        Default::default()
+                    },
+                    waits_for_answer,
+                )?;
                 moving.push(super::super::host_ops::disk::DiskTarget {
                     target: super::super::host_ops::moving_sizes::MovingTarget::of(
                         &run,
                         &self.layout.runs_dir,
                     ),
                     usage: disk_usage(phase, !run.in_container(), true),
+                    progress,
                     task: run.task_id(),
-                    phase: phase.name().to_owned(),
+                    phase,
                     container: run.in_container(),
                     candidate: ready_to_land
                         || run.status() == RunStatus::AwaitingIntegration
                         || run.status() == RunStatus::Integrating,
-                    waiting,
+                    waiting: ready_to_land,
                 });
             }
-            let landings: Vec<_> = moving
-                .iter()
-                .filter(|r| r.waiting)
-                .map(|r| r.target.run.clone())
-                .collect();
             let held = self.cleanup_held();
-            let in_flight = moving.iter().filter(|r| r.usage.active).count();
+            let in_flight = moving.iter().filter(|r| r.reserved_usage().active).count();
             let landing = moving
                 .iter()
-                .filter(|r| r.usage.stage == crate::domain::disk::DiskStage::Integrator)
+                .filter(|r| r.reserved_usage().stage == crate::domain::disk::DiskStage::Integrator)
                 .count();
-            let landing_waiting = !landings.is_empty() && self.landing_goes_but_for_disk();
+            let landing_waiting = admission::landing_waiting(
+                self.verification_container_held(),
+                moving.iter().filter(|r| r.waiting).map(|r| r.progress),
+            );
             let parallel = self.claim.parallel;
             self.on_host(|host, env| {
                 host.check_disk(
@@ -660,9 +682,9 @@ impl Supervisor<'_> {
             self.registration.drain_for(stopping, self.claim.claiming);
             self.note_handoff_drain(stopping);
             self.refresh_landing_backpressure()?;
-            // Before any new work, draining or not: a drain waits for them
-            // (ADR-0062 decision 8).
-            self.return_waiting_runs();
+            // Runs that can return do so before new work, including
+            // while a stop drains.
+            self.return_waiting_runs()?;
             // A stop wins over a handoff: the drain goes on as before.
             if !stopping {
                 if !self.registration.handing_off()
@@ -757,7 +779,7 @@ impl Supervisor<'_> {
                         });
                         self.agent_eval_pass(false);
                         self.agent_cases_pass(false);
-                        self.tick(true)?;
+                        self.tick(true, &HashSet::new())?;
                         self.unanswered.look();
                         thread::sleep(options.tick);
                         continue;
@@ -780,6 +802,11 @@ impl Supervisor<'_> {
             self.on_host(|host, env| host.queue_broker_pass(env, working));
             // And the runs' relays to it (ADR-t2114-3 decision 4).
             self.on_host(|host, env| host.broker_relay_pass(env, working));
+            let paused = if stopping {
+                self.drain_paused_waits()?
+            } else {
+                HashSet::new()
+            };
             if self.claim.claiming && !stopping {
                 let held = self.fill_slots(self.claim.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.claim.parallel, held);
@@ -793,9 +820,10 @@ impl Supervisor<'_> {
                 // what they queued only while its own runs keep it going
                 // (ADR-t3330-1).
                 if stopping {
-                    self.drain_landing_answers()?;
+                    self.drain_landing_answers(&paused)?;
                 } else if !self.landing.pending_landings.is_empty()
-                    && let Err(error) = self.start_approved_landings(self.claim.parallel, true)
+                    && let Err(error) =
+                        self.start_approved_landings(self.claim.parallel, true, false)
                 {
                     warn!(error = %format_args!("{error:#}"), "a run returned by this drain could not start its landing: {error:#}");
                 }
@@ -822,8 +850,8 @@ impl Supervisor<'_> {
             self.on_observation(|observation, env| observation.push_pass(env, !stopping));
             // An inbox without a watcher while asks wait for it is recorded
             // and told through `[push]` (ADR-t1433-5 decision 1 (3)),
-            // draining or not: a drain waits for their answers. The
-            // watcher's changes are recorded either way (task 1021).
+            // draining or not. The watcher's changes are recorded either
+            // way (task 1021).
             let reports = self.observation.reports();
             if let Some((config, message)) =
                 self.on_host(|_, env| inbox_nudge::inbox_nudge_pass(env, reports.as_ref()))
@@ -879,7 +907,7 @@ impl Supervisor<'_> {
             progressed |= self.agent_eval_pass(starting);
             // The production sets asked for (ADR-t1728-1 (g)), the same way.
             progressed |= self.agent_cases_pass(starting);
-            if self.claim.slots.is_empty() {
+            if self.claim.slots.len() == paused.len() {
                 // The jobs it waits for ([`Self::loop_waits`]) are waited
                 // for like a run.
                 let waits = self.loop_waits(options.once, stopping, rechecked);
@@ -898,7 +926,7 @@ impl Supervisor<'_> {
                 let slots = self.claim.slots.len();
                 note_once_goes_on(&mut goes_on, pass, slots, Vec::new(), false);
             }
-            self.tick(false)?;
+            self.tick(false, &paused)?;
             self.unanswered.look();
             thread::sleep(options.tick);
         }

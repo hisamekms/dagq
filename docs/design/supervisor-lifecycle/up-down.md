@@ -74,9 +74,10 @@ serviceによるmigrationと入れ替えを拒む境界は[Queue service](../que
 走っているrunのsessionとleaseはそのままで、検証と着地の区切りを待つため、待ちが検証1回分に及ぶことがある。
 1つの失敗で他の引き継ぎの待ちを打ち切らない（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
 引き継げないときのdrainの入口は`lifecycle::replace_supervisors`、待たない指定の拒否は`lifecycle::no_wait_refusal`にある。
-drainはrunの長さを待つため上限を置かず、待たない指定だけは待ちを制限する。
+drainは進行中の工程を終えるため上限を置かず、[止まった待ち](waiting.md#待ちの出入り)は次のsupervisorに渡す。
+待たない指定は待ちを制限する。
 拒否の判断はsignalやagentの取り外しより前であり、runが残るため拒まれても停止は頼んでいない。
-drain中も答えの済んだ着地の判断は適用され、承認された着地は自分のrunが残る間だけ進む（[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
+drain中も答えの済んだ着地の判断は適用され、承認された着地は自分のrunが進む間だけ進む（[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
 入れ替えの約束の根拠は[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)と[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)にある。
 
 生きているがheartbeatの古いsupervisorは起動側では入れ替えず、隣に新しいsupervisorが立つことがある。

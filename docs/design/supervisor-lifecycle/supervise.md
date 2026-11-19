@@ -71,7 +71,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## passの始め
 
 - 各passの検査と設定の読み直しの順は`Supervisor::drive`のコメントで、設定の変更は再起動なしに効く。
-- 待ちの終わったrunは新しい仕事より先に（drain中も）slotへ戻す（`return_waiting_runs`、[人の答えを待つrun](waiting.md)）。
+- 待ちが終わり進めるrunは新しい仕事より先に（drain中も）slotへ戻す（`return_waiting_runs`、[人の答えを待つrun](waiting.md)）。
 
 ## adopt
 
@@ -81,7 +81,10 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## slotを渡す順とclaim
 
 - 再開・復旧job・claimは1つの候補の列になり、taskの効く優先度の降順にslotを受ける（`domain::slot_order`のmodule doc、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
-- 列を組むのは`Supervisor::fill_slots`で、種ごとの保留はその種を列から外すだけで、上位の候補のためにslotを空けて待たない。
+- Admissionは戻り・着地・slotを使う新しい仕事を、候補と資源の写しから順番と停止理由にする。
+- supervisorはAdmissionの許可に従って仕事を始める。
+- 戻りは待ちが終わった順に先に扱い、着地は共通の列が選んだ候補を受け取る。
+- 保留された候補のためにslotを空けて待たず、[今進めるrun](claim-hold.md#workerのslotと着地の列)から着地待ちと戻り待ちを数える。
 - 効く優先度は`application::effective_priority`、goal間のrankが無いことは[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定2・4・8。
 - claimの規則の順は`domain::ClaimRank`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定4）、控えと区分の上限とagingは[claimを控える](claim-hold.md)。
 - 順の手前で落ちるreadyのtaskは控えの記録を持たず、`application::claim_view::ClaimExclusions`が読み口で、claimはこれを読まない。
@@ -120,12 +123,14 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 - 持ち主の居ないrunの自動のrecoverと復旧jobは[Triage (supervisor)](triage.md#triage-supervisor)（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定3）、死んだ着地の解放は`domain::landing_release`のmodule doc。
 - drainしているsupervisorも死んだ着地の解放は各回で行い、自分の着地を待つrunとdrainを止めない。
-- 停止要求のdrainはleaseの無いrunの答えの済んだ`approve_landing`を適用し、承認された着地は自分のrunが残ってdrainが続くあいだだけ始める（`drain_landing_answers`、[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
+- 停止要求のdrainはleaseの無いrunの答えの済んだ`approve_landing`を適用し、承認された着地は自分のrunが進んでdrainが続くあいだだけ始める（`drain_landing_answers`、[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
 - 着地の列に並ぶかもう一度reviewにかかるかは`RunHistory::landable`と`review_recovered_runs`。
 
 ## ループの終わり
 
 - 終わり方は`supervise`・`LoopSettings::owner`・`Supervisor::run_loop`のdoc comment、signalは`install_stop_signal`（1回目でdrain、2回目で即終了）。
+- drainは進行中の工程を終え、今進める待ちからの戻りを扱う。
+  holdや答え待ちで止まったrunは[待ちの記録とlease](waiting.md#引き継ぎとadopt)を残して次のsupervisorに渡す。
 - ownerの居なくなったsupervisorとheartbeatの止まったsupervisorは、ループの終わりの待ち全体に上限を持つ（`EndBy`）。
   heartbeatの上限はheartbeatが止まった時に決まり、ループがほかの理由で終わった後に止まっても同じく効く（`EndDeadline`）。
   heartbeatの止まったsupervisorは、上限をqueue serviceへの呼び出しとstepの報告の1つずつにも当て、止まる前に始めて答えを待っているものにも当てる（`EndBound`・`EndBoundSinks`）。

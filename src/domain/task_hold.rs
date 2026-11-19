@@ -468,10 +468,8 @@ pub struct HoldGuard {
     pub hold: HoldId,
 }
 
-/// Whether a run otherwise waiting to land counts as landing work: an
-/// open task hold excludes it from both rechecks and disk's landing-first
-/// gate. Read the existing hold guard each pass so release restores it;
-/// this neither interrupts a step already running nor discards its work.
+/// Whether to include an otherwise eligible landing in a periodic recheck.
+/// Read the existing hold guard each pass so release restores eligibility.
 pub const fn waiting_to_land(waiting: bool, hold: Option<HoldGuard>) -> bool {
     waiting && hold.is_none()
 }

@@ -1,7 +1,7 @@
 //! The single, reconstructed landing order. Ownership and resource probes
 //! belong to callers; selection here never takes a lease or changes a run.
 
-use super::{EventId, EventKind, Priority, RunEvent, RunHistory, RunId, TaskId};
+use super::{Ask, AskKind, EventId, EventKind, Priority, RunEvent, RunHistory, RunId, TaskId};
 use serde::Serialize;
 use std::cmp::Reverse;
 
@@ -64,6 +64,7 @@ impl Entry {
 #[serde(rename_all = "snake_case")]
 pub enum Wait {
     Held,
+    Answer,
     Integrating,
     Turn,
     Worker,
@@ -81,6 +82,7 @@ impl Wait {
     pub const fn describe(self) -> &'static str {
         match self {
             Self::Held => "is waiting for the landing hold to clear",
+            Self::Answer => "is waiting for an answer",
             Self::Integrating => "is waiting for the active landing to finish",
             Self::Turn => "is waiting for the shared landing turn",
             Self::Worker => "is waiting for a worker slot to run e2e",
@@ -95,9 +97,19 @@ impl Wait {
     }
 }
 
+/// An open approval ask can outlive a newer judgment. A landing is
+/// allowed to finish and close that ask; it does not await an answer to it.
+pub fn waiting_for_answer(asks: &[Ask], history: &RunHistory<'_>) -> bool {
+    asks.iter().any(|ask| {
+        ask.is_open()
+            && (ask.kind != AskKind::ApproveLanding || !history.supersedes_landing_ask(ask.id))
+    })
+}
+
 /// Resource facts for one entry, read without mutating its ownership.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Resources {
+    pub unanswered: bool,
     pub disk_short: bool,
     pub cleanup: bool,
     pub leased: bool,
@@ -107,9 +119,9 @@ pub struct Resources {
 }
 
 impl Resources {
-    /// Ready unleased entries backpressure worker admission even while
-    /// waiting for a landing resource. A task hold or replan temporarily
-    /// fences its work out of admission.
+    /// Whether the entry has returned its lease, is prepared and is
+    /// unfenced. Worker backpressure also requires the run to be able
+    /// to progress by Admission's predicate.
     pub const fn counts_toward_backpressure(self) -> bool {
         !self.leased && !self.preparing && !self.fenced
     }
@@ -150,6 +162,8 @@ impl LandingQueue {
             Some(Wait::Fence)
         } else if resources.drain {
             Some(Wait::Drain)
+        } else if resources.unanswered {
+            Some(Wait::Answer)
         } else if resources.disk_short && entry.disk {
             Some(Wait::Disk)
         } else if resources.cleanup {
@@ -173,8 +187,8 @@ impl LandingQueue {
             .or_else(|| (selected != Some(&entry.run_id)).then_some(Wait::QueueOrder))
     }
 
-    /// First independently runnable entry in priority/time order. Skipping
-    /// never changes the timestamp or reserves resources from another run.
+    /// First independently runnable entry in priority/time order. A
+    /// skipped entry retains its original queue position and timestamp.
     pub fn select(
         &self,
         capacity: Capacity,
@@ -260,6 +274,78 @@ mod tests {
             e2e,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_new_landing_judgment_ends_the_wait_for_its_superseded_ask() {
+        let mut ask: Ask = serde_json::from_value(json!({
+            "id": 7, "kind": "approve_landing", "question": "Land?",
+            "options": [], "asked_by": "runtime", "reason_category": "scope",
+            "created_at": 0,
+        }))
+        .unwrap();
+        let events = [
+            event(
+                1,
+                EventKind::AskOpened,
+                json!({"ask_id": 7, "kind": "approve_landing"}),
+            ),
+            event(2, EventKind::IntegrationApproved, json!({})),
+        ];
+        assert!(waiting_for_answer(
+            std::slice::from_ref(&ask),
+            &RunHistory::from_events(&events[..1])
+        ));
+        assert!(!waiting_for_answer(
+            std::slice::from_ref(&ask),
+            &RunHistory::from_events(&events)
+        ));
+        ask.kind = AskKind::WorkerQuestion;
+        assert!(waiting_for_answer(
+            std::slice::from_ref(&ask),
+            &RunHistory::from_events(&events)
+        ));
+        ask.answered_at = Some(1);
+        assert!(!waiting_for_answer(
+            &[ask],
+            &RunHistory::from_events(&events)
+        ));
+    }
+
+    #[test]
+    fn an_answer_wait_preserves_position_and_yields_to_the_next_entry() {
+        let queue = LandingQueue::new(vec![
+            entry(1, Priority::Normal, false),
+            entry(2, Priority::High, false),
+        ]);
+        let capacity = Capacity::default();
+        let head = &queue.entries[0];
+        assert_eq!(head.task_id, TaskId::new(2));
+        let blocked = Resources {
+            unanswered: true,
+            ..Resources::default()
+        };
+        let next = queue
+            .select(capacity, |entry| {
+                if entry.run_id == head.run_id {
+                    blocked
+                } else {
+                    Resources::default()
+                }
+            })
+            .unwrap();
+        assert_eq!(next.task_id, TaskId::new(1));
+        assert_eq!(
+            LandingQueue::explain(head, capacity, blocked, Some(&next.run_id)),
+            Some(Wait::Answer)
+        );
+        assert_eq!(
+            queue
+                .select(capacity, |_| Resources::default())
+                .unwrap()
+                .task_id,
+            TaskId::new(2)
+        );
     }
 
     #[test]

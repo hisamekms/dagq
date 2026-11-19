@@ -25,10 +25,10 @@ use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     disk::{
-        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskDecision, DiskNeeds, DiskRelaxed, DiskRun,
-        DiskStage, DiskState, DiskUsage, LandingCandidate, RELAX_KINDS, RelaxState, RunSample,
-        StageBudgets, StageObservation, StagePeaks, StageSamples, gib, relax_state,
-        size_exceeded_expected, stage_budgets,
+        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskDecision, DiskNeeds, DiskRelaxed, DiskStage,
+        DiskState, DiskUsage, LandingCandidate, RELAX_KINDS, RelaxState, RunSample, StageBudgets,
+        StageObservation, StagePeaks, StageSamples, gib, relax_state, size_exceeded_expected,
+        stage_budgets,
     },
 };
 
@@ -44,10 +44,8 @@ const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by
 /// The question of the disk ask; the runs whose landing waits follow it.
 const DISK_QUESTION: &str = "With no run moving, the free disk space of the queue's directory is below the reserve, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected} ({source}), with unused reservations for each stage). No new run is claimed and no run lands below the reserve. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
-/// Activity in this pass's unfinished-run registry, independent of slots.
-/// `in_flight` counts entries whose `DiskUsage::active` is true; `landing`
-/// counts the INTEGRATOR entries. `landing_waiting` says a queued candidate
-/// could advance but for the disk. Activity controls idle progress and asks.
+/// Activity of runs that can progress in this pass, independent of slots.
+/// A waiting landing counts when it could advance but for the disk.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::application::supervise) struct DiskMoves {
     pub(in crate::application::supervise) parallel: usize,
@@ -69,11 +67,18 @@ impl DiskMoves {
 pub(in crate::application::supervise) struct DiskTarget {
     pub target: super::moving_sizes::MovingTarget,
     pub usage: DiskUsage,
+    pub progress: crate::domain::admission::Progress,
     pub task: TaskId,
-    pub phase: String,
+    pub phase: crate::domain::run_phase::Phase,
     pub container: bool,
     pub candidate: bool,
     pub waiting: bool,
+}
+
+impl DiskTarget {
+    pub(in crate::application::supervise) fn reserved_usage(&self) -> DiskUsage {
+        self.progress.disk_usage(self.usage)
+    }
 }
 
 /// What the supervisor knows of the disk between passes.
@@ -224,9 +229,9 @@ impl HostOpsState {
         let runs = moving
             .iter()
             .zip(&sizes)
-            .map(|(r, (_, current))| DiskRun {
-                stage: r.usage.stage,
-                current: current.map(|(bytes, _)| bytes),
+            .map(|(r, (_, current))| {
+                r.progress
+                    .disk_run(r.usage, current.map(|(bytes, _)| bytes))
             })
             .collect();
         self.record_stage_peaks(env, moving, &sizes)?;
@@ -244,11 +249,14 @@ impl HostOpsState {
         let candidates: Vec<_> = moving
             .iter()
             .zip(&sizes)
-            .filter(|(r, _)| r.candidate)
+            .filter(|(r, _)| {
+                // An in-flight landing can still read the retry threshold.
+                r.candidate && (r.usage.stage == DiskStage::Integrator || r.progress.can_progress())
+            })
             .map(|(r, (_, current))| LandingCandidate {
                 run: r.target.run.clone(),
                 current: current.map(|(bytes, _)| bytes),
-                integrating: r.usage.stage == DiskStage::Integrator,
+                integrating: r.reserved_usage().stage == DiskStage::Integrator,
                 waiting: r.waiting,
             })
             .collect();
@@ -284,7 +292,8 @@ impl HostOpsState {
         let run_views = moving
             .iter()
             .map(|r| {
-                let measurement = if r.usage.stage == DiskStage::Waiting {
+                let stage = r.reserved_usage().stage;
+                let measurement = if stage == DiskStage::Waiting {
                     self.host_metrics.snapshot(
                         &r.target.run,
                         r.target.worktree.as_deref(),
@@ -299,8 +308,8 @@ impl HostOpsState {
                     crate::application::claim_view::RunDiskInput {
                         run: r.target.run.clone(),
                         task: r.task,
-                        stage: r.usage.stage,
-                        phase: r.phase.clone(),
+                        stage,
+                        phase: r.phase.name().to_owned(),
                         container: r.container,
                         measurement,
                     },
@@ -897,6 +906,7 @@ fn samples_fresh(since: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::disk::DiskRun;
 
     /// Raw measurements, not precomputed reservations or remainders, are
     /// the input to the same pure derivation check_disk calls.

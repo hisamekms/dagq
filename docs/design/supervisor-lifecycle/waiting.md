@@ -30,12 +30,12 @@ related:
 
 着地の列は人の待ちとは別で、workerのslotとの境界は[claimを控える](claim-hold.md#workerのslotと着地の列)を読む。
 着地の列はsessionを閉じているため人の待ちの上限にも数にも含めない。
-人の待ちから戻るrunがworkerのslotの空きを待つあいだは、新しいclaimをしない。
+人の待ちから戻れるrunがworkerのslotの空きを待つあいだは、新しいclaimをしない。
 
 ## 待ちの出入り
 
 待ちはrunのstatusを変えずにslotに付ける印で、戻ればphaseの続きから進む（印の定義は `Waiting`）。
-待ちのrunもsupervisorが持ち続けるため、drainもその終了を待つ。
+停止要求を受けたdrainは、holdや答え待ちで止まったrunの待ちを次のsupervisorに渡す（[ADR-t5293-1](../../adr/2026-11-19-t5293-1-drain-keeps-stopped-waits-and-landing-skips-unanswered-entries.md)）。
 slotの数え方を知りたいときは `Supervisor::used_slots` を読む。
 workerのslotは人の待ちと着地の列を除き、着地の順番待ちのうち上限を超えた分だけを含む。
 戻りもこのworkerのslotの空きを待つ。
@@ -44,7 +44,8 @@ workerのslotは人の待ちと着地の列を除き、着地の順番待ちの�
 見張りはsessionへ送らず、答えはslotに戻った後のtickで届ける。
 失ったsessionの開き直しもbackgroundで行い、workspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[開き直しの境界](headless-worker.md#待ちの最中に失ったsessionの開き直し)）。
 待ちを終えた記録と戻り先は `Supervisor::end_wait`、戻す順と計時の再開は `Supervisor::return_waiting_runs` を読む。
-戻す処理は新しいclaimより先で、claimを止めたあいだもdrain中も続く。
+今進めるrunを戻す処理は新しいclaimより先で、claimを止めたあいだもdrain中も続く。
+hold中のrunは待ちが終わってもslotに戻さない。
 
 ## taskのhold
 
@@ -66,6 +67,7 @@ slotの外では段のtimeoutを止め、戻ったら計時をやり直す（`Ph
 待ちはイベントから組み立て直し、開始を記録し直さない。
 復元する状態とphaseが変わったときの扱いは `Supervisor::restore_waiting`、引き継ぐphaseの読み先は `handoff_slots::Takeover` と `Supervisor::resume` を読む。
 引き継ぎは上限を超えても待ちを維持し、adoptは上限に空きがあるときslotの空きを要さずに待ちを引き継ぐ（入口は `Supervisor::adopt_stale_runs`）。
+hold中の待ちは上限に達していてもslotの外で引き継ぐ。
 leaseを失ったprocessは待ちの終わりを書かない。
 adopt側が同じ待ちを続けるためで、待ちを失効させる記録の読み方は `WaitState::of` が持つ。
 

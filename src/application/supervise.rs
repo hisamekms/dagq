@@ -17,7 +17,6 @@ use crate::domain::background_wrapper::StopRoute;
 use crate::domain::light_slots::{self, ClaimRoom};
 use crate::domain::run_phase;
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
-use crate::domain::slot_order::{SlotCandidate, SlotKind, slot_order};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};

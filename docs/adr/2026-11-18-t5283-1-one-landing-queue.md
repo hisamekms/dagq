@@ -6,6 +6,8 @@ status: accepted
 created: 2026-11-18
 updated: 2026-11-18
 accepted_on: 2026-11-18
+amended_by:
+  - adr-t5293-1
 amends:
   - adr-t5107-1 decision 5
   - adr-t5265-1 decision 1

@@ -28,8 +28,8 @@ use crate::{
         memory_files::MemoryFiles,
     },
     domain::{
-        ActorContext, CommitSha, Provider, RunStatus, StaticPolicy, TaskDetail, TaskId, TaskRun,
-        TaskStatus,
+        ActorContext, AskId, CommitSha, LeaseToken, Provider, RunStatus, StaticPolicy, TaskDetail,
+        TaskId, TaskRun, TaskStatus,
         task_hold::{HoldState, HoldTarget, ReleaseChoice, ReleaseDecision, ReleaseRecorded},
         turn::session_name,
         worker_model,
@@ -210,6 +210,141 @@ fn wiring(name: &str, first: super::agent::Receipt) -> Wiring {
             verdicts: vec![verdict("pass", "fine")],
         },
     )
+}
+
+/// Seed the journal of an already-running session rebuilt on takeover.
+fn session_waiting_for_scope(wiring: &Wiring, token: &LeaseToken) -> (TaskRun, AskId) {
+    use crate::domain::{AskKind, AskReason, ClaimOutcome, EventKind, NewAsk};
+    use std::time::SystemTime;
+
+    wiring.register_at(token, SystemTime::UNIX_EPOCH + super::host::STOPPED_AT);
+    let task = wiring.ready_task(&["true"]);
+    let mut queue = wiring.queue();
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&wiring.git.main(), token)
+        .unwrap()
+    else {
+        panic!("claim the waiting run");
+    };
+    assert_eq!(run.task_id(), task);
+    super::harness::connect(&wiring.db)
+        .execute(
+            "UPDATE task_runs SET status='running', workspace_id='waiting', \
+             run_dir='/wiring/waiting/run', worktree_path='/wiring/waiting/worktree', \
+             receipt_path='/wiring/waiting/run/receipt.json' WHERE id=?1",
+            [run.id().as_str()],
+        )
+        .unwrap();
+    let ask = queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: vec!["adr_conflict".into()],
+            kind: AskKind::WorkerQuestion,
+            task_id: Some(task),
+            run_id: Some(run.id().clone()),
+            question: "Which scope should the run use?".into(),
+            options: vec![],
+            asked_by: "worker".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunWaitingStarted,
+            json!({"ask_id": ask.id, "ask_kind": "worker_question", "phase": "session", "status": "running"}),
+        )
+        .unwrap();
+    (*run, ask.id)
+}
+
+#[test]
+fn drain_leaves_a_held_run_in_its_ended_wait_for_the_next_supervisor() {
+    use crate::domain::EventKind;
+    use std::time::Duration;
+
+    let token = LeaseToken::new("draining-held-wait");
+    let wiring = Wiring::new(
+        "drain_leaves_a_held_run_in_its_ended_wait_for_the_next_supervisor",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(Duration::from_millis(1))
+    .with_handoff(token.clone());
+    let (run, ask) = session_waiting_for_scope(&wiring, &token);
+    let task = run.task_id();
+    let mut queue = wiring.queue();
+    queue.answer(ask, "Use this task's scope.").unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunWaitingEnded,
+            json!({"ask_id": ask, "ask_kind": "worker_question", "cause": "answered", "ask_ids": [ask]}),
+        )
+        .unwrap();
+    Holds::new(&mut queue, &ActorContext::user(), &StaticPolicy)
+        .hold(&HoldTarget::Task(task), "Pause the task", None)
+        .unwrap();
+
+    let outcome = wiring.supervise_draining();
+
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    let detail = queue.show(task).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Running);
+    assert_eq!(payloads(&detail, "run_waiting_started").len(), 1);
+    assert_eq!(payloads(&detail, "run_waiting_ended").len(), 1);
+    assert!(payloads(&detail, "run_slot_regained").is_empty());
+    assert!(
+        payloads(&detail, "run_phase_changed")
+            .iter()
+            .any(|event| event["phase"] == "returning" && event["cause"] == "handoff")
+    );
+    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
+    assert!(queue.task_hold(task).unwrap().is_some());
+}
+
+#[test]
+fn drain_leaves_an_unanswered_wait_and_its_lease_for_the_next_supervisor() {
+    use std::time::Duration;
+
+    let token = LeaseToken::new("draining-unanswered-wait");
+    let wiring = Wiring::new(
+        "drain_leaves_an_unanswered_wait_and_its_lease_for_the_next_supervisor",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(Duration::from_millis(1))
+    .with_handoff(token.clone());
+    let (run, ask) = session_waiting_for_scope(&wiring, &token);
+
+    let outcome = wiring.supervise_draining();
+
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    let mut queue = wiring.queue();
+    let task = run.task_id();
+    let detail = queue.show(task).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Running);
+    assert!(queue.task_hold(task).unwrap().is_none());
+    assert!(queue.read_ask(ask).unwrap().is_open());
+    let starts = payloads(&detail, "run_waiting_started");
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["ask_id"], json!(ask));
+    assert!(payloads(&detail, "run_waiting_ended").is_empty());
+    assert!(payloads(&detail, "run_slot_regained").is_empty());
+    assert!(
+        payloads(&detail, "run_phase_changed")
+            .iter()
+            .any(|event| event["phase"] == "waiting" && event["cause"] == "handoff")
+    );
+    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
 }
 
 /// A run held while its turn goes, waiting for a session, released on its

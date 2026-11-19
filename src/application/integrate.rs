@@ -1109,6 +1109,7 @@ pub(super) fn landing_candidates(
 fn first_direct_landing(
     queue: &mut dyn Queue,
     capacity: Capacity,
+    request: IntegrateTarget,
     approved_target: Option<&TaskRun>,
 ) -> Result<Option<TaskRun>> {
     let graph = super::dependency_graph(queue.graph_input()?, None);
@@ -1142,12 +1143,20 @@ fn first_direct_landing(
             continue;
         };
         let history = RunHistory::from_events(&events);
+        let approved = approved_target.is_some_and(|target| target.id() == run.id());
+        // Naming this task approves its landing even with answers still
+        // pending. Those asks close only after the landing succeeds.
+        let named_approval = approved && matches!(request, IntegrateTarget::Task(_));
         let resources = Resources {
+            unanswered: !named_approval
+                && crate::domain::landing_queue::waiting_for_answer(
+                    &queue.unclosed_run_asks(run.id())?,
+                    &history,
+                ),
             // Approval already refused a live lease on the named run.
             // The start transaction still requires the exact token for
             // any lease left there, including a stale one.
-            leased: approved_target.is_none_or(|target| target.id() != run.id())
-                && queue.run_lease(run.id())?.is_some(),
+            leased: !approved && queue.run_lease(run.id())?.is_some(),
             preparing: !history.landing_ready(),
             fenced: queue.turn_fence(run.task_id())?.is_some(),
             ..Default::default()
@@ -1266,13 +1275,15 @@ fn begin(
                     )
                 })?
         }
-        IntegrateTarget::Next => match first_direct_landing(queue, Capacity::default(), None)? {
-            Some(run) => run,
-            None => match queue.next_awaiting_integration()? {
+        IntegrateTarget::Next => {
+            match first_direct_landing(queue, Capacity::default(), target, None)? {
                 Some(run) => run,
-                None => return Ok(None),
-            },
-        },
+                None => match queue.next_awaiting_integration()? {
+                    Some(run) => run,
+                    None => return Ok(None),
+                },
+            }
+        }
     };
     StaticPolicy.authorize(
         requester,
@@ -1313,7 +1324,7 @@ fn begin(
         integrating: !queue.runs_with_status(RunStatus::Integrating)?.is_empty(),
         ..Default::default()
     };
-    first_direct_landing(queue, capacity, Some(&run))?;
+    first_direct_landing(queue, capacity, target, Some(&run))?;
     // Leave the run queued while the update owns the common turn. Read
     // the order again after waiting, while holding the turn for the start.
     let _turn = match ctx.heavy_turn.as_ref() {
@@ -1327,7 +1338,7 @@ fn begin(
                     integrating: !queue.runs_with_status(RunStatus::Integrating)?.is_empty(),
                     ..capacity
                 };
-                first_direct_landing(queue, capacity, Some(&run))?;
+                first_direct_landing(queue, capacity, target, Some(&run))?;
                 Some(guard)
             }
         },

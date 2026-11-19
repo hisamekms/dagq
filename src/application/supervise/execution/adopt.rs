@@ -25,9 +25,9 @@ impl Supervisor<'_> {
     /// inside `adopt_run`, so two supervisors racing for one run take it
     /// exactly once.
     /// Slot capacity is checked per run, not as an early loop cutoff:
-    /// a recorded wait below max_waiting needs no free slot. With no room
-    /// for a wait, adoption waits for a slot and restore_waiting ends that
-    /// wait as phase_changed, leaving its ask eligible to wait again.
+    /// a held wait or a recorded wait below max_waiting needs no free
+    /// slot. Other waits require a free slot and restore_waiting ends
+    /// that wait as phase_changed, leaving its ask eligible to wait again.
     /// The count excludes existing landing-lane runs: adoption can still
     /// rebuild review/resume/e2e and therefore needs worker capacity.
     pub(super) fn adopt_stale_runs(&mut self, parallel: usize) -> Result<()> {
@@ -53,8 +53,8 @@ impl Supervisor<'_> {
                 continue;
             }
             // A run that waits for a person needs no free slot while the
-            // waits are under their limit (ADR-0062 decision 11).
-            let as_waiting = self.adopts_as_waiting(run.id())?;
+            // waits are under their limit, or while its task is held.
+            let as_waiting = self.adopts_as_waiting(&run)?;
             if !as_waiting && self.used_slots() >= parallel {
                 continue;
             }

@@ -1239,6 +1239,7 @@ impl std::str::FromStr for Priority {
 
 pub mod actor;
 pub mod actor_model;
+pub mod admission;
 pub mod after_claim;
 pub mod agent_eval;
 pub mod areas;

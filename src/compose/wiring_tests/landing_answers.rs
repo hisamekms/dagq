@@ -1177,6 +1177,234 @@ fn authorize_resolved_resume(queue: &mut SqliteQueue, run: &crate::domain::TaskR
         .unwrap();
 }
 
+fn reviewed_landing_waiting_for_an_answer(
+    wiring: &Wiring,
+    queue: &mut SqliteQueue,
+) -> (crate::domain::TaskRun, AskId) {
+    use crate::domain::{AskReason, EventKind, NewAsk};
+
+    let head = direct_landing_fixture(
+        wiring,
+        queue,
+        crate::domain::Priority::High,
+        RunStatus::AwaitingIntegration,
+    );
+    queue
+        .record_runtime_event(
+            head.id(),
+            EventKind::ReviewFinished,
+            json!({"verdict":"pass"}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(head.id(), EventKind::LandingQueued, json!({"via":"review"}))
+        .unwrap();
+    let ask = queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: vec!["adr_conflict".into()],
+            kind: AskKind::WorkerQuestion,
+            task_id: Some(head.task_id()),
+            run_id: Some(head.id().clone()),
+            question: "Which behavior is required?".into(),
+            options: vec![],
+            asked_by: "worker".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    (head, ask.id)
+}
+
+#[test]
+fn a_named_landing_with_an_open_ask_keeps_its_disk_reservation() {
+    use crate::application::{
+        integrate::IntegrateTarget, supervise::repository_config::StartupRules,
+    };
+    use std::{
+        sync::{Arc, atomic::Ordering},
+        time::Duration,
+    };
+
+    const GIB: u64 = 1 << 30;
+    let wiring = Wiring::new(
+        "a_named_landing_with_an_open_ask_keeps_its_disk_reservation",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(Duration::from_millis(1))
+    .with_repository_startup_file(Arc::new(|| {
+        let config = crate::infrastructure::run_env::parse_config(
+            "[disk]\nestimate = 'fixed'\nrun_size = '20GiB'\nlanding_size = '30GiB'\n",
+        )?;
+        Ok(StartupRules {
+            stall: config.stall,
+            disk: config.disk,
+            resume: config.resume,
+            review_jobs: config.review_jobs,
+        })
+    }));
+    let mut queue = wiring.queue();
+    queue.bind_repository("/wiring/repo/.git").unwrap();
+    let (run, ask) = reviewed_landing_waiting_for_an_answer(&wiring, &mut queue);
+    let landing = wiring
+        .approve_integration(IntegrateTarget::Task(run.task_id()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(landing.run.status(), RunStatus::Integrating);
+
+    // Keep the named landing at its start boundary while the supervisor
+    // reads the space that a claim would need with its budget occupied.
+    wiring.free.store(35 * GIB, Ordering::SeqCst);
+    let mut observed = None;
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        observed = queue
+            .supervisors()
+            .unwrap()
+            .into_iter()
+            .find_map(|owner| queue.supervisor_disk_status(&owner.token).unwrap());
+        if observed.is_some() {
+            stop();
+        }
+        observed.is_some()
+    });
+
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(queue.read_ask(ask).unwrap().is_open());
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::Integrating
+    );
+    let disk = observed.expect("the supervisor's disk decision");
+    assert_eq!(disk["integration_slot"], json!([run.id()]));
+    assert_eq!(disk["needs"]["moving"], 1, "{disk}");
+    assert_eq!(disk["needs"]["integrators"], 1, "{disk}");
+    assert_eq!(disk["needs"]["remaining"], 30 * GIB, "{disk}");
+    assert_eq!(disk["claims"], 0, "{disk}");
+}
+
+/// An unanswered ask blocks the review pass at the head of LandingQueue.
+/// While it cannot progress, the idle disk rule lets an interrupt claim.
+#[test]
+fn admission_leaves_a_review_pass_waiting_and_claims_an_interrupt() {
+    use crate::application::TaskStore;
+    use crate::domain::Priority;
+
+    let wiring = Wiring::new(
+        "admission_leaves_a_review_pass_waiting_and_claims_an_interrupt",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1));
+    // Stop after the claim write, before an unrelated worker lifecycle.
+    wiring.fail_claim_launches(true);
+    let mut queue = wiring.queue();
+    let (head, _) = reviewed_landing_waiting_for_an_answer(&wiring, &mut queue);
+    let interrupt = wiring.ready_task(&["true"]);
+    queue
+        .set_priority(interrupt, Some(Priority::Interrupt))
+        .unwrap();
+    let outcome = wiring.supervise_once_reporting();
+    assert!(
+        outcome["errors"]
+            .to_string()
+            .contains("refuses to start the wrapper"),
+        "{outcome}"
+    );
+
+    let detail = queue.show(head.task_id()).unwrap();
+    assert_eq!(
+        payloads(&detail, "landing_queue_entered")[0]["basis"],
+        "review_finished"
+    );
+    assert_eq!(
+        payloads(&detail, "landing_queue_waiting")[0]["waiting_for"],
+        "answer"
+    );
+    assert!(payloads(&detail, "integration_started").is_empty());
+    assert!(queue.run_lease(head.id()).unwrap().is_none());
+    assert_eq!(
+        payloads(&queue.show(interrupt).unwrap(), "run_claimed").len(),
+        1
+    );
+}
+
+/// A stopped head keeps its queue position while the next entry lands.
+#[test]
+fn admission_lands_the_next_entry_while_the_head_waits_for_an_answer() {
+    use crate::application::{RunFiles, integrate::binding};
+    use crate::domain::{EventKind, Priority};
+    use std::path::Path;
+
+    let wiring = Wiring::new(
+        "admission_lands_the_next_entry_while_the_head_waits_for_an_answer",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(1));
+    wiring.git.allow_clean_merges();
+    let mut queue = wiring.queue();
+    let (head, ask) = reviewed_landing_waiting_for_an_answer(&wiring, &mut queue);
+    let next = direct_landing_fixture(
+        &wiring,
+        &mut queue,
+        Priority::Normal,
+        RunStatus::AwaitingIntegration,
+    );
+    let receipt = succeeded_at_the_head(
+        next.id(),
+        Path::new(next.worktree_path().unwrap()),
+        &wiring.git,
+    )
+    .unwrap();
+    wiring
+        .files
+        .write(
+            Path::new(next.receipt_path().unwrap()),
+            &serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+    let mut approval = json!({"push": false});
+    let events = queue.run_events(next.id()).unwrap();
+    binding::put(
+        &mut approval,
+        &binding::of_run(&wiring.git, &next, &events).unwrap(),
+    );
+    queue
+        .record_runtime_event(next.id(), EventKind::IntegrationApproved, approval)
+        .unwrap();
+
+    wiring.supervise_once();
+
+    let head = queue.show(head.task_id()).unwrap();
+    assert!(queue.read_ask(ask).unwrap().is_open());
+    assert_eq!(head.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert_eq!(payloads(&head, "landing_queue_entered").len(), 1);
+    assert_eq!(
+        payloads(&head, "landing_queue_waiting").last().unwrap()["waiting_for"],
+        "answer"
+    );
+    assert!(payloads(&head, "landing_queue_left").is_empty());
+    assert!(payloads(&head, "integration_started").is_empty());
+    let next = queue.show(next.task_id()).unwrap();
+    assert_eq!(payloads(&next, "integration_started").len(), 1);
+    assert_eq!(
+        next.runs[0].status(),
+        RunStatus::Integrated,
+        "{:?}",
+        payloads(&next, "integration_error")
+    );
+}
+
 /// A named approval is durable even when an earlier resolved resume
 /// owns the next turn in the shared order.
 #[test]
@@ -1232,11 +1460,11 @@ fn a_named_integrate_queues_its_approval_behind_an_earlier_resolved_resume() {
     }
 }
 
-/// `--next` prefers a later high-priority authorization over an older
-/// normal one, then the earlier of two high-priority authorizations.
+/// `--next` skips a higher-priority run awaiting an answer and selects
+/// among ready authorizations by priority and entry time.
 #[test]
 fn integrate_next_uses_priority_then_entry_time_including_resolved_resumes() {
-    use crate::application::integrate::IntegrateTarget;
+    use crate::application::{TaskStore, integrate::IntegrateTarget};
     use crate::domain::{EventKind, Priority};
 
     let wiring = Wiring::new(
@@ -1248,6 +1476,10 @@ fn integrate_next_uses_priority_then_entry_time_including_resolved_resumes() {
     );
     let mut queue = wiring.queue();
     queue.bind_repository("/wiring/repo/.git").unwrap();
+    let (unanswered, ask) = reviewed_landing_waiting_for_an_answer(&wiring, &mut queue);
+    queue
+        .set_priority(unanswered.task_id(), Some(Priority::Urgent))
+        .unwrap();
     let pending = direct_landing_fixture(
         &wiring,
         &mut queue,
@@ -1312,6 +1544,10 @@ fn integrate_next_uses_priority_then_entry_time_including_resolved_resumes() {
         .unwrap();
     assert_eq!(request.run.id(), earlier_high.id());
     assert_eq!(request.previous, RunStatus::NeedsSession);
+    let unanswered_detail = queue.show(unanswered.task_id()).unwrap();
+    assert!(queue.read_ask(ask).unwrap().is_open());
+    assert!(payloads(&unanswered_detail, "integration_started").is_empty());
+    assert!(queue.run_lease(unanswered.id()).unwrap().is_none());
     let pending_detail = queue.show(pending.task_id()).unwrap();
     assert!(payloads(&pending_detail, "landing_queue_entered").is_empty());
     assert!(payloads(&pending_detail, "integration_started").is_empty());

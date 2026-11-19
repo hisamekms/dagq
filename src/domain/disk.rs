@@ -486,6 +486,7 @@ pub fn landing_need(reserve: u64, budget: Option<u64>, current: Option<u64>, oth
 pub struct LandingCandidate {
     pub run: super::RunId,
     pub current: Option<u64>,
+    /// This candidate is already counted in `DiskState::moving` as an integrator.
     pub integrating: bool,
     pub waiting: bool,
 }
@@ -1043,13 +1044,8 @@ impl DiskState {
         } else {
             expected.unwrap_or(0)
         };
-        let claims_wait_reason = if moving == 0 && self.landing_waiting {
-            Some(ClaimsWaitReason::LandingFirst)
-        } else if moving > 0 && expected.is_none() {
-            Some(ClaimsWaitReason::NoSamples)
-        } else {
-            None
-        };
+        let claims_wait_reason =
+            super::admission::disk_wait(moving, self.landing_waiting, expected);
         DiskNeeds {
             volume: self.total,
             reserve_share: share,
@@ -2535,30 +2531,6 @@ mod tests {
         assert_eq!(state.needs(0.05).remaining, 29 * GIB);
         state.runs[0].current = None;
         assert_eq!(state.needs(0.05).remaining, 41 * GIB);
-    }
-
-    #[test]
-    fn task_hold_removes_landing_first_and_release_restores_it() {
-        use crate::domain::{
-            HoldId, TaskId,
-            task_hold::{HoldGuard, waiting_to_land},
-        };
-        let mut state = staged_state();
-        state.runs = vec![staged(DiskStage::Waiting, None)];
-        state.moving = 0;
-        let held = Some(HoldGuard {
-            task: TaskId::new(7),
-            hold: HoldId::new(4),
-        });
-        for (guard, expected) in [(held, None), (None, Some(ClaimsWaitReason::LandingFirst))] {
-            state.landing_waiting = waiting_to_land(true, guard);
-            assert_eq!(state.landing_waiting, guard.is_none());
-            assert_eq!(state.needs(0.05).claims_wait_reason, expected);
-            assert_eq!(
-                state.claims(0.05),
-                if guard.is_some() { Some(3) } else { Some(0) }
-            );
-        }
     }
 
     #[test]

@@ -212,13 +212,9 @@ fn a_wait_is_taken_over_after_a_handoff() {
     assert_eq!(sent(&run), [format!("answer to ask {ask}: blue")]);
 }
 
-/// A supervisor whose owner (a test's process) is gone waits for no
-/// person's answer, even in a drain asked for before: a drain without its
-/// owner gone waits for the run's `worker_question` to be answered, and
-/// once the owner is SIGKILLed the loop ends with the reason `owner_gone`
-/// and no registration left. The run keeps its status, its open ask and
-/// its lease, which goes stale with the supervisor for another one to
-/// adopt (a run without a lease is never adopted).
+/// When the owner process is killed, the supervisor stops with reason
+/// `owner_gone`. The waiting run keeps its status, open ask and lease for
+/// another supervisor to adopt.
 #[test]
 fn a_supervisor_whose_owner_is_gone_lets_a_waiting_run_go_and_stops() {
     let (_dir, repo, db) = fixture();
@@ -228,7 +224,6 @@ fn a_supervisor_whose_owner_is_gone_lets_a_waiting_run_go_and_stops() {
         owner: Some(owner.pid()),
         ..supervise_options(1, false)
     };
-    let (stop, passes) = (options.stop.clone(), options.passes.clone());
     let supervisor = supervise_in_thread(&db, &repo, &backend, options);
     wait_until(&db, Duration::from_secs(60), |queue| {
         run_of(queue, 1)
@@ -237,17 +232,6 @@ fn a_supervisor_whose_owner_is_gone_lets_a_waiting_run_go_and_stops() {
     let token = SqliteQueue::open(&db).unwrap().supervisors().unwrap()[0]
         .token
         .clone();
-    // A drain waits for the answer while the owner lives.
-    stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    wait_until(&db, Duration::from_secs(60), |_| {
-        !common::service::events(&db, "supervisor_draining").is_empty()
-    });
-    let drained_from = passes.load(std::sync::atomic::Ordering::SeqCst);
-    wait_until(&db, Duration::from_secs(60), |_| {
-        passes.load(std::sync::atomic::Ordering::SeqCst) >= drained_from + 5
-    });
-    assert!(!supervisor.is_finished(), "the drain did not wait");
-
     owner.kill();
     let outcome = joined(supervisor, "the supervisor whose owner is gone");
     let outcome = outcome.unwrap();
@@ -265,7 +249,7 @@ fn a_supervisor_whose_owner_is_gone_lets_a_waiting_run_go_and_stops() {
     assert!(queue.supervisors().unwrap().is_empty());
     let draining = common::service::events(&db, "supervisor_draining");
     assert_eq!(draining.len(), 1, "{draining:?}");
-    assert_eq!(draining[0]["payload"]["reason"], "stop_requested");
+    assert_eq!(draining[0]["payload"]["reason"], "owner_gone");
     assert_eq!(draining[0]["payload"]["runs"], json!([run.id()]));
     let stopped = common::service::events(&db, "supervisor_stopped");
     assert_eq!(stopped[0]["payload"]["reason"], "owner_gone", "{stopped:?}");

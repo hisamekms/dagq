@@ -348,8 +348,12 @@ impl Wiring {
         token: crate::domain::LeaseToken,
         fault: Arc<super::startup::Fault>,
     ) -> Self {
-        self.handoff = Some(token);
         self.startup_fault = Some(fault);
+        self.with_handoff(token)
+    }
+
+    pub(super) fn with_handoff(mut self, token: crate::domain::LeaseToken) -> Self {
+        self.handoff = Some(token);
         self
     }
 

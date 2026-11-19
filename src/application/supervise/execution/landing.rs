@@ -23,13 +23,14 @@ use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
 use crate::domain::ReviseLimit;
 use crate::domain::actor_model::{self, ActorLaunch, AgentModel, ModelRole};
+use crate::domain::admission;
 use crate::domain::cancel_reason::NewCancel;
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
 use crate::domain::headless_job::{JobKind, JobSession, JobStop};
 use crate::domain::landing_binding::Reapproval;
-use crate::domain::landing_queue::{Capacity, Entry, LandingQueue, Resources};
+use crate::domain::landing_queue::{self, Capacity, Entry, LandingQueue, Resources};
 use crate::domain::provider_trial::{self, RunPair};
 use crate::domain::resume::{SEND_BACK_NO_RESUME, send_back_resumes};
 use crate::domain::review_builtins::ACCEPTANCE_PRECHECK;
@@ -3094,26 +3095,30 @@ impl Supervisor<'_> {
     /// ([`drain_starts_approved_landing`]); else it is left queued for the
     /// next supervisor. A landing started here is one of the runs the drain
     /// waits for.
-    pub(super) fn drain_landing_answers(&mut self) -> Result<()> {
+    pub(super) fn drain_landing_answers(&mut self, paused: &HashSet<RunId>) -> Result<()> {
         self.apply_landing_answers()?;
         let held = self.claim.slots.runs();
         self.landing.drain_landings.retain(|run| held.contains(run));
+        let draining: Vec<_> = held
+            .iter()
+            .filter(|run| !paused.contains(*run))
+            .cloned()
+            .collect();
         let own_landing_waits = self.claim.slots.iter().any(|slot| {
             matches!(slot.phase, Phase::AwaitingSlot)
                 && !self.landing.drain_landings.contains(slot.run.id())
         });
-        if self.registration.owner_gone_since().is_some()
-            || self.landing.pending_landings.is_empty()
-                && !drain_starts_approved_landing(
-                    self.registration.owner_gone_since().is_some(),
-                    own_landing_waits,
-                    &held,
-                    &self.landing.drain_landings,
-                )
-        {
+        let owner_gone = self.registration.owner_gone_since().is_some();
+        let may_adopt = drain_starts_approved_landing(
+            owner_gone,
+            own_landing_waits,
+            &draining,
+            &self.landing.drain_landings,
+        );
+        if owner_gone || (self.landing.pending_landings.is_empty() && !may_adopt) {
             return Ok(());
         }
-        if let Err(error) = self.start_approved_landings(self.claim.parallel, true) {
+        if let Err(error) = self.start_approved_landings(self.claim.parallel, true, may_adopt) {
             warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
         }
         for run in self.claim.slots.runs() {
@@ -3137,6 +3142,9 @@ impl Supervisor<'_> {
                 let history = RunHistory::from_events(&events);
                 history.can_queue_landing(run.status())
                     && history.landing_ready()
+                    && self.queue.unclosed_run_asks(id).is_ok_and(|asks| {
+                        !landing_queue::waiting_for_answer(&asks, &history)
+                    })
                     && self.queue.turn_fence(run.task_id()).is_ok_and(|fence| fence.is_none())
                     // A resumed run can return directly during admission.
                     // Give that return a pass before deciding to leave an
@@ -3155,10 +3163,24 @@ impl Supervisor<'_> {
     /// Landing selection refreshes it again after applying answers.
     pub(super) fn refresh_landing_backpressure(&mut self) -> Result<()> {
         let mut waiting = 0;
+        let gates = self.admission_gates();
+        let unanswered = self.unanswered_runs()?;
         for (run, events) in crate::application::integrate::landing_candidates(&*self.queue)? {
+            let history = RunHistory::from_events(&events);
+            let asks = unanswered
+                .get(run.id())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             if self
-                .landing_readiness(&run, &RunHistory::from_events(&events))?
+                .landing_readiness(&run, &history)?
                 .counts_toward_backpressure()
+                && self
+                    .run_progress(
+                        &run,
+                        gates,
+                        landing_queue::waiting_for_answer(asks, &history),
+                    )?
+                    .can_progress()
             {
                 waiting += 1;
             }
@@ -3186,6 +3208,7 @@ impl Supervisor<'_> {
         &mut self,
         parallel: usize,
         draining: bool,
+        drain_may_adopt: bool,
     ) -> Result<()> {
         // Close observations even when cancellation or a new judgment moved
         // a run out of the statuses scanned for current candidates.
@@ -3222,22 +3245,13 @@ impl Supervisor<'_> {
                 )
             })
         });
-        let held_runs = self.claim.slots.runs();
-        let preparing = self.claim.slots.iter().any(|slot| {
-            matches!(slot.phase, Phase::AwaitingSlot)
-                && !self.landing.drain_landings.contains(slot.run.id())
-        });
-        let drain_may_adopt = self.registration.stopping()
-            && drain_starts_approved_landing(
-                self.registration.owner_gone_since().is_some(),
-                preparing,
-                &held_runs,
-                &self.landing.drain_landings,
-            );
-        let held = self.landing.run_env_missing
-            || self.verification_container_held()
-            || self.observation.ci().held()
-            || self.landing.unresolved;
+        let gates = self.admission_gates();
+        let container_held = self.verification_container_held();
+        let progresses = admission::Progress {
+            gates,
+            ..Default::default()
+        };
+        let held = !progresses.can_progress() || container_held;
         let integrating = !self
             .queue
             .runs_with_status(RunStatus::Integrating)?
@@ -3252,7 +3266,7 @@ impl Supervisor<'_> {
         let guard = cleanup::lock_cleaning(&cleaning);
         let mut entries = Vec::new();
         let mut candidates = HashMap::new();
-        let mut resources = HashMap::new();
+        let unanswered = self.unanswered_runs()?;
         for (run, events) in crate::application::integrate::landing_candidates(&*self.queue)? {
             let priority = effective
                 .get(&run.task_id())
@@ -3274,30 +3288,39 @@ impl Supervisor<'_> {
                     json!(entry),
                 )?;
             }
-            resources.insert(
-                run.id().clone(),
-                Resources {
-                    disk_short: self.host.landing_short_for(run.id()),
-                    cleanup: guard.reserved(run.id()),
-                    // A drain finishes its finite returned set. Other work
-                    // may start only while an original held run keeps it going.
-                    drain: draining
-                        && !self.landing.pending_landings.contains(run.id())
-                        && (!drain_may_adopt
-                            || RunHistory::from_events(&events)
-                                .recovered_landing()
-                                .is_some()),
-                    ..self.landing_readiness(&run, &RunHistory::from_events(&events))?
-                },
-            );
-            candidates.insert(run.id().clone(), run);
+            let history = RunHistory::from_events(&events);
+            let asks = unanswered
+                .get(run.id())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let facts = self.run_progress(
+                &run,
+                gates,
+                landing_queue::waiting_for_answer(asks, &history),
+            )?;
+            let resources = Resources {
+                unanswered: facts.unanswered,
+                // A stopped run was excluded from the disk snapshot.
+                // Its absent reservation does not make it a disk skip.
+                disk_short: facts.can_progress() && self.host.landing_short_for(run.id()),
+                cleanup: guard.reserved(run.id()),
+                // A drain finishes its finite returned set. Other work
+                // may start only while an original held run keeps it going.
+                drain: draining
+                    && !self.landing.pending_landings.contains(run.id())
+                    && (!drain_may_adopt || history.recovered_landing().is_some()),
+                ..self.landing_readiness(&run, &history)?
+            };
+            candidates.insert(run.id().clone(), (run, resources, facts));
             entries.push(entry);
         }
         drop(guard);
         self.claim.slots.set_unleased_landing_waits(
-            resources
+            candidates
                 .values()
-                .filter(|facts| facts.counts_toward_backpressure())
+                .filter(|(_, resources, progress)| {
+                    resources.counts_toward_backpressure() && progress.can_progress()
+                })
                 .count(),
         );
         let queued = LandingQueue::new(entries);
@@ -3308,12 +3331,41 @@ impl Supervisor<'_> {
                 && self.take_check_turn("landing queue")?.is_none(),
             worker_full: !self.claim.slots.queued_e2e_has_room(parallel),
         };
-        let selected = queued
-            .select(capacity, |entry| resources[&entry.run_id])
-            .map(|entry| entry.run_id.clone());
+        // The queue chooses the first eligible entry. Admission applies
+        // the shared landing gates to that selection.
+        let next = queued.select(
+            Capacity {
+                worker_full: capacity.worker_full,
+                ..Capacity::default()
+            },
+            |entry| candidates[&entry.run_id].1,
+        );
+        let starts = admission::admit(
+            next.into_iter()
+                .map(|entry| admission::Candidate {
+                    item: entry,
+                    kind: admission::Kind::Landing {
+                        needs_worker: entry.e2e,
+                    },
+                    priority: entry.priority,
+                    progress: Default::default(),
+                })
+                .collect(),
+            admission::Resources {
+                gates,
+                container_held,
+                integrating,
+                landing_turn_busy: capacity.turn_busy,
+                ..Default::default()
+            },
+        );
+        let selected = starts
+            .starts
+            .first()
+            .map(|candidate| &candidate.item.run_id);
         for entry in &queued.entries {
             let waiting =
-                LandingQueue::explain(entry, capacity, resources[&entry.run_id], selected.as_ref());
+                LandingQueue::explain(entry, capacity, candidates[&entry.run_id].1, selected);
             let events = self.queue.run_events(&entry.run_id)?;
             let payload = json!({"judgment": entry.judgment, "waiting_for": waiting});
             if crate::domain::landing_queue::recorded_wait(&events, entry.judgment)
@@ -3326,16 +3378,12 @@ impl Supervisor<'_> {
                 )?;
             }
         }
-        let Some(selected) = selected else {
+        let Some(candidate) = starts.starts.into_iter().next() else {
             return Ok(());
         };
-        let run = candidates.remove(&selected).expect("queue candidate");
-        let e2e = queued
-            .entries
-            .iter()
-            .find(|entry| entry.run_id == selected)
-            .expect("selected entry")
-            .e2e;
+        let entry = candidate.item;
+        let (run, _, _) = candidates.remove(&entry.run_id).expect("queue candidate");
+        let e2e = entry.e2e;
         let current_main = self.repository.main_head()?;
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): the landing builds them again once it has passed.
@@ -3350,6 +3398,9 @@ impl Supervisor<'_> {
         if self.park_queued_by_recheck(&run, &current_main)?.is_some() {
             guard.withdraw(run.id());
             self.claim.slots.remove_unleased_landing_wait();
+            return Ok(());
+        }
+        if e2e && !self.landing_still_admitted(&run, entry, candidate.kind)? {
             return Ok(());
         }
         let main = (!e2e).then_some(current_main);
@@ -3377,6 +3428,9 @@ impl Supervisor<'_> {
         let Some(turn) = self.take_check_turn("landing queue")? else {
             return Ok(());
         };
+        if !self.landing_still_admitted(&run, entry, candidate.kind)? {
+            return Ok(());
+        }
         let starting = self.begin_landing(run.id(), &main);
         drop(turn);
         let landing = match starting {
@@ -3406,6 +3460,39 @@ impl Supervisor<'_> {
         );
         Ok(())
     }
+    /// Re-read the candidate's stops after acquiring its execution fence.
+    fn landing_still_admitted(
+        &self,
+        run: &TaskRun,
+        entry: &Entry,
+        kind: admission::Kind,
+    ) -> Result<bool> {
+        let asks = self.queue.unclosed_run_asks(run.id())?;
+        let events = self.queue.run_events(run.id())?;
+        let history = RunHistory::from_events(&events);
+        let resources = Resources {
+            unanswered: landing_queue::waiting_for_answer(&asks, &history),
+            ..self.landing_readiness(run, &history)?
+        };
+        if LandingQueue::waiting(entry, Capacity::default(), resources).is_some() {
+            return Ok(false);
+        }
+        Ok(admission::admit(
+            vec![admission::Candidate {
+                item: run.id(),
+                progress: Default::default(),
+                kind,
+                priority: Priority::Normal,
+            }],
+            admission::Resources {
+                gates: self.admission_gates(),
+                container_held: self.verification_container_held(),
+                ..Default::default()
+            },
+        )
+        .starts_work())
+    }
+
     /// Begin the landing of `id` onto `main` under this supervisor's token.
     /// While no stop is asked, a handoff request refuses it in the same
     /// write ([`crate::application::HandoffAsked`]), even one recorded after
@@ -3413,7 +3500,7 @@ impl Supervisor<'_> {
     /// caller leaves the run as it was for the next pass, which drains for
     /// the request. A stop wins over a handoff, and its drain lands
     /// whatever request it holds.
-    pub(super) fn begin_landing(&mut self, id: &RunId, main: &CommitSha) -> Result<TaskRun> {
+    fn begin_landing(&mut self, id: &RunId, main: &CommitSha) -> Result<TaskRun> {
         let token = self.registration.token().clone();
         if handoff::handoff_refuses_starts(self.registration.stopping()) {
             self.queue.begin_integration(id, &token, main)

@@ -20,6 +20,8 @@ amends:
   - adr-0051 decision 3
   - adr-t1992-1 decision 3
   - adr-t1992-1 decision 6
+amended_by:
+  - adr-t5293-1
 owners:
   - hisamekms
 tags:

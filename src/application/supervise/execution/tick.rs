@@ -19,20 +19,25 @@ use super::*;
 impl Supervisor<'_> {
     /// One pass over the slots; with `unsettled_only`, over the slots a
     /// handoff waits for (their validation, e2e or landing in progress)
-    /// and its workers' receipts only ([`Slot::pass`]). A step the queue
+    /// and its workers' receipts only ([`Slot::pass`]). `paused` holds
+    /// the stopped waits a drain leaves for the next process. A step the queue
     /// service did not answer ends the pass with that error, its slot kept
     /// as it was and judged against the queue once the service answers
     /// ([`Self::reconcile_unanswered`]): the service may have done what it
     /// was asked, so the step is neither given up on nor taken for done.
-    pub(super) fn tick(&mut self, unsettled_only: bool) -> Result<()> {
+    pub(super) fn tick(&mut self, unsettled_only: bool, paused: &HashSet<RunId>) -> Result<()> {
         self.sample_load();
         // A turn's container waits for its sccache server before its agent.
         self.answer_sccache_requests();
         if !unsettled_only {
-            self.start_waits();
+            self.start_waits(paused);
         }
         let mut index = 0;
         while index < self.claim.slots.len() {
+            if paused.contains(self.claim.slots[index].run.id()) {
+                index += 1;
+                continue;
+            }
             let landing_waited = self.claim.slots.iter().any(Slot::landing_runs);
             let pass = self.claim.slots[index].pass(unsettled_only, landing_waited);
             if pass == Pass::Skip {

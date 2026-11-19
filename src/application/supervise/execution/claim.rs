@@ -13,6 +13,8 @@
 //! the rest of [`super`] calls are `pub(super)`.
 
 use super::*;
+use crate::domain::admission::{self, Blocked, Candidate, Gates, Resources};
+use crate::domain::slot_order::SlotKind;
 
 /// What a candidate in the line of a fill pass starts (ADR-t1850-1).
 enum LineItem {
@@ -30,9 +32,8 @@ struct ClaimPass {
     /// The hash of the plugin a Claude worker loads, read once per pass.
     plugin: Option<String>,
     trial: WorkerTrial,
-    /// How many more runs the free disk space lets this pass claim
-    /// (ADR-t4473-1); `None` for no limit.
-    disk_claims: Option<usize>,
+    /// The pass's gates and its remaining disk budget for new claims.
+    resources: Resources,
 }
 
 /// How a claim loop of a fill pass ended.
@@ -86,7 +87,7 @@ impl Supervisor<'_> {
         // Like a landing answer before: an error (an `integrate` that took
         // the integration slot since the check, a main that did not
         // resolve) is noted, and the run stays queued for a later pass.
-        if let Err(error) = self.start_approved_landings(parallel, false) {
+        if let Err(error) = self.start_approved_landings(parallel, false, false) {
             warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
         }
         // A run recovered from a landing it may not land again (task 1118),
@@ -107,8 +108,7 @@ impl Supervisor<'_> {
         self.apply_triage_answers()?;
         // A slot the runs freed since the last pass ends the wait for one
         // before anything takes it again (ADR-t1662-1 decision 6).
-        self.claim
-            .note_slots_full(&*self.queue, self.registration.token(), parallel);
+        self.note_admission_slots_full(parallel)?;
         // A session that ended on a full disk is resumed once there is
         // room, before the resumes below take it into a free slot (goal
         // 260).
@@ -121,10 +121,13 @@ impl Supervisor<'_> {
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
         // missing program too (task 303).
-        let resumes = if !self.landing.unresolved
-            && !self.landing.run_env_missing
-            && !self.observation.ci().held()
-        {
+        let gates = self.admission_gates();
+        let gates_only = Resources {
+            free_slots: 1,
+            gates,
+            ..Resources::default()
+        };
+        let resumes = if admission::probe(SlotKind::Resume, gates_only).is_none() {
             self.resume_candidates(self.used_slots() < parallel)?
         } else {
             for candidate in self.queue.runs_needing_session()? {
@@ -132,7 +135,15 @@ impl Supervisor<'_> {
             }
             Vec::new()
         };
-        let recoveries = if self.used_slots() < parallel && !self.landing.unresolved {
+        let recoveries = if admission::probe(
+            SlotKind::Recovery,
+            Resources {
+                free_slots: parallel.saturating_sub(self.used_slots()),
+                ..gates_only
+            },
+        )
+        .is_none()
+        {
             self.triage_candidates()?
         } else {
             Vec::new()
@@ -151,19 +162,19 @@ impl Supervisor<'_> {
         let mut line = Vec::new();
         for candidate in resumes {
             let priority = self.line_priority(&effective, candidate.run.task_id())?;
-            line.push(SlotCandidate {
-                kind: SlotKind::Resume,
+            line.push(Candidate::slot(
+                SlotKind::Resume,
                 priority,
-                item: LineItem::Resume(Box::new(candidate)),
-            });
+                LineItem::Resume(Box::new(candidate)),
+            ));
         }
         for run in recoveries {
             let priority = self.line_priority(&effective, run.task_id())?;
-            line.push(SlotCandidate {
-                kind: SlotKind::Recovery,
+            line.push(Candidate::slot(
+                SlotKind::Recovery,
                 priority,
-                item: LineItem::Recovery(Box::new(run)),
-            });
+                LineItem::Recovery(Box::new(run)),
+            ));
         }
         // Takes no slot: only closes and frees what ended runs left.
         if let Err(error) = self.sweep_ended_runs(sweep_interval) {
@@ -182,12 +193,12 @@ impl Supervisor<'_> {
         // Whether this pass read the candidates with a free normal slot.
         let mut free_slot = false;
         // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
-        if !(self.landing.run_env_missing
-            || self.observation.ci().held()
-            || self.landing.unresolved
-            || self.claim.repository_config_missing)
-            && self.host.service_up()
-        {
+        let claim_gates = Resources {
+            repository_config_missing: self.claim.repository_config_missing,
+            service_down: !self.host.service_up(),
+            ..gates_only
+        };
+        if admission::probe(SlotKind::Claim, claim_gates).is_none() {
             // Read once per pass, so turning the trial on or off takes
             // effect without a restart; a file that cannot be read
             // claims outside it (provisioning reports the file's error).
@@ -199,7 +210,8 @@ impl Supervisor<'_> {
                 WorkerTrial::default()
             });
             // The runs in flight go on; only new claims wait (task 327).
-            if self.hold_claims()? {
+            let resources = self.read_claim_resources(claim_gates)?;
+            if admission::probe(SlotKind::Claim, resources).is_some() {
                 // Neither provider can take a worker: the candidates are
                 // deferred for it too (ADR-t813-2 decision 6).
                 if self.routes().is_empty() {
@@ -212,33 +224,26 @@ impl Supervisor<'_> {
                     host: None,
                     plugin: None,
                     trial,
-                    disk_claims: self.host.disk_claims(),
+                    resources,
                 });
                 // Only while there is room for a claim, as the claim loop
                 // reads the candidates only then.
-                let room = self.claim_room(parallel);
-                if room != ClaimRoom::None {
+                let capacity = self.admission_capacity(parallel)?;
+                if admission::probe(SlotKind::Claim, capacity).is_none() {
                     // A held task is no candidate (the ready query leaves
                     // it out); its record says why (ADR-t1879-1).
                     self.note_held_claims()?;
-                    free_slot = room == ClaimRoom::Any;
-                    let light = self.light_tasks(room)?;
-                    let claimable = self.claimable(&graph, light.as_ref(), &providers)?;
-                    // Each claim at its own effective priority: aging lends
-                    // none another's (ADR-t1489-1).
-                    let mut own = HashMap::new();
-                    for &id in &claimable.order {
-                        own.insert(id, self.line_priority(&effective, id)?);
+                    free_slot = true;
+                    let claimable = self.claimable(&graph, None, &providers)?;
+                    // One transaction loop per effective-priority band.
+                    // The ready order, including aging, is reread in it.
+                    let mut priorities = HashSet::new();
+                    for id in claimable.order {
+                        let priority = self.line_priority(&effective, id)?;
+                        if priorities.insert(priority) {
+                            line.push(Candidate::slot(SlotKind::Claim, priority, LineItem::Claim));
+                        }
                     }
-                    line.extend(
-                        crate::domain::slot_order::claims(&claimable.order, &own)
-                            .into_iter()
-                            .map(|claim| SlotCandidate {
-                                kind: claim.kind,
-                                priority: claim.priority,
-                                item: LineItem::Claim,
-                            }),
-                    );
                 }
             }
         }
@@ -248,47 +253,65 @@ impl Supervisor<'_> {
         let may_claim = claims.is_some();
         // The claims of one priority run together: the claim loop takes
         // every candidate of that priority or higher, in its own order.
-        let mut claimed_down_to: Option<Priority> = None;
         let mut preceding_priority = None;
-        for candidate in slot_order(line) {
+        while !line.is_empty() {
+            // Start only the first admitted item, then refresh capacity:
+            // a resume may resolve without taking a slot, and a claim
+            // group may consume several slots or stop claiming altogether.
+            let capacity = self.admission_capacity(parallel)?;
+            let resources = Resources {
+                free_slots: capacity.free_slots,
+                returning: capacity.returning,
+                gates: self.admission_gates(),
+                ..claims.as_ref().map_or(gates_only, |pass| pass.resources)
+            };
+            let mut decision = admission::admit(line, resources);
+            let mut starts = decision.starts.into_iter();
+            let Some(candidate) = starts.next() else {
+                for (candidate, reason) in decision.blocked {
+                    if let LineItem::Resume(resume) = candidate.item
+                        && reason == Blocked::WorkerSlot
+                    {
+                        self.note_resume_slot_wait(
+                            &resume,
+                            true,
+                            parallel,
+                            candidate.priority,
+                            preceding_priority,
+                        )?;
+                    }
+                    preceding_priority = Some(candidate.priority);
+                }
+                break;
+            };
+            line = starts
+                .chain(decision.blocked.drain(..).map(|(candidate, _)| candidate))
+                .collect();
             match candidate.item {
-                // A resume and a recovery job use the normal room only.
                 LineItem::Resume(resume) => {
-                    let waiting = self.used_slots() >= parallel;
                     self.note_resume_slot_wait(
                         &resume,
-                        waiting,
+                        false,
                         parallel,
                         candidate.priority,
                         preceding_priority,
                     )?;
-                    if !waiting {
-                        self.resume_run(*resume)?;
-                    }
+                    self.resume_run(*resume)?;
                 }
                 LineItem::Recovery(run) => {
-                    if self.used_slots() < parallel {
-                        self.triage_run(*run)?;
-                    }
+                    self.triage_run(*run)?;
                 }
                 LineItem::Claim => {
-                    let Some(pass) = claims.as_mut() else {
-                        continue;
-                    };
-                    if claimed_down_to.is_some_and(|floor| floor <= candidate.priority) {
-                        continue;
-                    }
-                    claimed_down_to = Some(candidate.priority);
+                    let pass = claims.as_mut().expect("admitted claim has a pass");
                     if self.claim_tasks(parallel, candidate.priority, pass)? == ClaimStep::Stop {
-                        claims = None;
+                        line.retain(|candidate| !matches!(candidate.item, LineItem::Claim));
                     }
                 }
             }
             preceding_priority = Some(candidate.priority);
         }
         // The slots as the pass leaves them.
-        self.claim
-            .note_slots_full(&*self.queue, self.registration.token(), parallel);
+        self.note_admission_slots_full(parallel)?;
         Ok(ClaimPassEnd {
             may_claim,
             claiming: self.claim.claiming,
@@ -297,26 +320,33 @@ impl Supervisor<'_> {
         }
         .claims_held())
     }
-    /// The room for the next claim (ADR-t1591-1).
-    fn claim_room(&self, parallel: usize) -> ClaimRoom {
-        self.claim.room(parallel)
-    }
-    /// The candidates the light room takes when `room` is that room (the
-    /// light changes that declare their paths, ADR-t1591-1); `None` when
-    /// any candidate may be claimed.
-    fn light_tasks(&mut self, room: ClaimRoom) -> Result<Option<HashSet<TaskId>>> {
-        if room != ClaimRoom::LightOnly {
-            return Ok(None);
+    pub(super) fn admission_gates(&self) -> Gates {
+        Gates {
+            ci: self.observation.ci().held(),
+            env: self.landing.run_env_missing,
+            branch: self.landing.unresolved,
         }
-        Ok(Some(
-            self.queue
-                .candidates()?
-                .into_iter()
-                .filter(|task| self.claim.light_changes.admits(task.change(), task.paths()))
-                .map(|task| task.id())
-                .collect(),
-        ))
     }
+
+    fn admission_capacity(&self, parallel: usize) -> Result<Resources> {
+        Ok(Resources {
+            free_slots: parallel.saturating_sub(self.used_slots()),
+            returning: self
+                .return_candidates()?
+                .iter()
+                .filter(|run| run.progress.can_progress())
+                .count(),
+            ..Resources::default()
+        })
+    }
+
+    fn note_admission_slots_full(&mut self, parallel: usize) -> Result<()> {
+        let room = admission::claim_room(self.admission_capacity(parallel)?);
+        self.claim
+            .note_slots_full(&*self.queue, self.registration.token(), parallel, room);
+        Ok(())
+    }
+
     /// The effective priority of `task_id` in the line of the fill pass
     /// (ADR-t1850-1): the graph's, else (a task the graph read before it
     /// does not hold) its own.
@@ -349,14 +379,14 @@ impl Supervisor<'_> {
         pass: &mut ClaimPass,
     ) -> Result<ClaimStep> {
         loop {
-            // Every change uses the same worker capacity (ADR-t5107-1).
-            let room = self.claim_room(parallel);
-            if room == ClaimRoom::None {
-                return Ok(ClaimStep::Stop);
-            }
-            // Each claim needs what a run is expected to take free: the
-            // free disk space read at the top of the pass bounds them.
-            if pass.disk_claims == Some(0) {
+            let capacity = self.admission_capacity(parallel)?;
+            let resources = Resources {
+                free_slots: capacity.free_slots,
+                returning: capacity.returning,
+                gates: self.admission_gates(),
+                ..pass.resources
+            };
+            if admission::probe(SlotKind::Claim, resources).is_some() {
                 return Ok(ClaimStep::Stop);
             }
             // Highest effective priority, then most-releasing, then lowest
@@ -367,10 +397,7 @@ impl Supervisor<'_> {
             // Less the candidates deferred on a conflict hotspot (ADR-0069)
             // or held by a class limit.
             let graph = dependency_graph(self.queue.graph_input()?, None);
-            // In the light room, only the light tasks, whatever the priority
-            // of the others; the aging compares only them.
-            let light = self.light_tasks(room)?;
-            let claimable = self.claimable(&graph, light.as_ref(), &pass.trial.providers)?;
+            let claimable = self.claimable(&graph, None, &pass.trial.providers)?;
             // The candidates of a lower priority wait for the resumes and
             // recovery jobs before them in the line (ADR-t1850-1).
             let effective: HashMap<TaskId, Priority> = graph
@@ -392,12 +419,28 @@ impl Supervisor<'_> {
                 self.claim.limits.claim_spacing.value,
             );
             let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
-            if spacing.is_some() {
-                let last = self
-                    .queue
+            let last = if spacing.is_some() {
+                self.queue
                     .latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?
-                    .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at));
-                if light_slots::gated(room, false, spacing, last, now_ms) == ClaimRoom::None {
+                    .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+            } else {
+                None
+            };
+            let decision = admission::admit(
+                vec![Candidate::slot(SlotKind::Claim, floor, order)],
+                Resources {
+                    spacing_secs: spacing,
+                    last_claim_ms: last,
+                    now_ms,
+                    ..resources
+                },
+            );
+            if !decision.starts_work() {
+                if decision
+                    .blocked
+                    .first()
+                    .is_some_and(|(_, reason)| *reason == Blocked::ClaimSpacing)
+                {
                     if pass.spaced_since.is_none() {
                         info!(
                             event = "claim_spaced",
@@ -406,9 +449,15 @@ impl Supervisor<'_> {
                         );
                     }
                     self.claim.spaced_since = Some(pass.spaced_since.unwrap_or(now_ms));
-                    return Ok(ClaimStep::Stop);
                 }
+                return Ok(ClaimStep::Stop);
             }
+            let order = decision
+                .starts
+                .into_iter()
+                .next()
+                .expect("admitted claim")
+                .item;
             let spacing = spacing.map(|secs| ClaimSpacing {
                 claim_spacing: secs,
                 claim_spacing_wait_secs: pass
@@ -470,7 +519,6 @@ impl Supervisor<'_> {
                 });
             let attributes = ClaimAttributes {
                 spacing,
-                light_room: (room == ClaimRoom::LightOnly).then_some(true),
                 instructions: self.instruction_versions(&base, &plugin),
                 candidates: Some(order.len()),
                 by_task,
@@ -488,7 +536,7 @@ impl Supervisor<'_> {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
             };
-            if let Some(left) = pass.disk_claims.as_mut() {
+            if let Some(left) = pass.resources.disk_claims.as_mut() {
                 *left = left.saturating_sub(1);
             }
             self.claim.defer.claimed();
@@ -578,30 +626,32 @@ impl Supervisor<'_> {
     pub(super) fn claims_short_of_disk(&mut self) -> Result<bool> {
         Ok(self.host.disk_claims() == Some(0))
     }
-    /// Judge whether new claims are held now ([`ClaimHold::judge`]: the
-    /// free disk space this pass read against what a claim needs (task
-    /// 377), and the load) and record `claim_held` or `claim_resumed` when
-    /// the answer differs from the hold in place on the queue (task 327).
-    /// Returns whether they are held.
-    pub(super) fn hold_claims(&mut self) -> Result<bool> {
+    /// Read the disk verdict and record the load/disk/authentication
+    /// hold transition at the existing claim observation boundary.
+    fn read_claim_resources(&mut self, mut resources: Resources) -> Result<Resources> {
         let decision = self.host.disk_decision();
-        if self.host.disk_cleaning() && decision.as_ref().is_some_and(|d| d.claim_short) {
-            return Ok(true);
+        let short = decision.as_ref().and_then(|d| d.claim_hold());
+        let cleaning = self.host.disk_cleaning() && short.is_some();
+        if !cleaning {
+            let hold = admission::claim_hold(
+                short,
+                &HoldInputs {
+                    queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
+                    ..HoldInputs::default()
+                },
+                &HoldInputs {
+                    load_average: (self.host.load_average())(),
+                    max_load: self.host.max_load(),
+                    ..HoldInputs::default()
+                },
+            );
+            self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))?;
+            resources.claim_hold = hold.map(|hold| admission::hold_reason(hold.reason));
         }
-        let authentication = ClaimHold::judge(&HoldInputs {
-            queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
-            ..HoldInputs::default()
-        });
-        let disk = decision.as_ref().and_then(|d| d.claim_hold());
-        let hold = authentication.or(disk).or_else(|| {
-            ClaimHold::judge(&HoldInputs {
-                load_average: (self.host.load_average())(),
-                max_load: self.host.max_load(),
-                ..HoldInputs::default()
-            })
-        });
-        let held = self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))?;
-        Ok(held || decision.is_some_and(|d| !d.claim_allowed))
+        if let Some(decision) = decision {
+            resources = resources.with_disk(&decision);
+        }
+        Ok(resources)
     }
 
     /// Check the programs `[run.env]` names on this process's PATH
@@ -707,24 +757,6 @@ impl Supervisor<'_> {
             draining: self.registration.draining(),
             handing_off: self.registration.handing_off(),
         })
-    }
-
-    /// Whether a run awaiting the landing slot would start its landing but
-    /// for the disk: only such a landing goes before the claims
-    /// (ADR-t4473-1), so a landing held for another reason (a held
-    /// container, a drain) keeps no claim waiting.
-    pub(super) fn landing_goes_but_for_disk(&self) -> bool {
-        crate::domain::landing_hold::judge(crate::domain::landing_hold::LandingHoldInputs {
-            run_env_missing: self.landing.run_env_missing,
-            container_held: self.verification_container_held(),
-            ci_held: self.observation.ci().held(),
-            ci_unreadable: self.observation.ci().unreadable(),
-            landing_unresolved: self.landing.unresolved,
-            landing_short: false,
-            disk_cleaning: false,
-            draining: self.registration.draining(),
-            handing_off: self.registration.handing_off(),
-        }) == crate::domain::landing_hold::LandingHold::Proceed
     }
 
     fn record_landing_hold(&mut self, error: Option<String>) {

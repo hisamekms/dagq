@@ -2,7 +2,6 @@
 //! Landing-turn waits outside worker capacity are capped at `parallel`.
 
 use super::change::{ChangeSet, TaskChange};
-use super::claim_spacing;
 
 /// `[supervisor] light_changes`: the changes a repository calls light.
 /// Values come from `[tasks] changes`; the runtime assigns them no meaning.
@@ -93,40 +92,6 @@ pub fn queued_e2e_has_room(active_workers: usize, queued: usize, parallel: usize
             <= worker_slots(active_workers, queued, parallel).max(parallel)
 }
 
-/// New claims use worker capacity regardless of change, paths or priority.
-/// Runs returning from human waits take precedence over every new claim.
-/// Resume/adopt/recovery and returning runs compare the same worker count
-/// with `parallel`, without the new-claim returning gate.
-pub fn claim_room(used: usize, parallel: usize, returning: usize) -> ClaimRoom {
-    if returning == 0 && used < parallel {
-        ClaimRoom::Any
-    } else {
-        ClaimRoom::None
-    }
-}
-
-/// The room after the gates every claim passes: no
-/// claim while the claims are held (the load or the disk), nor while the
-/// claim spacing in effect (`spacing_secs`) after the queue's latest claim
-/// (`last_claim_ms`) waits at `now_ms` (ADR-t1479-1).
-pub fn gated(
-    room: ClaimRoom,
-    held: bool,
-    spacing_secs: Option<usize>,
-    last_claim_ms: Option<i64>,
-    now_ms: i64,
-) -> ClaimRoom {
-    let spaced = claim_spacing::waits(
-        claim_spacing::next_claim_ms(spacing_secs, last_claim_ms),
-        now_ms,
-    );
-    if held || spaced {
-        ClaimRoom::None
-    } else {
-        room
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +131,14 @@ mod tests {
         assert!(!light.admits(Some(&change("feature")), &paths));
         assert!(!light.admits(None, &paths));
         assert!(!LightChanges::default().admits(Some(&change("docs")), &paths));
+    }
+
+    fn claim_room(used: usize, parallel: usize, returning: usize) -> ClaimRoom {
+        super::super::admission::claim_room(super::super::admission::Resources {
+            free_slots: parallel.saturating_sub(used),
+            returning,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -214,33 +187,5 @@ mod tests {
         assert_eq!(claim_room(3, 3, 0), ClaimRoom::None);
         // Review and e2e are ordinary workers, not queued landings.
         assert_eq!(worker_slots(3, 0, 3), 3);
-    }
-
-    #[test]
-    fn the_load_hold_and_the_claim_spacing_gate_every_claim() {
-        let t0 = 1_791_072_000_000;
-        // A worker slot does not bypass the load gate.
-        assert_eq!(gated(ClaimRoom::Any, true, None, None, t0), ClaimRoom::None);
-        // Within the spacing after the latest claim, no new claim.
-        let latest = Some(t0);
-        assert_eq!(
-            gated(ClaimRoom::Any, false, Some(180), latest, t0 + 10_000),
-            ClaimRoom::None
-        );
-        // Every claim starts the next spacing.
-        assert_eq!(
-            gated(ClaimRoom::Any, false, Some(180), latest, t0 + 179_000),
-            ClaimRoom::None
-        );
-        assert_eq!(
-            gated(ClaimRoom::Any, false, Some(180), latest, t0 + 180_000),
-            ClaimRoom::Any
-        );
-        // No spacing in effect (the load hold off): only the hold gates.
-        assert_eq!(
-            gated(ClaimRoom::Any, false, None, latest, t0 + 1_000),
-            ClaimRoom::Any
-        );
-        assert_eq!(gated(ClaimRoom::Any, false, None, None, t0), ClaimRoom::Any);
     }
 }

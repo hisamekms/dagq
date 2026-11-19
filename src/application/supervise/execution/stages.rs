@@ -160,7 +160,8 @@ impl SlotTable {
     }
 
     /// The runs whose wait ended and that wait to go back to a slot.
-    pub(super) fn returning(&self) -> usize {
+    #[cfg(test)]
+    fn returning(&self) -> usize {
         self.slots
             .iter()
             .filter(|slot| slot.waiting.as_ref().is_some_and(|w| w.ended.is_some()))
@@ -524,8 +525,13 @@ pub(super) struct ClaimState {
 
 impl ClaimState {
     /// The room for the next claim under `parallel` (ADR-t1591-1).
-    pub(super) fn room(&self, parallel: usize) -> light_slots::ClaimRoom {
-        light_slots::claim_room(self.slots.used(parallel), parallel, self.slots.returning())
+    #[cfg(test)]
+    fn room(&self, parallel: usize) -> ClaimRoom {
+        crate::domain::admission::claim_room(crate::domain::admission::Resources {
+            free_slots: parallel.saturating_sub(self.slots.used(parallel)),
+            returning: self.slots.returning(),
+            ..Default::default()
+        })
     }
 
     /// Record where the slots of a class fill up or free again, as the
@@ -539,8 +545,9 @@ impl ClaimState {
         log: &dyn RunLog,
         token: &LeaseToken,
         parallel: usize,
+        room: ClaimRoom,
     ) {
-        let full = pre_claim::full_classes(self.room(parallel), !self.light_changes.is_empty());
+        let full = pre_claim::full_classes(room, !self.light_changes.is_empty());
         let mut open = match self.slots_full.take() {
             Some(open) => open,
             None => {
@@ -1042,8 +1049,8 @@ mod tests {
             .unwrap();
             let mut claim = claim_state(LightChanges::default());
             claim.slots.admit(slot("r1"));
-            claim.note_slots_full(&log, &token, 1);
-            claim.note_slots_full(&log, &token, 1);
+            claim.note_slots_full(&log, &token, 1, claim.room(1));
+            claim.note_slots_full(&log, &token, 1, claim.room(1));
             let recorded = records(&log);
             if fails {
                 assert_eq!(
@@ -1062,7 +1069,7 @@ mod tests {
             }
             let before = recorded.len();
             claim.slots.release(0);
-            claim.note_slots_full(&log, &token, 1);
+            claim.note_slots_full(&log, &token, 1, claim.room(1));
             assert_eq!(
                 records(&log)[before..],
                 [("slots_full_ended".into(), json!("heavy"), json!([]))]

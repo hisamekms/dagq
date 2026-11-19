@@ -46,7 +46,7 @@ impl Slot {
     /// Whether a pass steps this slot, `handing_off` whether the
     /// supervisor drains for a handoff: one that does steps only what it
     /// waits for, so a run awaiting the landing slot starts no landing;
-    /// any other pass, a stop's drain too, steps every slot.
+    /// other passes step the slots selected by the run loop.
     pub(super) fn stepped(&self, handing_off: bool) -> bool {
         !handing_off || !self.rebuildable()
     }
