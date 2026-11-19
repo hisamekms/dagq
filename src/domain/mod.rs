@@ -2480,8 +2480,11 @@ pub enum AttentionNext {
         ask_id: AskId,
     },
     /// Not a person's to act on: a `land` answer approved the run, which
-    /// waits unleased for a free slot and the integration slot; the
-    /// supervisor lands it before new claims (task 949).
+    /// waits unleased for a free slot and the integration slot. The supervisor
+    /// uses one disk decision for an otherwise eligible landing and claim.
+    /// Both start in the same pass when disk has room for both. If they compete
+    /// for disk space, the higher effective priority starts first, with the
+    /// landing first on a tie.
     QueuedToLand,
     /// Not a person's to act on: the supervisor triages the `failed`
     /// or `interrupted` run and acts on the verdict (ADR-0024 decision 3).

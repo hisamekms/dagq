@@ -1,12 +1,17 @@
 //! The free disk space wired from the supervisor's reading to its holds
-//! and its landings (ADR-t4473-1): below the reserve no run is claimed
-//! (`claim_held`) and no landing starts (`landing_held`); above it, with no
-//! run moving, a waiting landing starts before a new claim, and a queue
-//! with no run size sample yet claims one run at a time. A relaxation of
-//! the needs (ADR-t4727-1) is read from its newest record on the next
-//! pass, and one past its time is recorded expired once. Which needs and
-//! how many claims each reading gives are the unit tests of
-//! `domain::disk`.
+//! and its landings: below the reserve no run is claimed (`claim_held`)
+//! and no landing starts (`landing_held`). An otherwise eligible landing and
+//! claim start in the same pass when disk has room for both. When there is
+//! only room for one start, the higher effective priority starts first, with
+//! the landing first on a tie. Without size samples, starts proceed one at
+//! a time. With no run moving and free space at least as large as the
+//! reserve, the progress guarantee admits a single start, chosen by the
+//! same priority rule when both cannot fit.
+//!
+//! A relaxation of the needs (ADR-t4727-1) is read from its newest record
+//! on the next pass, and one past its time is recorded expired once.
+//! Which needs and how many claims each reading gives are the unit tests
+//! of `domain::disk`.
 
 use std::sync::atomic::Ordering;
 
