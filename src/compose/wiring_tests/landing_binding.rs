@@ -1,14 +1,6 @@
-//! A landing's judgment bound to the run's diff and compared with what
-//! lands (ADR-t4840-2 decisions 7 and 8), wired from each path that lets a
-//! run land to the queue's events, asks, status and audit records: a
-//! review's pass, an AI's `land`, a person's `land` answer and a person's
-//! `integrate` each land when the merged result touches the same blobs,
-//! and go back to their own re-approval when it does not (here, main
-//! changed a file the run changes, so the rebase changes its blob). The
-//! convergence after the revise limit is
-//! `review_revise_limit::a_review_past_the_limit_with_no_code_finding_lands_and_follows_up_its_reasons`'s.
-//! The comparison, the choice of the judgment and of the re-approval are
-//! `domain::landing_binding`'s unit tests.
+//! The landing decision reaches each authorization path's events, asks,
+//! status and audit records. The fake injects changed blobs to exercise
+//! reapproval, and the domain tests cover the comparison rules.
 
 use serde_json::{Value, json};
 
@@ -138,12 +130,22 @@ fn a_passed_run_lands_on_the_blobs_its_review_judged_and_audits_each_step() {
     assert_eq!(judged[0]["change"]["after"]["path"], "review_pass");
     assert_eq!(judged[0]["sender_id"], "supervisor:control");
     assert_eq!(compared[0]["outcome"]["status"], "succeeded");
+    let compared_change = &compared[0]["change"];
+    assert_eq!(
+        compared_change["after"]["own_change"],
+        json!({"kind": "unchanged_base"})
+    );
+    assert!(compared_change["before"]["binding"]["run_change"]["before_blobs"][FILE].is_object());
+    assert_eq!(
+        compared_change["before"]["binding"]["run_change"],
+        compared_change["after"]["binding"]["run_change"],
+    );
     let landed = &payloads(&detail, "run_integrated")[0];
     assert_eq!(merged[0]["change"]["before"]["main"], landed["main_before"]);
     assert_eq!(merged[0]["change"]["after"]["main"], landed["commit"]);
 }
 
-/// A pass whose merged result changed its file (main changed it too) does
+/// A pass whose resulting blob changed without a main update does
 /// not land: the comparison names the file, the run goes back awaiting
 /// integration and is reviewed again on its current diff, whose pass lands
 /// it.
@@ -153,6 +155,7 @@ fn a_pass_whose_merged_blob_changed_is_reviewed_again_and_lands_on_the_new_pass(
         "a_pass_whose_merged_blob_changed_is_reviewed_again_and_lands_on_the_new_pass",
         vec![verdict("pass", "fine"), verdict("pass", "still fine")],
     );
+    let wiring = wiring.with_tick(std::time::Duration::from_millis(1));
     wiring.git.change_blob_at_next_rebase(FILE, "merged");
     wiring.supervise_once();
     wiring.supervise_once();
@@ -163,6 +166,19 @@ fn a_pass_whose_merged_blob_changed_is_reviewed_again_and_lands_on_the_new_pass(
             (json!("review_pass"), json!(false)),
             (json!("review_pass"), json!(true))
         ]
+    );
+    let entered = payloads(&detail, "landing_queue_entered");
+    let left = payloads(&detail, "landing_queue_left");
+    assert_eq!((entered.len(), left.len()), (1, 1));
+    assert_eq!(left[0]["entry_id"], entered[0]["entry_id"]);
+    assert_eq!(left[0]["reason"], "landed");
+    assert!(
+        payloads(&detail, "landing_queue_waiting")
+            .iter()
+            .any(|wait| {
+                wait["entry_id"] == entered[0]["entry_id"]
+                    && wait["waiting_for"] == "awaiting_reapproval"
+            })
     );
     let first = payloads(&detail, "integration_compared")[0];
     assert_eq!(first["differing"], json!([FILE]));
@@ -308,9 +324,9 @@ fn a_commit_after_the_pass_the_receipt_does_not_name_spends_the_pass() {
 #[test]
 fn a_binding_whose_hashes_cannot_be_read_is_an_error() {
     let (wiring, _task) = wired("a_binding_whose_hashes_cannot_be_read_is_an_error", vec![]);
-    let bind =
-        |to: &str| crate::application::integrate::binding::bind(&wiring.git, "unknown-base", to);
     let main = crate::application::RepositoryReads::main_head(&wiring.git).unwrap();
+    let bind =
+        |to: &str| crate::application::integrate::binding::bind(&wiring.git, main.as_str(), to);
     let bound = bind(main.as_str()).unwrap();
     assert!(bound.diff_hash.is_some() && bound.tree_hash.is_some());
     // The tree of a commit the repository does not have.

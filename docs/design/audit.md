@@ -56,15 +56,14 @@ eventsは運用の状態で整理して消えるが、監査は追記だけで�
 段0の監査サービスはqueue serviceの中のtraitとして動き、段1で別のプロセス・別のOSのユーザー・別のDBに分かれる。
 chainと連番は監査サービスが付けるので、置き場を替えても検証の形は変わらない。
 
-着地の来歴は、着地を許した判断（reviewのpass・AIのland・上限の後の収束・人のapprove_landing・直接のintegrate）の記録と、merge後に差分が触る各fileのblob hashの組を照合して結ぶ。
+着地の来歴は、判断が承認したrun自身の差分と、mainを取り込んだ後に着地した内容の同一性を確かめられる形で記録する。
 照合は着地の直前の1か所で、経路ごとに置かない（[integrate](supervisor-lifecycle/integrate.md#判断との照合)）。
 判断・照合・mergeの監査の記録は、それを述べるrunのeventを書くstoreが同じtransactionで書く（`infrastructure::audit::record_landing`）。
-守るpathに当たる差分は、この照合でhuman_attestedの承認が要る。
 
 askを開くときに問いのhashと判断の前提を固定し、回答では認証から決まる本人と経路を記録する。
 inboxが人の原文を渡したときはそのhashだけを残し、渡さなかった場合も区別できる。
 適用の成功は回答を閉じる変更とともに確定し、失敗した試行は回答を未適用のまま記録する。
-弱める操作と守るpathの承認では中継を拒み、hostの人の直接の経路は制御端末で対象のhashを打ち返したことを確かめる。
+弱める操作と守るpathの印を持つaskの回答では中継を拒み、hostの人の直接の経路は制御端末で対象のhashを打ち返したことを確かめる。
 その記録はhuman_attestedとし、経路の材料は`domain::direct_human::Evidence`のdoc commentが持つ。
 同じUIDのagentはこの経路を偽れるので、材料は防止の保証ではなく事後の照合のために保持する。
 普通の着地の承認の中継はrelayed_by_inboxとして残す。

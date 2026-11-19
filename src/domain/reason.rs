@@ -68,7 +68,7 @@ reason_codes! {
     RebaseConflict => "rebase_conflict": "the run conflicts with main (the landing's rebase, the merge-tree precheck, or the landing recheck)",
     RebaseEmpty => "rebase_empty": "no commit remains on top of main after the rebase",
     RebaseInProgress => "rebase_in_progress": "a rebase was left in progress in the worktree and was aborted",
-    LandingChanged => "landing_changed": "the files the landing's merged result touches, or their blob hashes, differ from those the run's last judgment that let it land was bound to, so it does not land and goes back to that judgment's path to be approved again",
+    LandingChanged => "landing_changed": "the landing could not establish that its change is covered by the run's last judgment, so it does not land and goes back to that judgment's path to be approved again",
     MigrationNumberTaken => "migration_number_taken": "the run adds a migration whose number main already has, and it cannot be renumbered mechanically",
     VerificationFailed => "verification_failed": "a verification command exited non-zero after the rebase (or the landing recheck's command on main with the run merged in)",
     VerificationEnvironment => "verification_environment": "a verification command failed on the host (a full disk, a kill, a timeout) and again when retried once, so the run waits for a person instead of a resume",

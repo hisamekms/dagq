@@ -699,19 +699,16 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
         ],
         "{phases:?}"
     );
-    // The start records the run leaving the queue before its landing
-    // phase. The push follows `run_integrated` with no intervening phase.
+    // The entry stays open through the attempt and closes with its
+    // landing. The push phase follows `run_integrated`.
     assert_eq!(
         kinds[position("integration_started") + 1],
-        "landing_queue_left"
-    );
-    assert_eq!(
-        kinds[position("integration_started") + 2],
         "run_phase_changed"
     );
+    assert_eq!(kinds[position("run_integrated") - 1], "landing_queue_left");
     assert_eq!(kinds[position("run_integrated") + 1], "run_phase_changed");
     assert!(
-        !kinds[position("integration_started") + 3..position("run_integrated")]
+        !kinds[position("integration_started") + 2..position("run_integrated")]
             .contains(&"run_phase_changed"),
         "{kinds:?}"
     );
@@ -1938,6 +1935,91 @@ fn migrations_on(repo: &Path, commit: &str) -> Vec<String> {
     .lines()
     .map(str::to_owned)
     .collect()
+}
+
+/// Git combines two disjoint edits in one file while the existing
+/// approve_landing answer still authorizes the run's edit.
+#[test]
+fn an_approved_run_whose_file_main_changed_without_a_conflict_lands_without_asking_again() {
+    let (_dir, repo, db) = fixture();
+    let base = "run: old\n1\n2\n3\n4\n5\n6\n7\nmain: old\n";
+    fs::write(repo.join("change.txt"), base).unwrap();
+    git(&repo, &["add", "change.txt"]);
+    git(&repo, &["commit", "-m", "shared file"]);
+    let before = git_out(&repo, &["rev-parse", "main:change.txt"]);
+
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let task = TaskId::new(1);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    backend.script_for(
+        task.as_i64(),
+        r#"printf 'run: new\n1\n2\n3\n4\n5\n6\n7\nmain: old\n' > change.txt && git add change.txt && git commit -qm 'edit top' && receipt "$(git rev-parse HEAD)""#,
+    );
+    let reviewer = TestReviewer::new(&[verdict("concern", &["look at the edit"], "unsure")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = queue.show(task).unwrap().runs[0].clone();
+    let ask = queue.asks(Default::default()).unwrap().remove(0);
+    assert_eq!(ask.kind, AskKind::ApproveLanding);
+    queue.answer(ask.id, "land").unwrap();
+
+    fs::write(
+        repo.join("change.txt"),
+        base.replace("main: old", "main: new"),
+    )
+    .unwrap();
+    git(&repo, &["commit", "-am", "edit bottom"]);
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(task).unwrap();
+    assert_eq!(
+        detail.runs[0].status(),
+        RunStatus::Integrated,
+        "{:?}",
+        event_kinds(&detail)
+    );
+    assert_eq!(payloads(&detail, "ask_opened").len(), 1);
+    assert_eq!(
+        git_out(&repo, &["show", "main:change.txt"]).trim_end(),
+        "run: new\n1\n2\n3\n4\n5\n6\n7\nmain: new"
+    );
+
+    let compared = payloads(&detail, "integration_compared");
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    let comparison = compared[0];
+    assert_eq!(comparison["path"], "approve_landing");
+    assert_eq!(comparison["matched"], true);
+    assert_eq!(comparison["main"], main);
+    let approval_ref = format!(
+        "refs/dagq/landing-approval/{}/{}",
+        run.id(),
+        comparison["judgment"],
+    );
+    assert_eq!(
+        git_out(&repo, &["rev-parse", &approval_ref]),
+        run.result_commit().unwrap().as_str()
+    );
+    assert_eq!(
+        comparison["judged"]["run_change"]["head"],
+        json!(run.result_commit().unwrap())
+    );
+    assert_eq!(
+        comparison["judged"]["run_change"]["before_blobs"]["change.txt"]["blob"],
+        before
+    );
+    assert_ne!(
+        comparison["judged"]["approved_blobs"],
+        comparison["landed"]["approved_blobs"]
+    );
+    assert_eq!(
+        comparison["own_change"],
+        json!({
+            "kind": "clean_merge",
+            "tree": git_out(&repo, &["rev-parse", "main^{tree}"]),
+        })
+    );
 }
 
 /// Two runs add migration 0002 at once. The first lands; the second's

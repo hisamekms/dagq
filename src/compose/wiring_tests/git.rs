@@ -96,6 +96,9 @@ struct State {
     /// one named conflicts on, once ([`FakeGit::conflict_once_main_moves`]).
     conflict_next_merge: Option<(Vec<String>, CommitSha)>,
     merge_clean: bool,
+    /// The result of combining an unmodified run with another main. The
+    /// fake has no per-commit trees, so it remembers the made commit.
+    clean_rebases: HashMap<(String, String), CommitSha>,
     /// The changed path the next rebase of a run's worktree conflicts on,
     /// once, and the blob the commit that resolves it gives the path
     /// ([`FakeGit::conflict_at_next_rebase`]).
@@ -160,6 +163,7 @@ impl FakeGit {
                 refs: HashMap::new(),
                 conflict_next_merge: None,
                 merge_clean: false,
+                clean_rebases: HashMap::new(),
                 conflict_next_rebase: None,
                 conflicted: Vec::new(),
                 blob_at_next_commit: None,
@@ -597,7 +601,9 @@ impl Repository for FakeGit {
             return Ok(Err("CONFLICT (content): merge conflict".to_owned()));
         }
         state.conflicted.clear();
-        if let Some((path, blob)) = state.blob_at_next_rebase.take() {
+        let mutation = state.blob_at_next_rebase.take();
+        let clean = mutation.is_none();
+        if let Some((path, blob)) = mutation {
             state.changed_blobs.insert(path, blob);
         }
         let onto = CommitSha::parse(onto, "commit")?;
@@ -614,6 +620,11 @@ impl Repository for FakeGit {
         } else {
             (0..own).fold(onto.clone(), |parent, _| state.make(Some(parent)))
         };
+        if at.base != onto && clean {
+            state
+                .clean_rebases
+                .insert((onto.to_string(), at.head.to_string()), head.clone());
+        }
         let moved = state
             .worktrees
             .get_mut(worktree)
@@ -859,13 +870,20 @@ impl Repository for FakeGit {
 
     /// The requested conflict once main moves, or a clean merge when the
     /// test enabled it; otherwise this fake cannot merge a tree.
-    fn merged_tree(&self, main: &str, _: &str) -> Result<std::result::Result<String, Vec<String>>> {
+    fn merged_tree(
+        &self,
+        main: &str,
+        head: &str,
+    ) -> Result<std::result::Result<String, Vec<String>>> {
         let mut state = self.lock();
         match state.conflict_next_merge.take() {
             Some((paths, before)) if before.as_str() != main => Ok(Err(paths)),
             unmoved => {
                 state.conflict_next_merge = unmoved;
-                if state.merge_clean {
+                if let Some(rebased) = state.clean_rebases.get(&(main.to_owned(), head.to_owned()))
+                {
+                    Ok(Ok(format!("tree of {rebased}")))
+                } else if state.merge_clean {
                     Ok(Ok(format!("merged tree on {main}")))
                 } else {
                     bail!("the wiring test's repository merges no tree")

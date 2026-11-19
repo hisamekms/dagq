@@ -34,8 +34,8 @@ containerでのrecheckの境界は[ADR-t2424-1](../../adr/2026-10-17-t2424-1-a-c
 resumeのmodelとeffortの継承・段上げは[Worker model](worker-model.md#段上げ決定5)を読む。
 
 `integrate`を呼ぶことが着地の承認で、runtimeが自分で着地させるのは承認済みのrun、reviewがpassしたrun（上限の後の差し戻しが収束したものを含む）、人が着地を選んだrunだけ（[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
-直接の`integrate`で承認したrunを含め、resumeが直しても差分が触る各fileの変更後のblob hashの組が変わらなければ、その判断で今どおり着地する。
-組が変わればruntimeは着地させず、判断の経路の再承認（直接の`integrate`ならinboxのattentionに出して人・inboxの`integrate`の打ち直し）を待つ（[判断との照合](integrate.md#判断との照合)）。
+直接の`integrate`で承認したrunを含め、mainの衝突のない取り込みでrun自身の差分が保たれれば、その判断で着地する。
+resumeで衝突を解消したりrun自身の変更を直したりした場合は、判断の経路の再承認（直接の`integrate`ならinboxのattentionに出して人・inboxの`integrate`の打ち直し）を待つ（[判断との照合](integrate.md#判断との照合)）。
 承認の記録とpushの引き継ぎは`application::integrate::IntegrationRequest`を入口に読む。
 
 **試行の数え方**の入口は`domain::resume`（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定24）。

@@ -1,26 +1,30 @@
-//! What a judgment that lets a run land is bound to, read from the
-//! repository (ADR-t4840-2 decision 7): the set of the files the run's diff
-//! touches with their blob hashes ([`Repository::landing_blobs`]), which
-//! the landing compares ([`crate::domain::landing_binding::compare`]), and
-//! the normalized diff hash and the tree hash, recorded only.
+//! Read the change that a judgment binds and verify its Git provenance
+//! against the contents that would land (ADR-t5283-2).
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::application::Repository;
-use crate::domain::audit::LandingFacts;
-use crate::domain::landing_binding::{BINDING_KEY, Decision, Reapproval, decide, diff_hash};
+use crate::domain::landing_binding::{
+    BINDING_KEY, ChangeProof, Decision, Judgment, LandingFacts, Reapproval, RunChange,
+    approval_carries, diff_hash,
+};
 use crate::domain::{CommitSha, EventKind, RunHistory, TaskRun};
 
-/// The binding of the diff from `from` to `to`: its set of blob hashes,
-/// its diff hash and `to`'s tree hash. Any of them that cannot be read is
-/// an error: a judgment or a comparison is not recorded, nor does the run
-/// land, with an audit record short of them.
+/// Bind the precise range and both sides of every changed path. Keep the
+/// normalized hash for display and the head tree for independent replay.
 pub fn bind(repository: &dyn Repository, from: &str, to: &str) -> Result<LandingFacts> {
     Ok(LandingFacts {
         approved_blobs: repository
             .landing_blobs(from, to)
             .context("read the blob hashes of the files the diff touches")?,
+        run_change: Some(RunChange {
+            base: CommitSha::parse(from, "binding base")?,
+            head: CommitSha::parse(to, "binding head")?,
+            before_blobs: repository
+                .landing_blobs(to, from)
+                .context("read the blob hashes before the diff")?,
+        }),
         diff_hash: Some(diff_hash(
             &repository
                 .diff_text(from, to)
@@ -111,7 +115,7 @@ pub fn put(payload: &mut Value, facts: &LandingFacts) {
 /// What [`compare_landing`] found.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Compared {
-    /// The merged result touches the judged set: it lands, and `merged`
+    /// The landed change was approved, and `merged`
     /// is what its `run_integrated` records of the merge
     /// ([`merged_record`] adds main's commit after it).
     Matched { merged: Value },
@@ -134,18 +138,61 @@ pub struct Rewrites<'a> {
     pub renumbered: bool,
 }
 
-/// Compare what landing `rewrites.rebased` onto `rewrites.main` touches
-/// with the run's last judgment that lets it land
-/// ([`RunHistory::last_judgment`]), and record the comparison
-/// (`integration_compared`) with both sets, the rebase, the renumbering
-/// and a conflict a session resolved since the judgment: the record of
-/// each change after the judgment, apart from it. The comparison reads only
-/// the sets ([`decide`]); the hashes ride along.
+/// Prove that the worktree head is the approved commit or a commit made
+/// from it by an earlier runtime rebase, and that the tree that would land
+/// is the clean Git merge of the approved source with current main.
+fn own_change_proof(
+    repository: &dyn Repository,
+    events: &[crate::domain::RunEvent],
+    judgment: &Judgment<'_>,
+    rewrites: Rewrites<'_>,
+) -> ChangeProof {
+    let Some(binding) = &judgment.binding else {
+        return ChangeProof::Unproven;
+    };
+    let Some(change) = &binding.run_change else {
+        return ChangeProof::LegacyBlobs;
+    };
+
+    // Follow only runtime rebases. The receipt's more permissive rewrite
+    // chain also accepts renumberings, which do not preserve approval.
+    let mut heads = std::collections::HashSet::from([change.head.as_str()]);
+    for event in events {
+        if event.kind == EventKind::IntegrationRebased
+            && let Some(before) = event.payload["head_before"].as_str()
+            && heads.contains(before)
+            && let Some(after) = event.payload["head_after"].as_str()
+        {
+            heads.insert(after);
+        }
+    }
+    if !heads.contains(rewrites.head.as_str()) {
+        return ChangeProof::Unproven;
+    }
+    if *rewrites.main == change.base {
+        return ChangeProof::UnchangedBase;
+    }
+    let main = rewrites.main.as_str();
+    let source = change.head.as_str();
+    if !matches!(repository.unique_merge_base(main, source), Ok(Some(base)) if base == change.base)
+    {
+        return ChangeProof::Unproven;
+    }
+    match repository.merged_tree(main, source) {
+        Ok(Ok(tree)) => ChangeProof::CleanMerge { tree },
+        Ok(Err(paths)) => ChangeProof::Conflict { paths },
+        Err(_) => ChangeProof::Unproven,
+    }
+}
+
+/// Compare the latest judgment with the final landing tree. Publish the
+/// evidence, including the judged and landed ranges and any rewrite.
 pub fn compare_landing(
     queue: &dyn crate::application::EventStore,
     repository: &dyn Repository,
     run: &TaskRun,
     rewrites: Rewrites<'_>,
+    protected_paths: &[String],
 ) -> Result<Compared> {
     let events = queue.run_events(run.id())?;
     let history = RunHistory::from_events(&events);
@@ -157,6 +204,16 @@ pub fn compare_landing(
         rewrites.main.as_str(),
         rewrites.rebased.as_str(),
     )?;
+    let conflict_resolved = events.iter().any(|event| {
+        event.id > judgment.event.id
+            && (event.kind == EventKind::ConflictResolved
+                || matches!(
+                    event.kind.known(),
+                    Some(EventKind::ResumeFinished | EventKind::ResumeSkipped)
+                ) && event.payload["rewrite"]
+                    == crate::domain::landing_binding::CONFLICT_RESOLUTION)
+    });
+    let proof = own_change_proof(repository, &events, &judgment, rewrites);
     // A person's re-approval still due is not stood for by a review's
     // judgment after it (the session's new receipt reviewed again): the
     // landing goes back to the person (ADR-t4840-2 decision 8).
@@ -173,15 +230,39 @@ pub fn compare_landing(
                 differing: landed.approved_blobs.keys().cloned().collect(),
             }
         }
-        _ => decide(&judgment, &landed.approved_blobs),
+        _ => approval_carries(
+            &judgment,
+            &landed,
+            &proof,
+            rewrites.renumbered || conflict_resolved,
+            protected_paths,
+        ),
     };
-    let conflict_resolved = history.has_after(judgment.event.id, EventKind::ConflictResolved);
+    if decision == Decision::Land
+        && matches!(proof, ChangeProof::CleanMerge { .. })
+        && let Some(change) = judgment
+            .binding
+            .as_ref()
+            .and_then(|b| b.run_change.as_ref())
+    {
+        // The source may otherwise become unreachable when the rebased
+        // branch is removed. Retain it so the audit proof can be replayed.
+        repository.update_ref(
+            &format!(
+                "refs/dagq/landing-approval/{}/{}",
+                run.id(),
+                judgment.event.id.as_i64()
+            ),
+            change.head.as_str(),
+        )?;
+    }
     let mut payload = json!({
         "judgment": judgment.event.id,
         "path": judgment.path.as_str(),
         "matched": decision == Decision::Land,
         "judged": judgment.binding,
         "landed": landed,
+        "own_change": proof,
         "main": rewrites.main,
         "head_before": rewrites.head,
         "head_after": rewrites.rebased,
@@ -248,13 +329,11 @@ pub fn recovered_merged(
     Some(merged_record(merged, commit))
 }
 
-/// Record, as a comparison that differed, a commit on `head` the run's
-/// receipt does not name when what landing `head` onto `main` would touch
-/// differs from the run's last judgment that lets it land: the judgment is
+/// Compare an unnamed commit before asking for a corrected receipt.
+/// When it differs from the authorized change, the judgment is
 /// spent ([`crate::domain::landing_binding::unspent`]) and the run's
 /// re-approval is its path's, as for any comparison after a rebase.
-/// Nothing is recorded for a run with no judgment, or for a commit that
-/// changes no file of its set.
+/// A run with no judgment has nothing to spend.
 pub fn spend_on_unnamed_commit(
     queue: &dyn crate::application::EventStore,
     repository: &dyn Repository,
@@ -274,7 +353,7 @@ pub fn spend_on_unnamed_commit(
     let Decision::Reapprove {
         reapproval,
         differing,
-    } = decide(&judgment, &landed.approved_blobs)
+    } = approval_carries(&judgment, &landed, &ChangeProof::UnchangedBase, false, &[])
     else {
         return Ok(());
     };
@@ -290,6 +369,7 @@ pub fn spend_on_unnamed_commit(
             "main": main,
             "head_after": head,
             "unnamed_commit": true,
+            "own_change": ChangeProof::Unproven,
             "differing": differing,
             "reapproval": reapproval.as_str(),
         }),
@@ -306,7 +386,7 @@ pub fn merged_record(mut merged: Value, commit: &CommitSha) -> Value {
 /// and what approves it again.
 fn changed_reason(differing: &[String], reapproval: Reapproval) -> String {
     let files = if differing.is_empty() {
-        "nothing it can compare with".to_owned()
+        "the approved change could not be established".to_owned()
     } else {
         differing.join(", ")
     };
@@ -320,7 +400,7 @@ fn changed_reason(differing: &[String], reapproval: Reapproval) -> String {
         }
     };
     format!(
-        "the files the merged result touches differ from those its judgment that let it land was bound to ({files}); nothing landed, and {next}"
+        "the landing could not carry over the approved change ({files}); nothing landed, and {next}"
     )
 }
 
@@ -368,6 +448,7 @@ mod tests {
         let events = [compared(2, false, "a"), compared(3, true, "b")];
         let landed = LandingFacts {
             approved_blobs: serde_json::from_value(set("b")).unwrap(),
+            run_change: None,
             diff_hash: Some("d".into()),
             tree_hash: Some("t".into()),
         };

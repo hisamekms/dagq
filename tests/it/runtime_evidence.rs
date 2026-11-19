@@ -426,6 +426,10 @@ fn integrate_refuses_a_rebased_diff_outside_the_declared_paths() {
     );
     let compared = payloads(&detail, "integration_compared");
     assert_eq!(compared.last().unwrap()["reapproval"], "integrate");
+    assert_eq!(
+        compared.last().unwrap()["own_change"],
+        json!({"kind": "unproven"})
+    );
     assert_eq!(compared.last().unwrap()["differing"], json!(["src/lib.rs"]));
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
     let landed = integrate(&db, 2, &repo).unwrap();

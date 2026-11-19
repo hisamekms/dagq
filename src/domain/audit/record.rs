@@ -176,10 +176,8 @@ pub enum BlobState {
     Removed,
 }
 
-/// The facts of a landing's judgment and comparison (F, ADR-t4840-2
-/// decision 7): each file the diff touches with its blob hash after the
-/// change, which the comparison uses, and the diff hash and the tree hash,
-/// which are recorded and shown only.
+/// The audit envelope's landing summary. The complete binding and the
+/// evidence used to compare it live in the landing action's change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandingFacts {

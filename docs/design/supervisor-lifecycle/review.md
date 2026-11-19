@@ -81,7 +81,7 @@ validationを通ったrun（awaiting_integration）
 ### 不変条件
 
 - passでないreviewのrunは、人の`land`の答えか、jobの確かな`land`の推奨か、4aの収束なしには着地しない。
-- 着地を許すverdictと収束は、reviewが始めに読んだ差分（その範囲と組を始めの記録が持つ）が触るfileのblob hashの組に結んで記録し、着地はmerge後の組がそれと同じときだけ進む（[integrate](integrate.md#判断との照合)）。
+- 着地を許すverdictと収束は、reviewが始めに読んだrun自身の差分に結び、着地する変更がその判断に結ばれたものかを照合する（[integrate](integrate.md#判断との照合)）。
   違ったrunは着地待ちに戻り、supervisorがreviewをやり直す（`review_recovered_runs`）。
   reviewが読むheadはreceiptのcommitで、止まった着地がそれをrebaseか番号の振り直しで書き換えていればそのheadで、着地する差分を読む（`review::reviewed_head`）。
 - 全jobが終わるまで判定せず、答えの無いjobはそのjobだけ1回やり直し、残れば`pass`にしない（プログラムのreviewをやり直したreviewのjobはやり直さない）。

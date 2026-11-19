@@ -1,0 +1,4 @@
+[[test]]
+name = "compose::wiring_tests::landing_binding::a_pass_whose_merged_blob_changed_is_reviewed_again_and_lands_on_the_new_pass"
+reason = "境界: 実際のsupervisor・queue service・SQLiteを通し、照合の不一致から再review、着地まで同じentryが残り、照合と書き換えが監査に残ることを確かめる。1 task・fake Gitで、tickは1 msに短縮している。entryと監査の一連の記録は分割できず、照合と順序の判断はdomainのunit testに分離している"
+task = 5285

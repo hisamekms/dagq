@@ -286,17 +286,14 @@ event_kinds! {
     LandingBranchResolved => "landing_branch_resolved",
     LandingBranchUnresolved => "landing_branch_unresolved",
     LandingHeld => "landing_held",
-    /// A reconstructed landing entered the common order. Payload is
-    /// [`crate::domain::landing_queue::Entry`], whose judgment and timestamp
-    /// identify the authorization independently of this observation's time.
+    /// Admission to the common landing order. `entry_id` identifies this
+    /// stay and `at` is the timestamp used until the entry leaves.
     LandingQueueEntered => "landing_queue_entered",
-    /// A landing left the waiting order. `judgment` identifies its entry;
-    /// `reason` is `start` (atomic with integration_started) or `invalidated`
-    /// (authorization withdrawn, replaced, or the run ended).
+    /// The entry's final departure, with its `entry_id` and `reason`.
+    /// Landing and other transitions record it in their own transaction.
     LandingQueueLeft => "landing_queue_left",
-    /// A changed resource probe: `judgment` identifies the entry and
-    /// nullable `waiting_for` is [`crate::domain::landing_queue::Wait`].
-    /// Null selects this run; queue_order waits behind the selected entry.
+    /// The current entry's wait, identified by `entry_id` and `judgment`.
+    /// An awaiting_reapproval wait keeps the entry open and unselectable.
     LandingQueueWaiting => "landing_queue_waiting",
     LandingQueued => "landing_queued",
     LandingReleaseStuck => "landing_release_stuck",

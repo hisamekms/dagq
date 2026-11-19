@@ -1919,14 +1919,20 @@ impl GitRepository {
     /// `git merge-base <a> <b>`: their best common ancestor, `None` when
     /// they share no history.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+        self.merge_base_of(&[a, b])
+    }
+
+    fn merge_base_of(&self, args: &[&str]) -> Result<Option<CommitSha>> {
         let (status, stdout, stderr) = capture(
             self.command()
                 .arg("-C")
                 .arg(&self.root)
-                .args(["merge-base", a, b]),
+                .arg("merge-base")
+                .args(args),
             Duration::from_secs(30),
         )?;
         match status.code() {
+            Some(0) if stdout.trim_end().contains('\n') => Ok(None),
             Some(0) => Ok(Some(object_id(&stdout, "merge base")?)),
             Some(1) => Ok(None),
             _ => bail!("git merge-base failed ({status}): {stderr}"),
@@ -4021,6 +4027,10 @@ impl crate::application::RepositoryReads for GitRepository {
     }
     fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
         GitRepository::merge_base(self, a, b)
+    }
+
+    fn unique_merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+        self.merge_base_of(&["--all", a, b])
     }
 }
 

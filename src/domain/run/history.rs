@@ -370,8 +370,8 @@ impl<'a> RunHistory<'a> {
             })
     }
 
-    /// Current queue authorization. Selection uses the judgment's timestamp,
-    /// not the session-close or resource probe time. Handoffs retain it.
+    /// Current queue authorization. A judgment can open a queue entry,
+    /// and a replacement judgment can authorize an entry awaiting reapproval.
     pub fn landing_judgment(&self) -> Option<EventId> {
         if !self.landable() {
             return None;

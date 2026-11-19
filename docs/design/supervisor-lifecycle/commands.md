@@ -88,8 +88,8 @@ related:
 - 表示のコマンドはstaleな登録とleaseを報告するだけで消さない。
 - attentionは全てinbox宛てで、plannerはattentionを受けない。
 - `events`と`watch`は1つのeventの判定を返し、`status`は今の状態から判定するので、両者が食い違うときは`status`の判定を正とする。
-- `status`は着地を許したrunを共通列の順に示し、それぞれが待つ理由を読めるようにする。
-  着地中のrunも完了まで同じ表示に残し、列の出入りは`events`で辿れる。
+- `status`は開いている着地のentryを共通列の順に示し、それぞれが待つ理由を読めるようにする。
+  照合の再承認待ちと着地中のrunも同じ表示に残り、列の出入りは`events`で辿れる。
 - `status`の`cursor`は状態を読む前に取るので、`watch --after <cursor>`はその後の遷移を取りこぼさない（重複はありうる）。
 - 知らせるだけのattentionはaskにならず、claimと着地を止めない。
 - 読む側はこのbinaryの知らないkindのeventを落とさずに読み、attentionにもclaimの保留にもしない。

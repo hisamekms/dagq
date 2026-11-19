@@ -1185,7 +1185,7 @@ fn first_direct_landing(
                 queue.record_runtime_event(
                     &entry.run_id,
                     EventKind::LandingQueueEntered,
-                    json!(entry),
+                    entry.entered_payload(),
                 )?;
             }
         }
@@ -1216,6 +1216,14 @@ fn first_direct_landing(
                 wait.describe()
             );
         }
+    }
+    if let (Some(id), Some(_)) = (selected, approved_target)
+        && let Some(entry) = order.entries.iter().find(|entry| &entry.run_id == id)
+    {
+        ensure!(
+            recorded_entry(&queue.run_events(id)?, entry),
+            "run {id} left the landing queue while its order was being checked"
+        );
     }
     Ok(selected
         .and_then(|id| runnable.remove(id))
@@ -2597,8 +2605,8 @@ enum Verdict {
     /// drains for a handoff (ADR-t3344-1): the run waits for the landing
     /// slot again, its lease kept, and the next process lands it anew.
     HandedOver { reason: String, detail: Value },
-    /// What the merged result touches differs from the run's last
-    /// judgment that lets it land (ADR-t4840-2 decision 7): nothing lands
+    /// The landing could not carry over the run's last
+    /// judgment that lets it land (ADR-t5283-2): nothing lands
     /// and the run goes back to that judgment's path to be approved again.
     Changed {
         reason: String,
@@ -2646,12 +2654,16 @@ fn land(
     )? {
         return landed_before(queue, repository, files, task, run, main, commit, parent);
     }
-    // A run in a container lands in the control side's landing worktree,
-    // with the commit its receipt's validation accepted, never in its
-    // clone (ADR-t2179-1 decision 5).
+    // A container run lands in the control-side worktree at its validated
+    // commit or the runtime rewrite its re-approval saw.
     let landing_tree;
     let worktree = if run.in_container() {
-        landing_tree = match super::run_git::landing_tree(repository, run)? {
+        let events = queue.run_events(run.id())?;
+        let head = CommitSha::parse(
+            binding::landing_head(repository, run, &events)?,
+            "landing head",
+        )?;
+        landing_tree = match repository.landing_worktree(run, &head)? {
             Ok(tree) => tree,
             Err(why) => return Ok(no_landing_worktree(run, &why)),
         };
@@ -2883,10 +2895,8 @@ fn land(
             json!({"main": main, "head": rebased, "scope_violation": outside, "allowed": task.paths()}),
         );
     }
-    // What lands is held to what the run's last judgment that lets it land
-    // was bound to, before anything costly runs (ADR-t4840-2 decisions 7
-    // and 8): the set of the files the merged result touches and their
-    // blob hashes, the same or nothing lands.
+    // Prove the approval covers the run's change in the final tree before
+    // running verification (ADR-t5283-2 and ADR-t4840-2 decision 8).
     let merged = match binding::compare_landing(
         &*queue,
         repository,
@@ -2898,6 +2908,8 @@ fn land(
             moved_by_rebase,
             renumbered,
         },
+        // No committed protected-path list is supplied by this runtime.
+        &[],
     )? {
         binding::Compared::Matched { merged } => merged,
         binding::Compared::Changed {

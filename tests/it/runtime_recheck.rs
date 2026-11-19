@@ -193,6 +193,7 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     for (key, value) in [
         ("path", json!("approve_landing")),
         ("matched", json!(false)),
+        ("own_change", json!({"kind": "unproven"})),
         ("reapproval", json!("approve_landing")),
         ("differing", json!(["change.txt"])),
     ] {

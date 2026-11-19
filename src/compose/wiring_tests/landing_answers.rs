@@ -1097,10 +1097,11 @@ fn an_earlier_land_answer_and_a_later_pass_share_one_visible_landing_order() {
     for task in [first, second] {
         let detail = queue.show(task).unwrap();
         assert_eq!(detail.task.status(), TaskStatus::Completed);
-        assert_eq!(
-            payloads(&detail, "landing_queue_left")[0]["reason"],
-            "start"
-        );
+        let entered = payloads(&detail, "landing_queue_entered");
+        let left = payloads(&detail, "landing_queue_left");
+        assert_eq!((entered.len(), left.len()), (1, 1));
+        assert_eq!(left[0]["entry_id"], entered[0]["entry_id"]);
+        assert_eq!(left[0]["reason"], "landed");
     }
     let reported = outcome["runs"].as_array().unwrap();
     assert_eq!(reported.len(), 2, "{outcome}");

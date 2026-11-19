@@ -55,7 +55,7 @@ supervisor: 着地を許す判断 → 共通の着地の列が候補を選ぶ �
 着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → 判断との照合 → reviewのプログラム → 検証のコマンド
       └─ 通れば squash commit → mainを進める → 完了 → 後始末 → push → follow_upsの登録
       └─ 通らなければ needs_session / held（hostの失敗） / failed（receiptが失敗を報告）
-      └─ 照合が違えば slotを返し、判断の経路の再承認へ（changed）
+      └─ 照合が違えば slotを返し、元のentryで判断の経路の再承認を待つ（changed）
 mainが動く → landing recheck → 着地しなくなった待ちのrunをresumeへ
 ```
 
@@ -83,7 +83,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - 同じrunを二重に着地させない: 前の着地が`main`を進めてから記録の前に止まったときは、そのcommitを着地として記録する（`landed_before`）。
 - 検証のコマンドはcommitごとにここで1回だけ流れ、validatingは流さない（ADR-0049の決定1）。
 - squashして載せる差分（main..rebase後のhead）がtaskの`paths`に収まらなければ着地しない（ADR-0029の決定4）。
-- 着地する差分が触るfileの組と各fileのblob hashが、runの最後の着地を許した判断の組と全て同じでなければ着地しない（下の「判断との照合」）。
+- 着地するrun自身の変更が、最後の着地を許した判断に結ばれた変更と同じだと確かめてから着地する（下の「判断との照合」）。
 
 ## 承認とslot
 
@@ -99,7 +99,12 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 人がtaskを名指して承認したrunは未回答のaskがあっても列で選べ、着地の後で問いを閉じる。
 着地中のrunや共通のturnの使用があれば誰も始めず、人が直接着地を頼んだrunも承認を記録して待つ。
 直接の`integrate`も共通のturnが空くまで着地slotを取らず、turnを取った後に列の順番を確かめ直す。
-着地の開始を見送っても列に入った時刻は変えず、未解決のrunは承認を保ってresumeへ進む。
+資源の空きを待つ間は列に入った時刻を保つ。
+未解決のrunは承認を保ってresumeへ進む。
+着地が始まってもentryは結果が決まるまで開いている。
+照合で承認を使えなくなったrunは同じentryで再承認を待ち、承認されるまで着地を始めない。
+検証の失敗、手直し、resume、差し戻し、取り消し、taskのholdでentryを閉じる。
+その後に着地を許されるrunは、その時に開いたentryの時刻で並ぶ。
 復旧・drain・引き継ぎも同じ列を使い、drainを延ばさない開始条件とleaseの所有を保つ（[ADR-t5283-1](../../adr/2026-11-18-t5283-1-one-landing-queue.md)）。
 引き継ぎでは、既にleaseを返したrunはそのまま列に残り、検証のやり直しの前で区切った着地は所有者が引き継ぐ。
 
@@ -122,21 +127,23 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 
 ## 判断との照合
 
-- 着地を許す判断（reviewのpass・AIのconcernのhighのland・上限の後の収束・人のapprove_landingのland・人やinboxが直接打つ`integrate`）は、その時のrunの差分が触る各fileの変更後のblob hash（消したfileは削除の印）の組に結んで記録する（[ADR-t4840-2](../../adr/2026-11-12-t4840-2-one-audit-service-hash-chained-append-only-records-and-pluggable-stores.md)決定7と8、組と経路の意味は`domain::landing_binding`）。
-- pathsの検査の後に、`main..rebased`が触るfileの組とblob hashを、runの最後の判断（`RunHistory::last_judgment`）の組と比べる（`integrate::binding::compare_landing`）。
-- supervisorが判断の後に起こす着地は新しい判断にならず、その前の判断の組と比べる。
-- approve_landingの`land`はaskを開いた時の差分の組に結び、その差分を記録に持たないaskの`land`は何も承認せず、今の差分でaskを開き直す（`landing_binding::ask_binding`）。
-- receiptが名指さないcommitが判断の後に足されて組が変われば、sessionに戻す前に照合の不一致として判断を使えなくする（`integrate::binding::spend_on_unnamed_commit`）。
-- 持ち越し: 差分の外のfileだけをmainが変えたrebaseでは組が変わらず、tree hashが変わっても着地する。
-  差分が触るfileをmainも変えていれば、衝突が無くてもmerge後のblob hashが変わるので着地しない。
-  衝突の自動解消・reviewの手直し・migrationの番号の振り直しも触るfileの組かblob hashを変えるので、同じく着地しない。
+- 着地を許す判断は、その時のrun自身の差分が触る各fileの変更前後の内容に結ぶ（[ADR-t5283-2](../../adr/2026-11-18-t5283-2-approval-follows-the-runs-own-change.md)）。
+  supervisorが判断の後に起こす着地は、その判断を使う。
+- approve_landingの`land`はaskを開いた時の差分に結ぶ。
+  その差分を記録に持たないaskの`land`では、今の差分でaskを開き直す。
+- pathsの検査の後、承認元とmainを衝突なく重ねた結果が着地する内容と同じなら、同じfileの別の箇所をmainが変えた場合も、差分の外だけを変えた場合も承認を持ち越す。
+  run自身のcommitの変更、衝突の解消、手直しで同じfile内の変更箇所を移した場合や、同一性を確かめられない場合は聞き直す。
+  receiptが名指さないcommitで承認した変更が変わった場合は、sessionに戻す前に照合の不一致を記録する。
+- 変更後のblob hashの組だけを持つ判断は、最終の差分にその組が一致するときに使える。
+  照合に守るpathの一覧が渡されていれば、そのpathに当たる変更をmainに取り込むときは承認を持ち越さず、人に聞き直す。
+  現在、照合に渡す一覧は空。
 - 判断の後にbranchを変えるもの（着地のrebase・番号の振り直し・sessionの衝突の解消・reviewの手直し・resumeの解消か直し・sessionを開かずに解決済みとして進むresume）は、前後のheadと組を持つ別の変更として、その状態の変更と同じtransactionで監査に書く（`landing_binding::resume_rewrite`）。
   前後の組を読めない間はその記録も次への進行もせず、次の周に読み直す（ADR-t4840-2決定6と7）。
-- 違えば着地せず、slotを返して違ったfileを記録し、runを着地の前の状態に戻す（`integrate::binding::compare_landing`）。
+- 照合が通らなければ着地せず、slotを返して照合の結果を記録し、runを着地の前の状態に戻す（`integrate::binding::compare_landing`）。
   この記録はその前の判断を全て使えなくし（`landing_binding::unspent`）、判断の経路が再承認を決める: reviewの判断はsupervisorのreviewのやり直し、approve_landingの`land`はそのaskの開き直し、直接の`integrate`はinboxのattentionに出して打ち直しを待つ。
   照合の記録の後・slotを返す前に止まった着地の復旧も、この再承認の経路を保つ（`RunHistory::recovered_landing`）。
 - 再承認は着地する差分を読む: containerのrunはlanding worktreeでrebaseされるので、止まった着地がrebaseしたheadを再承認の対象にする（`integrate::binding::landing_head`）。
-- 照合とmergeの記録は、それぞれ同じtransactionで監査に書く（[監査](../audit.md)）。
+- 承認元の差分から着地する内容を確かめ直せるよう、照合の根拠とmergeの結果をそれぞれrunの記録と同じtransactionで監査に書く（[監査](../audit.md)）。
 
 ## reviewのプログラム
 

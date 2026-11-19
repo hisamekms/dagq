@@ -17,6 +17,7 @@ use crate::{
     domain::{
         RunEvent,
         kpi::{Axis, KpiConfig, KpiInput, KpiQuery},
+        stats::{Cursor, timestamp_millis},
     },
 };
 
@@ -121,17 +122,14 @@ fn a_claim_under_the_trial_records_its_group_and_candidate() {
         "{claim}"
     );
 
-    // `kpi --by group --by trial`, of the claim's attributes (no ledger
-    // row).
+    // Query the fixture's whole journal so a run near midnight stays in
+    // the window.
     let events: Vec<RunEvent> = queue.all_events().unwrap();
-    // A minute after the queue's last event: the test reads no clock.
-    let now = events
+    let last_event_at = events
         .iter()
-        .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+        .filter_map(|event| timestamp_millis(&event.created_at))
         .max()
-        .expect("the queue's events")
-        / 1000
-        + 60;
+        .expect("the queue's events");
     let empty = HashMap::new();
     let config = KpiConfig::default();
     let kpi = crate::domain::kpi::kpi(
@@ -142,7 +140,7 @@ fn a_claim_under_the_trial_records_its_group_and_candidate() {
             areas: None,
             heartbeats: &empty,
             draft_origins: &HashMap::new(),
-            now,
+            now: last_event_at / 1000 + 1,
             utc_offset_secs: 0,
             cores: None,
             rust_toolchain: false,
@@ -156,7 +154,7 @@ fn a_claim_under_the_trial_records_its_group_and_candidate() {
             answers: None,
         },
         &KpiQuery {
-            last: 1,
+            until: Some(Cursor::Time(last_event_at)),
             by: vec![Axis::GROUP, "trial".parse().unwrap()],
             ..KpiQuery::default()
         },

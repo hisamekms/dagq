@@ -2257,6 +2257,11 @@ pub trait RepositoryReads {
         anyhow::bail!("this repository keeps no history")
     }
     fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>>;
+    /// The single merge base, if there is one. A clean-merge proof must
+    /// use the same base as the approved range, with no virtual base.
+    fn unique_merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+        self.merge_base(a, b)
+    }
 }
 
 /// A ref write [`Repository::prepare_ref`] staged and holds the lock of.
@@ -2389,8 +2394,8 @@ pub trait Repository: RepositoryReads {
     fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
     /// Each file the diff from `from` to `to` touches (no rename: a moved
     /// file is a removal and an addition), with its blob ID in `to` or its
-    /// removal: what a landing's judgment is bound to and compared with
-    /// (ADR-t4840-2 decision 7).
+    /// removal. Landing uses this in both directions to record a change's
+    /// preimages and postimages (ADR-t5283-2).
     fn landing_blobs(
         &self,
         from: &str,

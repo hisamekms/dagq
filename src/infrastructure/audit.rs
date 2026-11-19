@@ -514,7 +514,7 @@ pub(super) fn record_landing(
     payload: &Value,
 ) -> Result<()> {
     use crate::domain::EventKind as K;
-    use crate::domain::landing_binding::{BINDING_KEY, binding_of};
+    use crate::domain::landing_binding::{BINDING_KEY, binding_of, facts_of};
     if tx.dialect() != SqlDialect::Sqlite {
         return Ok(());
     }
@@ -577,7 +577,7 @@ pub(super) fn record_landing(
                 action,
                 sender,
                 capability,
-                facts,
+                facts.as_ref().map(|facts| facts.audit_summary()),
                 Some(change),
                 Outcome {
                     status: OutcomeStatus::Succeeded,
@@ -588,7 +588,8 @@ pub(super) fn record_landing(
         K::IntegrationCompared => {
             let landed = payload
                 .get("landed")
-                .and_then(|value| serde_json::from_value(value.clone()).ok());
+                .and_then(facts_of)
+                .map(|facts| facts.audit_summary());
             let matched = payload["matched"] == true;
             let outcome = if matched {
                 Outcome {
@@ -599,7 +600,7 @@ pub(super) fn record_landing(
                 Outcome {
                     status: OutcomeStatus::Denied,
                     reason: Some(format!(
-                        "the landed files differ from the judgment: {}",
+                        "the landing could not carry over the approved change: {}",
                         payload["differing"]
                     )),
                 }
@@ -609,7 +610,7 @@ pub(super) fn record_landing(
                     json!({"judgment": payload["judgment"], "path": payload["path"], "binding": payload["judged"], "head": payload["head_before"]}),
                 ),
                 after: Some(
-                    json!({"binding": payload["landed"], "head": payload["head_after"], "rebased": payload["rebased"], "renumbered": payload["renumbered"], "conflict_resolved": payload["conflict_resolved"], "differing": payload["differing"], "reapproval": payload["reapproval"]}),
+                    json!({"binding": payload["landed"], "head": payload["head_after"], "rebased": payload["rebased"], "renumbered": payload["renumbered"], "conflict_resolved": payload["conflict_resolved"], "main": payload["main"], "own_change": payload["own_change"], "differing": payload["differing"], "reapproval": payload["reapproval"]}),
                 ),
                 ..Change::default()
             };
@@ -634,8 +635,7 @@ pub(super) fn record_landing(
         | K::ReviseFinished
             if payload.get("binding_after").is_some_and(|b| !b.is_null()) =>
         {
-            let after: Option<crate::domain::audit::LandingFacts> =
-                serde_json::from_value(payload["binding_after"].clone()).ok();
+            let after = facts_of(&payload["binding_after"]).map(|facts| facts.audit_summary());
             let change = Change {
                 before: Some(
                     json!({"head": payload["head_before"], "binding": payload["binding_before"]}),
@@ -669,7 +669,8 @@ pub(super) fn record_landing(
             let merged = &payload["merged"];
             let landed = merged
                 .get("landed")
-                .and_then(|value| serde_json::from_value(value.clone()).ok());
+                .and_then(facts_of)
+                .map(|facts| facts.audit_summary());
             let change = Change {
                 before: Some(json!({"main": payload["main_before"]})),
                 after: Some(json!({
@@ -775,7 +776,7 @@ fn previous_binding(
     tx: &impl SqlWrite,
     run_id: &crate::domain::RunId,
     event: crate::domain::EventId,
-) -> Result<Option<crate::domain::audit::LandingFacts>> {
+) -> Result<Option<crate::domain::landing_binding::LandingFacts>> {
     use crate::domain::EventKind as K;
     let rows: Vec<(i64, String, String, Option<String>)> = tx.query_map(
         "SELECT id, kind, payload, actor_role FROM run_events WHERE run_id=?1 AND id<?2 AND kind IN (?3,?4,?5) ORDER BY id DESC",
@@ -805,8 +806,11 @@ fn previous_binding(
 
 /// A binding as a record's change shows it: the tree hash and the set
 /// (and the judgment's path, for the new one).
-fn binding_change(facts: &crate::domain::audit::LandingFacts, path: Option<&str>) -> Value {
-    let mut value = json!({"tree_hash": facts.tree_hash, "approved_blobs": facts.approved_blobs});
+fn binding_change(
+    facts: &crate::domain::landing_binding::LandingFacts,
+    path: Option<&str>,
+) -> Value {
+    let mut value = json!(facts);
     if let Some(path) = path {
         value["path"] = json!(path);
     }

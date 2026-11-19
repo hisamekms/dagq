@@ -1,26 +1,16 @@
-//! What a landing's judgment is bound to, and the comparison of it with
-//! what lands (ADR-t4840-2 decisions 7 and 8): every judgment that lets a
-//! run land (a review's pass, an AI's `land` of a concern, the convergence
-//! after the revise limit, a person's `land` answer to approve_landing and
-//! a person's or the inbox's direct `integrate`) carries, in its event's
-//! [`BINDING_KEY`], the set of the files the run's diff touches, each with
-//! its blob hash after the change or [`BlobState::Removed`]. The landing
-//! compares the set the merged result touches with the set of the run's
-//! last such judgment ([`last_judgment`]) and lands only when they are the
-//! same ([`compare`]); the normalized diff hash and the tree hash ride
-//! along for the record and are compared with nothing.
-//!
-//! A comparison that differs (`integration_compared` with `matched:
-//! false`) spends every judgment before it: the run lands again only after
-//! a judgment of the path that gave the spent one ([`Reapproval`]).
+//! Bind a landing judgment to the run's exact change and verify that Git's
+//! clean combination with main produced the tree that will land (ADR-t5283-2).
+//! A mismatch spends prior judgments and sends the run back to the path
+//! that authorized it (ADR-t4840-2 decision 8).
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::audit::{BlobState, LandingFacts};
-use super::{EventId, EventKind, RunEvent};
+use super::audit::BlobState;
+use super::{CommitSha, EventId, EventKind, RunEvent};
 
 /// The key of a judgment event's payload that holds its [`LandingFacts`].
 pub const BINDING_KEY: &str = "binding";
@@ -28,6 +18,39 @@ pub const BINDING_KEY: &str = "binding";
 /// The files a diff touches, by path, each with its blob hash after the
 /// change or its removal.
 pub type BlobSet = BTreeMap<String, BlobState>;
+
+/// Exact endpoints and per-file preimages of the run's change. The Git
+/// objects also identify modes and the exact locations of edits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunChange {
+    pub base: CommitSha,
+    pub head: CommitSha,
+    pub before_blobs: BlobSet,
+}
+
+/// The judgment's diff. Postimages remain available for the legacy and
+/// protected-path checks. The normalized diff hash is only for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LandingFacts {
+    pub approved_blobs: BlobSet,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_change: Option<RunChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_hash: Option<String>,
+}
+
+impl LandingFacts {
+    pub fn audit_summary(&self) -> super::audit::LandingFacts {
+        super::audit::LandingFacts {
+            approved_blobs: self.approved_blobs.clone(),
+            diff_hash: self.diff_hash.clone(),
+            tree_hash: self.tree_hash.clone(),
+        }
+    }
+}
 
 /// Which judgment let a run land (ADR-t4840-2 decision 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,9 +171,13 @@ pub fn binding_of(payload: &Value) -> Option<LandingFacts> {
 }
 
 /// [`binding_of`]'s reading of one binding's value.
-fn facts_of(binding: &Value) -> Option<LandingFacts> {
+pub(crate) fn facts_of(binding: &Value) -> Option<LandingFacts> {
     Some(LandingFacts {
         approved_blobs: serde_json::from_value(binding.get("approved_blobs")?.clone()).ok()?,
+        run_change: match binding.get("run_change") {
+            Some(change) => Some(serde_json::from_value(change.clone()).ok()?),
+            None => None,
+        },
         diff_hash: binding["diff_hash"].as_str().map(str::to_owned),
         tree_hash: binding["tree_hash"].as_str().map(str::to_owned),
     })
@@ -348,13 +375,14 @@ pub fn compare(judged: &BlobSet, landed: &BlobSet) -> Comparison {
     Comparison { differing }
 }
 
-/// What the landing does with `judgment` and the set `landed` touches.
+/// Whether the judgment covers what would land and, if necessary, how
+/// the run is approved again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// The sets are the same: it lands.
+    /// The judgment covers the change.
     Land,
-    /// They differ (or the judgment was bound to nothing): it does not
-    /// land, and goes to `reapproval`.
+    /// Approval is required through `reapproval`. The paths in
+    /// `differing` are diagnostic and may be empty for an unproven head.
     Reapprove {
         reapproval: Reapproval,
         differing: Vec<String>,
@@ -365,7 +393,7 @@ pub enum Decision {
 /// differs goes ([`JudgmentPath::reapproval`]). A judgment bound to
 /// nothing (recorded before judgments were bound) holds nothing to compare
 /// with: every landed path differs.
-pub fn decide(judgment: &Judgment<'_>, landed: &BlobSet) -> Decision {
+fn decide_legacy(judgment: &Judgment<'_>, landed: &BlobSet) -> Decision {
     let differing = match &judgment.binding {
         Some(binding) => compare(&binding.approved_blobs, landed).differing,
         None => landed.keys().cloned().collect(),
@@ -373,6 +401,91 @@ pub fn decide(judgment: &Judgment<'_>, landed: &BlobSet) -> Decision {
     if judgment.binding.is_some() && differing.is_empty() {
         return Decision::Land;
     }
+    reapprove(judgment, differing)
+}
+
+/// The proof recorded as `integration_compared.own_change`. With an
+/// unchanged base, the exact bound change is compared directly. A clean
+/// merge tree is independently computed from the judged head and current
+/// main and must equal the landed tree. The event's judged and landed
+/// bindings identify both Git ranges and their preimages and postimages;
+/// the runtime's rebase journal links any intermediate heads. A conflict
+/// or unavailable proof cannot establish identity.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChangeProof {
+    LegacyBlobs,
+    UnchangedBase,
+    CleanMerge { tree: String },
+    Conflict { paths: Vec<String> },
+    Unproven,
+}
+
+/// Decide whether the judgment covers this change. A resolution or
+/// renumbering always needs a new judgment. Protected path globs exclude
+/// a run from cross-base carry-over and route it to a person. A judgment
+/// already on the final base goes through the ordinary identity check.
+pub fn approval_carries(
+    judgment: &Judgment<'_>,
+    landed: &LandingFacts,
+    proof: &ChangeProof,
+    rewritten: bool,
+    protected_paths: &[String],
+) -> Decision {
+    if !matches!(proof, ChangeProof::UnchangedBase) {
+        let differing: Vec<_> = landed
+            .approved_blobs
+            .keys()
+            .filter(|path| {
+                protected_paths
+                    .iter()
+                    .any(|glob| super::scope::glob_matches(glob, path))
+            })
+            .cloned()
+            .collect();
+        if !differing.is_empty() {
+            return Decision::Reapprove {
+                reapproval: Reapproval::ApproveLanding,
+                differing,
+            };
+        }
+    }
+    if !rewritten {
+        if judgment
+            .binding
+            .as_ref()
+            .is_some_and(|b| b.run_change.is_none())
+        {
+            return decide_legacy(judgment, &landed.approved_blobs);
+        }
+        if let Some(judged) = &judgment.binding
+            && judged.run_change.is_some()
+            && match proof {
+                ChangeProof::UnchangedBase => {
+                    judged.run_change == landed.run_change
+                        && judged.approved_blobs == landed.approved_blobs
+                        && judged.tree_hash == landed.tree_hash
+                }
+                ChangeProof::CleanMerge { tree } => landed.tree_hash.as_ref() == Some(tree),
+                _ => false,
+            }
+        {
+            return Decision::Land;
+        }
+    }
+    let mut differing = judgment.binding.as_ref().map_or_else(
+        || landed.approved_blobs.keys().cloned().collect(),
+        |judged| compare(&judged.approved_blobs, &landed.approved_blobs).differing,
+    );
+    if let ChangeProof::Conflict { paths } = proof {
+        differing.extend(paths.iter().cloned());
+        differing.sort();
+        differing.dedup();
+    }
+    reapprove(judgment, differing)
+}
+
+fn reapprove(judgment: &Judgment<'_>, differing: Vec<String>) -> Decision {
     Decision::Reapprove {
         reapproval: judgment.path.reapproval(),
         differing,
@@ -455,6 +568,7 @@ mod tests {
     fn bound(pairs: &[(&str, Option<&str>)]) -> Value {
         serde_json::to_value(LandingFacts {
             approved_blobs: blobs(pairs),
+            run_change: None,
             diff_hash: Some("d".into()),
             tree_hash: Some("t".into()),
         })
@@ -609,11 +723,169 @@ mod tests {
         assert_eq!(judgment.path, JudgmentPath::ReviewPass);
         let landed = blobs(&[("src/a.rs", Some("2"))]);
         assert_eq!(
-            decide(&judgment, &landed),
+            decide_legacy(&judgment, &landed),
             Decision::Reapprove {
                 reapproval: Reapproval::Review,
                 differing: vec!["src/a.rs".into()]
             }
+        );
+    }
+
+    fn source_change() -> RunChange {
+        RunChange {
+            base: CommitSha::parse("1".repeat(40), "base").unwrap(),
+            head: CommitSha::parse("2".repeat(40), "head").unwrap(),
+            before_blobs: blobs(&[("f", Some("before"))]),
+        }
+    }
+
+    #[test]
+    fn clean_merges_keep_approval_even_when_main_changed_the_same_file() {
+        let event = event(1, EventKind::IntegrationApproved, json!({"ask_id": 1}));
+        let judgment = Judgment {
+            event: &event,
+            path: JudgmentPath::HumanLand,
+            binding: Some(LandingFacts {
+                approved_blobs: blobs(&[("f", Some("approved"))]),
+                run_change: Some(source_change()),
+                tree_hash: Some("approved-tree".into()),
+                diff_hash: None,
+            }),
+        };
+
+        // One main changes the preimage of the same file. The other main
+        // changes only a separate file, so the run's postimage is intact.
+        for (before, after, tree) in [
+            ("main-edited-f", "merged-f", "same-file-merge"),
+            ("before", "approved", "another-file-merge"),
+        ] {
+            let landed = LandingFacts {
+                approved_blobs: blobs(&[("f", Some(after))]),
+                run_change: Some(RunChange {
+                    base: CommitSha::parse("3".repeat(40), "base").unwrap(),
+                    head: CommitSha::parse("4".repeat(40), "head").unwrap(),
+                    before_blobs: blobs(&[("f", Some(before))]),
+                }),
+                tree_hash: Some(tree.into()),
+                diff_hash: None,
+            };
+            let proof = ChangeProof::CleanMerge { tree: tree.into() };
+            assert_eq!(
+                approval_carries(&judgment, &landed, &proof, false, &[]),
+                Decision::Land
+            );
+        }
+    }
+
+    #[test]
+    fn a_clean_merge_does_not_carry_approval_over_newly_protected_paths() {
+        let event = event(1, EventKind::ReviewFinished, json!({"verdict": "pass"}));
+        let approved = LandingFacts {
+            approved_blobs: blobs(&[("audit/f", Some("approved"))]),
+            run_change: Some(source_change()),
+            tree_hash: Some("approved-tree".into()),
+            diff_hash: None,
+        };
+        let judgment = Judgment {
+            event: &event,
+            path: JudgmentPath::ReviewPass,
+            binding: Some(approved.clone()),
+        };
+        let mut landed = approved;
+        landed.approved_blobs = blobs(&[("audit/f", Some("merged"))]);
+        landed.tree_hash = Some("merged-tree".into());
+        let proof = ChangeProof::CleanMerge {
+            tree: "merged-tree".into(),
+        };
+        assert_eq!(
+            approval_carries(&judgment, &landed, &proof, false, &[]),
+            Decision::Land
+        );
+        assert_eq!(
+            approval_carries(&judgment, &landed, &proof, false, &["audit/**".into()]),
+            Decision::Reapprove {
+                reapproval: Reapproval::ApproveLanding,
+                differing: vec!["audit/f".into()]
+            },
+        );
+    }
+
+    #[test]
+    fn changed_commits_and_conflict_resolutions_return_to_the_authorizing_path() {
+        let event = event(1, EventKind::IntegrationApproved, json!({}));
+        let approved = LandingFacts {
+            approved_blobs: blobs(&[("f", Some("approved"))]),
+            run_change: Some(source_change()),
+            tree_hash: Some("approved-tree".into()),
+            diff_hash: None,
+        };
+        let mut changed = approved.clone();
+        changed.run_change.as_mut().unwrap().head =
+            CommitSha::parse("3".repeat(40), "new commit").unwrap();
+        let clean = ChangeProof::CleanMerge {
+            tree: "approved-tree".into(),
+        };
+        let conflict = ChangeProof::Conflict {
+            paths: vec!["f".into()],
+        };
+
+        for (path, reapproval) in [
+            (JudgmentPath::ReviewPass, Reapproval::Review),
+            (JudgmentPath::AiLand, Reapproval::Review),
+            (JudgmentPath::Converged, Reapproval::Review),
+            (JudgmentPath::HumanLand, Reapproval::ApproveLanding),
+            (JudgmentPath::DirectIntegrate, Reapproval::Integrate),
+        ] {
+            let judgment = Judgment {
+                event: &event,
+                path,
+                binding: Some(approved.clone()),
+            };
+            for (landed, proof, rewritten, differing) in [
+                (&changed, &ChangeProof::UnchangedBase, false, vec![]),
+                (&approved, &ChangeProof::Unproven, false, vec![]),
+                (&approved, &conflict, false, vec!["f".into()]),
+                (&approved, &clean, true, vec![]),
+                (
+                    &approved,
+                    &ChangeProof::CleanMerge {
+                        tree: "other-tree".into(),
+                    },
+                    false,
+                    vec![],
+                ),
+            ] {
+                assert_eq!(
+                    approval_carries(&judgment, landed, proof, rewritten, &[]),
+                    Decision::Reapprove {
+                        reapproval,
+                        differing
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_bindings_only_match_the_old_postimages_even_with_a_clean_merge() {
+        let events = [pass(1, &[("f", Some("approved"))])];
+        let judgment = last_judgment(&events).unwrap();
+        let mut landed = judgment.binding.clone().unwrap();
+        let proof = ChangeProof::CleanMerge {
+            tree: "merged-tree".into(),
+        };
+        landed.tree_hash = Some("merged-tree".into());
+        assert_eq!(
+            approval_carries(&judgment, &landed, &proof, false, &[]),
+            Decision::Land
+        );
+        landed.approved_blobs = blobs(&[("f", Some("merged"))]);
+        assert_eq!(
+            approval_carries(&judgment, &landed, &proof, false, &[]),
+            Decision::Reapprove {
+                reapproval: Reapproval::Review,
+                differing: vec!["f".into()]
+            },
         );
     }
 
@@ -701,6 +973,10 @@ mod tests {
         let judgment_payload = json!({"verdict": "pass", BINDING_KEY: {
             "approved_blobs": {"f": {"blob": FIRST_REMOVED_BLOB}},
             "diff_hash": diff_hash(&approved_diff), "tree_hash": "t1",
+            "run_change": {
+                "base": "1".repeat(40), "head": "2".repeat(40),
+                "before_blobs": {"f": {"blob": BEFORE_BLOB}},
+            },
         }});
         let events = [event(1, EventKind::ReviewFinished, judgment_payload)];
         let judgment = last_judgment(&events).unwrap();
@@ -709,15 +985,21 @@ mod tests {
             judgment.binding.as_ref().unwrap().diff_hash.as_deref(),
             Some(diff_hash(&revised_diff).as_str())
         );
+        let approved = judgment.binding.as_ref().unwrap();
+        let mut revised = approved.clone();
+        revised.diff_hash = Some(diff_hash(&revised_diff));
+        revised.approved_blobs = blobs(&[("f", Some(SECOND_REMOVED_BLOB))]);
+        revised.run_change.as_mut().unwrap().head =
+            CommitSha::parse("3".repeat(40), "revised head").unwrap();
         assert_eq!(
-            decide(&judgment, &blobs(&[("f", Some(SECOND_REMOVED_BLOB))])),
+            approval_carries(&judgment, &revised, &ChangeProof::UnchangedBase, false, &[]),
             Decision::Reapprove {
                 reapproval: Reapproval::Review,
                 differing: vec!["f".into()]
             }
         );
         assert_eq!(
-            decide(&judgment, &blobs(&[("f", Some(FIRST_REMOVED_BLOB))])),
+            approval_carries(&judgment, approved, &ChangeProof::UnchangedBase, false, &[]),
             Decision::Land
         );
     }
@@ -779,7 +1061,7 @@ mod tests {
         let judgment = last_judgment(&events).unwrap();
         // Main moved only outside the diff: the merged tree is another,
         // the set is the same.
-        assert_eq!(decide(&judgment, &blobs(&judged)), Decision::Land);
+        assert_eq!(decide_legacy(&judgment, &blobs(&judged)), Decision::Land);
         let back = |differing: &[&str]| Decision::Reapprove {
             reapproval: Reapproval::Review,
             differing: differing.iter().map(|p| (*p).to_owned()).collect(),
@@ -806,7 +1088,11 @@ mod tests {
             ),
             (blobs(&[("src/a.rs", Some("a1"))]), vec!["src/b.rs"]),
         ] {
-            assert_eq!(decide(&judgment, &landed), back(&differing), "{landed:?}");
+            assert_eq!(
+                decide_legacy(&judgment, &landed),
+                back(&differing),
+                "{landed:?}"
+            );
         }
     }
 
@@ -950,7 +1236,7 @@ mod tests {
         let events = [event(1, EventKind::IntegrationApproved, json!({"pid": 1}))];
         let judgment = last_judgment(&events).unwrap();
         assert_eq!(
-            decide(&judgment, &blobs(&[("a", Some("1"))])),
+            decide_legacy(&judgment, &blobs(&[("a", Some("1"))])),
             Decision::Reapprove {
                 reapproval: Reapproval::Integrate,
                 differing: vec!["a".into()]

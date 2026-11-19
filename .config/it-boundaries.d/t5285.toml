@@ -1,0 +1,6 @@
+[[boundary]]
+id = "landing-approval-carried-over-a-clean-merge-of-main"
+kind = "Git"
+test = "runtime_integrate::an_approved_run_whose_file_main_changed_without_a_conflict_lands_without_asking_again"
+reason = "実のGitで同じfileの別々の箇所を変えた2つのcommitを衝突なく重ね、承認の差分と着地のtreeを照合する境界を確かめる。既存の衝突検出と別fileのrebaseの代表では同じfileの承認の持ち越しを確かめられない"
+task = 5285

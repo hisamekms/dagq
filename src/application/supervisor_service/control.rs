@@ -813,7 +813,12 @@ fn observe_landing_entry(
     ) && requested["judgment"] == json!(entry.judgment)
         && !recorded_entry(&events, &entry)
     {
-        EventStore::record_runtime_event(store, id, EventKind::LandingQueueEntered, json!(entry))?;
+        EventStore::record_runtime_event(
+            store,
+            id,
+            EventKind::LandingQueueEntered,
+            entry.entered_payload(),
+        )?;
     }
     Ok(())
 }

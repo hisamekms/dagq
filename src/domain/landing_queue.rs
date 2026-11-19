@@ -3,11 +3,13 @@
 
 use super::{Ask, AskKind, EventId, EventKind, Priority, RunEvent, RunHistory, RunId, TaskId};
 use serde::Serialize;
+use serde_json::{Value, json};
 use std::cmp::Reverse;
 
 /// A queued landing's durable provenance and current requirements.
-/// `entered_at` is the authorizing event's timestamp, `judgment` its ID and
-/// `basis` its kind. `priority` is the task's effective priority now.
+/// `entry_id` and `entered_at` belong to one journaled stay, including
+/// any wait for reapproval. `judgment` and `basis` describe its current
+/// authorization. `priority` is the task's effective priority now.
 /// `e2e` requires worker capacity; `disk` requires the landing disk budget.
 /// Status adds a one-based `position` and `waiting_for` from the latest probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -15,6 +17,7 @@ pub struct Entry {
     pub run_id: RunId,
     pub task_id: TaskId,
     pub entered_at: String,
+    pub entry_id: EventId,
     pub judgment: EventId,
     pub basis: String,
     pub priority: Priority,
@@ -36,6 +39,33 @@ impl Entry {
         Self::with_requirements(run_id, task_id, events, priority, e2e)
     }
 
+    /// An open entry waiting for a replacement judgment remains visible
+    /// even while it cannot be selected.
+    pub fn awaiting_reapproval(
+        run_id: RunId,
+        task_id: TaskId,
+        events: &[RunEvent],
+        priority: Priority,
+        head: Option<&str>,
+    ) -> Option<Self> {
+        let open = EntryJournal::read(events).open?;
+        let wait = open
+            .wait
+            .filter(|e| e.payload["waiting_for"] == "awaiting_reapproval")?;
+        let id = EventId::new(wait.payload["judgment"].as_i64()?);
+        let judgment = events.iter().find(|event| event.id == id)?;
+        let e2e = head.is_some_and(|head| super::run_e2e::due(events, head).is_some());
+        Some(Self::at(
+            run_id,
+            task_id,
+            priority,
+            e2e,
+            judgment,
+            open.id(),
+            open.at(),
+        ))
+    }
+
     fn with_requirements(
         run_id: RunId,
         task_id: TaskId,
@@ -44,18 +74,224 @@ impl Entry {
         e2e: bool,
     ) -> Option<Self> {
         let id = RunHistory::from_events(events).landing_judgment()?;
-        let event = events.iter().find(|event| event.id == id)?;
-        Some(Self {
+        let judgment = events.iter().find(|event| event.id == id)?;
+        let hold = events.iter().rev().find(|e| {
+            e.kind
+                .is_in(&[EventKind::TaskHeld, EventKind::TaskReleased])
+        });
+        if hold.is_some_and(|e| e.kind == EventKind::TaskHeld) {
+            return None;
+        }
+        let journal = EntryJournal::read(events);
+        if let Some(open) = journal.open {
+            return Some(Self::at(
+                run_id,
+                task_id,
+                priority,
+                e2e,
+                judgment,
+                open.id(),
+                open.at(),
+            ));
+        }
+        // A ready run without an entry is a candidate for admission. This
+        // also bootstraps journals created by older runtimes. After a
+        // departure, a restored judgment cannot supply the next stay's time.
+        let admitted = match journal.left {
+            Some(left) if judgment.id <= left.id => events.last().unwrap_or(left),
+            _ => judgment,
+        };
+        Some(Self::at(
             run_id,
             task_id,
-            entered_at: event.created_at.clone(),
-            judgment: id,
-            basis: event.kind.as_str().to_owned(),
+            priority,
+            e2e,
+            judgment,
+            admitted.id,
+            &admitted.created_at,
+        ))
+    }
+
+    fn at(
+        run_id: RunId,
+        task_id: TaskId,
+        priority: Priority,
+        e2e: bool,
+        judgment: &RunEvent,
+        entry_id: EventId,
+        at: &str,
+    ) -> Self {
+        Self {
+            run_id,
+            task_id,
+            entry_id,
+            entered_at: at.to_owned(),
+            judgment: judgment.id,
+            basis: judgment.kind.as_str().to_owned(),
             priority,
             e2e,
             disk: true,
-        })
+        }
     }
+
+    pub fn entered_payload(&self) -> Value {
+        let mut payload = json!(self);
+        payload["at"] = json!(self.entered_at);
+        payload
+    }
+}
+
+/// One entry and its most recent wait. A persisted entry can outlive an
+/// attempted landing and the judgment that enabled it.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenEntry<'a> {
+    pub entered: &'a RunEvent,
+    wait: Option<&'a RunEvent>,
+}
+
+impl<'a> OpenEntry<'a> {
+    pub fn id(self) -> EventId {
+        journal_id(self.entered).unwrap_or(self.entered.id)
+    }
+
+    fn at(self) -> &'a str {
+        self.entered.payload["at"]
+            .as_str()
+            .or_else(|| self.entered.payload["entered_at"].as_str())
+            .unwrap_or(&self.entered.created_at)
+    }
+
+    pub fn awaiting_reapproval(self) -> bool {
+        self.wait
+            .is_some_and(|e| e.payload["waiting_for"] == "awaiting_reapproval")
+    }
+
+    fn observe_wait(&mut self, event: &'a RunEvent) {
+        // A resource probe can have read the entry before the comparison
+        // spent its judgment. Only a newer judgment can resume probing it.
+        if self.awaiting_reapproval()
+            && event.payload["waiting_for"] != "awaiting_reapproval"
+            && event.payload["judgment"].as_i64()
+                <= self.wait.and_then(|wait| wait.payload["judgment"].as_i64())
+        {
+            return;
+        }
+        self.wait = Some(event);
+    }
+
+    pub fn reapproval_payload(self, comparison: &Value) -> Value {
+        let judgment = comparison["judgment"]
+            .as_i64()
+            .or_else(|| self.entered.payload["judgment"].as_i64());
+        json!({"entry_id": self.id(), "judgment": judgment, "waiting_for": Wait::AwaitingReapproval})
+    }
+}
+
+fn journal_id(event: &RunEvent) -> Option<EventId> {
+    event.payload["entry_id"]
+        .as_i64()
+        .or_else(|| event.payload["judgment"].as_i64())
+        .map(EventId::new)
+}
+
+/// The lifetime is reconstructed solely from entry, departure, and wait
+/// records. An old journal may identify observations by judgment instead
+/// of entry ID. A late write for a closed entry cannot affect its successor.
+#[derive(Default)]
+pub struct EntryJournal<'a> {
+    pub open: Option<OpenEntry<'a>>,
+    left: Option<&'a RunEvent>,
+}
+
+impl<'a> EntryJournal<'a> {
+    pub fn read(events: &'a [RunEvent]) -> Self {
+        let mut journal = Self::default();
+        for event in events {
+            match event.kind.known() {
+                Some(EventKind::LandingQueueEntered) => {
+                    journal.open = Some(OpenEntry {
+                        entered: event,
+                        wait: None,
+                    });
+                }
+                Some(EventKind::LandingQueueLeft)
+                    if journal
+                        .open
+                        .is_none_or(|open| journal_id(event) == Some(open.id())) =>
+                {
+                    journal.open = None;
+                    journal.left = Some(event);
+                }
+                Some(EventKind::LandingQueueWaiting)
+                    if let Some(open) = &mut journal.open
+                        && journal_id(event) == Some(open.id()) =>
+                {
+                    open.observe_wait(event);
+                }
+                _ => {}
+            }
+        }
+        journal
+    }
+}
+
+/// The queue record a transition must write in its own transaction when
+/// the run has an open entry. A landing start keeps that entry open until
+/// its outcome. A mismatch alone temporarily withdraws eligibility.
+#[derive(Clone, Copy)]
+pub enum EntryChange<'a> {
+    Left(&'a str),
+    AwaitingReapproval,
+    StartReview,
+}
+
+impl<'a> EntryChange<'a> {
+    pub fn departure(self, open: OpenEntry<'_>) -> Option<&'a str> {
+        match self {
+            Self::Left(reason) => Some(reason),
+            Self::StartReview if !open.awaiting_reapproval() => Some("review"),
+            _ => None,
+        }
+    }
+}
+
+pub fn entry_change(kind: EventKind, payload: &Value) -> Option<EntryChange<'_>> {
+    use EventKind::*;
+    let reason = match kind {
+        IntegrationCompared if payload["matched"] == false => {
+            return Some(EntryChange::AwaitingReapproval);
+        }
+        IntegrationError
+            if payload["code"] == crate::domain::ReasonCode::LandingChanged.as_str() =>
+        {
+            return None;
+        }
+        RunIntegrated => "landed",
+        IntegrationDeferred | IntegrationError | IntegrationFailed | IntegrationHeld => {
+            payload["code"].as_str().unwrap_or(kind.as_str())
+        }
+        LandingDecided => payload["answer"].as_str().unwrap_or(kind.as_str()),
+        ResumeStarted => "resume",
+        ReviewStarted => return Some(EntryChange::StartReview),
+        ReviseRequested => "revise",
+        TaskHeld | HoldParked => "hold",
+        LandingRecheckFailed if payload["action"] == crate::domain::recheck::RESUMED => {
+            kind.as_str()
+        }
+        ReviewFailed | RunE2eFailed | ReplanParked | RecoveryParked | SessionGoneParked
+        | EvidenceMissing | ScopeViolation | RunSatisfiedClosed | RuntimeError => kind.as_str(),
+        RunRecovered
+            if matches!(
+                payload["status"].as_str(),
+                Some("interrupted" | "failed" | "replaced")
+            ) =>
+        {
+            kind.as_str()
+        }
+        RunAgentEvalFinished if payload["outcome"] != "passed" => kind.as_str(),
+        _ => return None,
+    };
+    Some(EntryChange::Left(reason))
 }
 
 /// A probe's reason for withholding a candidate. Local holds may be skipped;
@@ -63,6 +299,7 @@ impl Entry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Wait {
+    AwaitingReapproval,
     Held,
     Answer,
     Integrating,
@@ -81,6 +318,7 @@ impl Wait {
     /// A human-readable predicate describing the reason a run cannot start.
     pub const fn describe(self) -> &'static str {
         match self {
+            Self::AwaitingReapproval => "is waiting for its replacement landing approval",
             Self::Held => "is waiting for the landing hold to clear",
             Self::Answer => "is waiting for an answer",
             Self::Integrating => "is waiting for the active landing to finish",
@@ -144,7 +382,15 @@ pub struct LandingQueue {
 }
 impl LandingQueue {
     pub fn new(mut entries: Vec<Entry>) -> Self {
-        entries.sort_by_key(|e| (Reverse(e.priority), e.entered_at.clone(), e.judgment));
+        // The journal ID preserves arrival order when two entries have the
+        // same recorded time. A replacement judgment cannot change that tie.
+        entries.sort_by(|a, b| {
+            (Reverse(a.priority), a.entered_at.as_str(), a.entry_id).cmp(&(
+                Reverse(b.priority),
+                b.entered_at.as_str(),
+                b.entry_id,
+            ))
+        });
         Self { entries }
     }
     pub fn waiting(entry: &Entry, capacity: Capacity, resources: Resources) -> Option<Wait> {
@@ -200,48 +446,20 @@ impl LandingQueue {
     }
 }
 
-/// `landing_queue_entered` carries the complete Entry as its payload;
-/// `landing_queue_left` carries `judgment` and `reason` (start or invalidated).
-/// `landing_queue_waiting` carries `judgment` and nullable `waiting_for`.
-/// These are observations of the event-derived queue, never a second source
-/// of authorization. Repeated probes record only changes in the wait reason.
+/// Whether the candidate has an open entry. A replacement judgment does
+/// not cause a second entry event during the same stay.
 pub fn recorded_entry(events: &[RunEvent], entry: &Entry) -> bool {
-    events
-        .iter()
-        .rev()
-        .find(|e| {
-            matches!(
-                e.kind.known(),
-                Some(EventKind::LandingQueueEntered | EventKind::LandingQueueLeft)
-            )
-        })
-        .is_some_and(|e| {
-            e.kind == EventKind::LandingQueueEntered
-                && e.payload["judgment"] == serde_json::json!(entry.judgment)
-        })
+    EntryJournal::read(events)
+        .open
+        .is_some_and(|open| open.id() == entry.entry_id)
 }
 
-/// Latest wait observation for this entry since its last entry or exit.
-/// A restored authorization keeps its judgment, so observations from a
-/// previous stay in the queue cannot explain its current wait.
+/// The wait written for the current entry and judgment, if both agree.
 pub fn recorded_wait(events: &[RunEvent], judgment: EventId) -> Option<&RunEvent> {
-    events
-        .iter()
-        .rev()
-        .find(|e| {
-            matches!(
-                e.kind.known(),
-                Some(
-                    EventKind::LandingQueueEntered
-                        | EventKind::LandingQueueLeft
-                        | EventKind::LandingQueueWaiting
-                )
-            )
-        })
-        .filter(|e| {
-            e.kind == EventKind::LandingQueueWaiting
-                && e.payload["judgment"] == serde_json::json!(judgment)
-        })
+    EntryJournal::read(events)
+        .open?
+        .wait
+        .filter(|event| event.payload["judgment"].as_i64() == Some(judgment.as_i64()))
 }
 
 #[cfg(test)]
@@ -346,6 +564,144 @@ mod tests {
                 .task_id,
             TaskId::new(2)
         );
+    }
+
+    fn reapproval_events() -> Vec<RunEvent> {
+        vec![
+            event(1, EventKind::ReviewFinished, json!({"verdict": "pass"})),
+            event(
+                2,
+                EventKind::LandingQueueEntered,
+                json!({"entry_id": 1, "at": "2026-11-18T01:00:00Z", "judgment": 1}),
+            ),
+            event(3, EventKind::IntegrationStarted, json!({})),
+            event(
+                4,
+                EventKind::IntegrationCompared,
+                json!({"matched": false, "judgment": 1, "reapproval": "review"}),
+            ),
+            event(
+                5,
+                EventKind::LandingQueueWaiting,
+                json!({"entry_id": 1, "judgment": 1, "waiting_for": "awaiting_reapproval"}),
+            ),
+            event(
+                6,
+                EventKind::IntegrationError,
+                json!({"code": "landing_changed"}),
+            ),
+            event(7, EventKind::ReviewStarted, json!({})),
+        ]
+    }
+
+    fn reapproved_run(events: &[RunEvent]) -> Option<Entry> {
+        Entry::from_events(
+            RunId::new("reapproved").unwrap(),
+            TaskId::new(1),
+            events,
+            Priority::Normal,
+            None,
+        )
+    }
+
+    #[test]
+    fn reapproval_restores_the_first_entry_time_and_keeps_the_current_judgment() {
+        let mut events = reapproval_events();
+        events.push(event(
+            8,
+            EventKind::LandingQueueWaiting,
+            json!({"entry_id": 1, "judgment": 1, "waiting_for": "integrating"}),
+        ));
+        assert!(reapproved_run(&events).is_none());
+        let open = EntryJournal::read(&events).open.unwrap();
+        assert!(
+            entry_change(EventKind::ReviewStarted, &Value::Null)
+                .unwrap()
+                .departure(open)
+                .is_none()
+        );
+        let waiting = Entry::awaiting_reapproval(
+            RunId::new("reapproved").unwrap(),
+            TaskId::new(1),
+            &events,
+            Priority::Normal,
+            None,
+        )
+        .unwrap();
+        assert_eq!(waiting.entry_id, EventId::new(1));
+        assert_eq!(waiting.entered_at, "2026-11-18T01:00:00Z");
+
+        events.push(event(
+            9,
+            EventKind::ReviewFinished,
+            json!({"verdict": "pass"}),
+        ));
+        let restored = reapproved_run(&events).unwrap();
+        assert_eq!(restored.judgment, EventId::new(9));
+        assert_eq!(restored.entry_id, EventId::new(1));
+        assert_eq!(restored.entered_at, "2026-11-18T01:00:00Z");
+        assert!(recorded_wait(&events, restored.judgment).is_none());
+        assert_eq!(
+            LandingQueue::new(vec![entry(4, Priority::Normal, false), restored]).entries[0]
+                .entry_id,
+            EventId::new(1)
+        );
+    }
+
+    #[test]
+    fn verification_failure_revise_and_resume_end_the_entry_before_a_later_pass() {
+        for (kind, payload, expected) in [
+            (
+                EventKind::IntegrationDeferred,
+                json!({"code": "verification_failed"}),
+                "verification_failed",
+            ),
+            (EventKind::ReviseRequested, json!({}), "revise"),
+            (EventKind::ResumeStarted, json!({}), "resume"),
+        ] {
+            let Some(EntryChange::Left(reason)) = entry_change(kind, &payload) else {
+                panic!("{kind:?} must end an open entry");
+            };
+            assert_eq!(reason, expected);
+            let mut events = reapproval_events();
+            match kind {
+                EventKind::IntegrationDeferred => {
+                    events.push(event(
+                        8,
+                        EventKind::ReviewFinished,
+                        json!({"verdict": "pass"}),
+                    ));
+                    events.push(event(9, EventKind::IntegrationStarted, json!({})));
+                }
+                EventKind::ReviseRequested => {
+                    events.push(event(
+                        8,
+                        EventKind::ReviewFinished,
+                        json!({"verdict": "revise"}),
+                    ));
+                }
+                _ => {}
+            }
+            events.extend([
+                event(
+                    10,
+                    EventKind::LandingQueueLeft,
+                    json!({"entry_id": 1, "reason": expected}),
+                ),
+                event(11, kind, payload),
+                event(12, EventKind::ReviewStarted, json!({})),
+                event(13, EventKind::ReviewFinished, json!({"verdict": "pass"})),
+            ]);
+            let later = reapproved_run(&events).unwrap();
+            assert_eq!(later.entry_id, EventId::new(13));
+            assert_eq!(later.entered_at, "2026-11-18T13:00:00Z");
+            assert!(!recorded_entry(&events, &later));
+            assert_eq!(
+                LandingQueue::new(vec![later, entry(4, Priority::Normal, false)]).entries[0]
+                    .entry_id,
+                EventId::new(4)
+            );
+        }
     }
 
     #[test]
@@ -464,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_priority_precedes_time_and_ties_use_event_id() {
+    fn effective_priority_precedes_time_and_exact_ties_keep_entry_order() {
         let mut urgent = entry(3, Priority::Urgent, false);
         urgent.entered_at = entry(1, Priority::Low, false).entered_at;
         let queue = LandingQueue::new(vec![
@@ -482,9 +838,10 @@ mod tests {
         );
         let mut a = entry(1, Priority::Normal, false);
         a.entered_at = entry(2, Priority::Normal, false).entered_at;
+        a.judgment = EventId::new(3);
         assert_eq!(
             LandingQueue::new(vec![entry(2, Priority::Normal, false), a]).entries[0]
-                .judgment
+                .entry_id
                 .as_i64(),
             1
         );

@@ -10,6 +10,7 @@ use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
 use super::store_rows::{read_goal, read_task};
 use crate::domain::event_kind::EventKind;
 use crate::domain::goal_owner::Owner;
+use crate::domain::landing_queue::{EntryChange, EntryJournal, entry_change};
 use crate::domain::plan_request::{
     Creator, PriorityBy, RecordedOrigin, creation_origin, task_priority_at_creation,
 };
@@ -343,6 +344,34 @@ pub(super) fn event_id(
     kind: EventKind,
     payload: Value,
 ) -> Result<EventId> {
+    let change = entry_change(kind, &payload);
+    let records = match run_id {
+        Some(run) if change.is_some() || kind == EventKind::LandingQueueEntered => tx.query_map(
+            "SELECT * FROM run_events WHERE run_id=?1
+                 AND kind IN ('landing_queue_entered','landing_queue_left','landing_queue_waiting')
+                 ORDER BY id",
+            sql_params![run],
+            super::store_rows::event_row,
+        )?,
+        _ => Vec::new(),
+    };
+    let open = EntryJournal::read(&records).open;
+    if let Some(open) = open {
+        if kind == EventKind::LandingQueueEntered {
+            // A supervisor and a direct integration can discover the same
+            // candidate. Their observation admits just one open entry.
+            return Ok(open.entered.id);
+        }
+        if let Some(reason) = change.and_then(|change| change.departure(open)) {
+            event(
+                tx,
+                task_id,
+                run_id,
+                EventKind::LandingQueueLeft,
+                json!({"entry_id": open.id(), "reason": reason}),
+            )?;
+        }
+    }
     let id = EventId::new(tx.insert_id(
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
@@ -359,6 +388,15 @@ pub(super) fn event_id(
     // transaction (ADR-t4840-2 decisions 7 and 8).
     if let Some(run_id) = run_id {
         super::audit::record_landing(tx, id, task_id, run_id, kind, &payload)?;
+        if let (Some(EntryChange::AwaitingReapproval), Some(open)) = (change, open) {
+            event(
+                tx,
+                task_id,
+                Some(run_id),
+                EventKind::LandingQueueWaiting,
+                open.reapproval_payload(&payload),
+            )?;
+        }
     }
     Ok(id)
 }

@@ -1899,13 +1899,13 @@ impl Supervisor<'_> {
     /// The range a review attempt of `run` reads as it starts (its agents'
     /// range, or else [`Self::receipt_range`]) and its binding: what a
     /// verdict or a convergence of the attempt that lets the run land is
-    /// bound to (ADR-t4840-2 decision 7), recorded by its `review_started`
+    /// bound to (ADR-t5283-2), recorded by its `review_started`
     /// ([`started_binding`]).
     fn review_binding(
         &self,
         run: &TaskRun,
         subagents: Option<&SubagentSnapshot>,
-    ) -> Result<(ReviewRange, crate::domain::audit::LandingFacts)> {
+    ) -> Result<(ReviewRange, crate::domain::landing_binding::LandingFacts)> {
         let range = match subagents {
             Some(snapshot) => snapshot.range.clone(),
             None => self.receipt_range(run, &self.repository.main_head()?)?,
@@ -3210,33 +3210,6 @@ impl Supervisor<'_> {
         draining: bool,
         drain_may_adopt: bool,
     ) -> Result<()> {
-        // Close observations even when cancellation or a new judgment moved
-        // a run out of the statuses scanned for current candidates.
-        for event in self.queue.latest_task_events(&[
-            EventKind::LandingQueueEntered.as_str(),
-            EventKind::LandingQueueLeft.as_str(),
-        ])? {
-            if event.kind != EventKind::LandingQueueEntered {
-                continue;
-            }
-            let Some(id) = event.run_id.as_ref() else {
-                continue;
-            };
-            let run = self.queue.run(id)?;
-            let events = self.queue.run_events(id)?;
-            let history = RunHistory::from_events(&events);
-            let judgment = history.landing_judgment();
-            if !history.can_queue_landing(run.status())
-                || judgment.is_none()
-                || json!(judgment) != event.payload["judgment"]
-            {
-                self.queue.record_runtime_event(
-                    id,
-                    EventKind::LandingQueueLeft,
-                    json!({"judgment": event.payload["judgment"], "reason": "invalidated"}),
-                )?;
-            }
-        }
         self.landing.pending_landings.retain(|id| {
             self.queue.run(id).is_ok_and(|run| {
                 matches!(
@@ -3285,8 +3258,14 @@ impl Supervisor<'_> {
                 self.queue.record_runtime_event(
                     run.id(),
                     EventKind::LandingQueueEntered,
-                    json!(entry),
+                    entry.entered_payload(),
                 )?;
+                if !crate::domain::landing_queue::recorded_entry(
+                    &self.queue.run_events(run.id())?,
+                    &entry,
+                ) {
+                    continue;
+                }
             }
             let history = RunHistory::from_events(&events);
             let asks = unanswered
@@ -3367,7 +3346,7 @@ impl Supervisor<'_> {
             let waiting =
                 LandingQueue::explain(entry, capacity, candidates[&entry.run_id].1, selected);
             let events = self.queue.run_events(&entry.run_id)?;
-            let payload = json!({"judgment": entry.judgment, "waiting_for": waiting});
+            let payload = json!({"entry_id": entry.entry_id, "judgment": entry.judgment, "waiting_for": waiting});
             if crate::domain::landing_queue::recorded_wait(&events, entry.judgment)
                 .is_none_or(|e| e.payload != payload)
             {
@@ -3632,7 +3611,7 @@ impl Supervisor<'_> {
             return Ok(());
         }
         let question = format!(
-            "Run {} of task {}: what its landing would merge differs from what the `land` you answered was bound to (see its integration_compared for the files). Land its current diff?",
+            "Run {} of task {}: its landing could not carry over the change approved by your `land` answer (see integration_compared). Land its current diff?",
             run.id(),
             run.task_id()
         );
@@ -3699,6 +3678,7 @@ impl Supervisor<'_> {
                             "differing": landed.approved_blobs.keys().collect::<Vec<_>>(),
                             "reapproval": Reapproval::ApproveLanding.as_str(),
                             "ask_unbound": true,
+                            "own_change": crate::domain::landing_binding::ChangeProof::Unproven,
                         }),
                     )?;
                     self.queue.close_ask(ask_id)?;
@@ -4161,7 +4141,7 @@ pub(super) fn split_reasks<T>(runs: Vec<(T, bool)>) -> (Vec<T>, Vec<T>) {
 pub(super) fn started_binding(
     events: &[crate::domain::RunEvent],
     attempt: usize,
-) -> Option<crate::domain::audit::LandingFacts> {
+) -> Option<crate::domain::landing_binding::LandingFacts> {
     let attempt = u64::try_from(attempt).ok();
     events
         .iter()

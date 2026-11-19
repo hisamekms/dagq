@@ -58,7 +58,7 @@ related:
   答えを適用するときも同じ判定をし直し（askの後に試行を使い切ったrunを含む）、sessionを再開しないことと理由の行き先を`status`と`events`で読めるようにする（入口は`apply_landing_answer`）。
   `approve_landing`ではほかの選択肢も`<option>: <理由>`を選択肢そのものとして適用し（`land: <理由>`は`land`、`cancel: <理由>`は`cancel`。理由は答えの記録に残る）、`ask_answered`の`runtime_delivers`は、runが`awaiting_integration`で答えが`land` / `send_back` / `cancel`（理由付きを含む）、またはreviewが失敗してverdictの無いaskへの`retry_review`（理由付きを含む）のときtrueになる（選択肢に無い頭の答え・理由だけの文と、verdictから開いたaskへの`retry_review`などはfalseのままinboxが読む。受け付けの判断は適用と`status`の表示と同じ1つ。[Review](review.md#review-supervisor)の6、[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)）。
   runがlanding recheckのparkやresumeで`awaiting_integration`を離れている間に受け付ける答えが来たときは`runtime_delivers`はfalseだが、askは閉じずに残り、validationの後にrunが`awaiting_integration`に戻った回でsupervisorが適用する。
-  このときの`land`はaskが見せた差分のblob hashの組に結ばれ、resumeがその組を変えていれば着地せず、rebase後の差分で`approve_landing`のaskを開き直し、組が変わらなければ今どおり着地する（照合の細部は[integrateの「判断との照合」](integrate.md#判断との照合)）。
+  このときの`land`はaskが見せたrun自身の差分に結ばれ、resumeでrun自身の変更が変われば、rebase後の差分で`approve_landing`のaskを開き直す（照合の細部は[integrateの「判断との照合」](integrate.md#判断との照合)）。
   runtimeが自分で閉じる回答（`runtime_closed: true`の`ask_answered`と、supervisorの取り下げ）は`answered_by: runtime`。
   集計は[`stats`](commands.md)の`asks`。
 - `dagq ask close`は回答済みのaskに`closed_at`を書き、`ask_closed`を記録する。

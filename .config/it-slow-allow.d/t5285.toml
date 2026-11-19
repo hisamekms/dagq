@@ -1,0 +1,4 @@
+[[test]]
+name = "runtime_integrate::an_approved_run_whose_file_main_changed_without_a_conflict_lands_without_asking_again"
+reason = "Git境界。実のGitで同じfileの互いに離れた変更を重ね、元の承認で着地することを確かめる。承認前後でmainを動かす必要があるため、reviewと着地の2回に分けてsupervisorを流す。比較の判断のcaseはdomain::landing_bindingのunit testに置く"
+task = 5285

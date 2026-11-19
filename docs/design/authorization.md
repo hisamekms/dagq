@@ -81,7 +81,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 |runner|`runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report`|申告・pullは自分、報告・返却は割り当てrun|
 |image-publisher|`image.publish`だけ|なし|
 |inbox（続き）|`runner.list`・`delegate.write`|どちらも親の人の分だけ|
-|inbox|userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.list`以外のrunnerの行・`identity.login`・`goal.landing_mark`・`credential.preference`は持たない|弱める操作・守るpathの承認を拒む。OIDCの配置は親の役割で狭め、全着地承認を拒む|
+|inbox|userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.list`以外のrunnerの行・`identity.login`・`goal.landing_mark`・`credential.preference`は持たない|弱める操作と守るpathの印を持つaskの回答を拒む。OIDCの配置は親の役割で狭め、全着地承認を拒む|
 |planner|読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`|runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。|
 |planner（続き）|`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss`|taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。|
 |planner（続き）|`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`|`revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。|
@@ -149,7 +149,7 @@ answerの権限は`AnswerAuthority`（ADR-t728-3決定2）。
 記録の綴り・runtimeの非承認は`Answerer`のdoc comment、承認の分類は`answer_approves`。
 OIDCの発行元のある配置のapprove_landingの着地の承認は、最近のloginの人のtokenだけを受け、inboxとtokenの無いuserを拒む。
 policyが配置を取得し、不明なら拒む。
-弱める操作と守るpathの着地の承認はinboxを拒み、hostではDAGQ_ROLEの無いTTYの確認だけをhuman_attestedとして受ける。
+弱める操作と守るpathの印を持つaskの回答はinboxを拒み、hostではDAGQ_ROLEの無いTTYの確認だけをhuman_attestedとして受ける。
 普通の着地の承認の中継はrelayed_by_inboxとして残し、チームの版は最近のOIDCの再認証を求める。
 分類は`domain::direct_human`。
 
@@ -189,7 +189,9 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
 Integratorはrole `integrator`のactor（`integrator:<pid>`）。
 `Integrator::acting_as(actor)`は`StaticPolicy`がこの2つを許すactorでなければ拒み、着地の関数はmoduleの外から呼べない。
 
-着地には着地を許す判断のどれかと、その判断の差分の組と着地する組の照合が要り（[判断との照合](supervisor-lifecycle/integrate.md#判断との照合)）、どの判断も後のreceipt・rebase・検証・scopeの関門を免除しない（ADR-t728-2の決定3）。
+通常の承認はrun自身の変更が同じなら持ち越せる。
+照合に守るpathの一覧を渡すと、そのpathを変えるrunの承認は持ち越さない。
+どの承認も着地の[照合と検証](supervisor-lifecycle/integrate.md#判断との照合)を通る。
 
 host実行ではIntegratorは呼び出し元と同じプロセスとユーザーで動き、境界は論理的なもの（ADR-t728-2の決定4）。
 

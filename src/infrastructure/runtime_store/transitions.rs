@@ -1066,6 +1066,17 @@ impl<E: TransactionEntries> StoreQueue<E> {
             stored.task_id(),
             crate::domain::task_replan::GuardedStep::Integrate,
         )?;
+        let events = run_events_of(&tx, id)?;
+        let reapproval_wait = crate::domain::landing_queue::EntryJournal::read(&events)
+            .open
+            .is_some_and(|entry| entry.awaiting_reapproval());
+        ensure!(
+            !reapproval_wait
+                || crate::domain::RunHistory::from_events(&events)
+                    .last_judgment()
+                    .is_some(),
+            "run {id} is awaiting replacement landing approval"
+        );
         let previous = stored.status();
         let run = apply(
             &tx,
@@ -1097,8 +1108,6 @@ impl<E: TransactionEntries> StoreQueue<E> {
         {
             return Err(NotHeld("run is still leased".to_owned()).into());
         }
-        let judgment =
-            crate::domain::RunHistory::from_events(&run_events_of(&tx, id)?).landing_judgment();
         run_event(
             &tx,
             id,
@@ -1110,12 +1119,6 @@ impl<E: TransactionEntries> StoreQueue<E> {
             "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind='integration_started'",
             sql_params![id],
             |r| r.get(0),
-        )?;
-        run_event(
-            &tx,
-            id,
-            EventKind::LandingQueueLeft,
-            json!({"judgment": judgment, "reason": "start"}),
         )?;
         let done = then(crate::domain::EventId::new(started))?;
         tx.commit()?;

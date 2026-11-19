@@ -1231,7 +1231,7 @@ fn landing_queue_view(
     queue: &(impl RunLog + TaskReads + SupervisorReads + CoordinationReads + ?Sized),
     graph: &crate::application::GraphInput,
 ) -> Result<Vec<Value>> {
-    use crate::domain::landing_queue::{Entry, LandingQueue, recorded_wait};
+    use crate::domain::landing_queue::{Entry, EntryJournal, LandingQueue, recorded_wait};
     let effective: HashMap<_, _> = crate::application::dependency_graph(graph.clone(), None)
         .tasks
         .into_iter()
@@ -1251,7 +1251,11 @@ fn landing_queue_view(
             {
                 continue;
             }
-            // Keep the active landing visible alongside the waiting line.
+            if EntryJournal::read(&all_events).open.is_none() {
+                continue;
+            }
+            // Read the active landing's authorization at its start. Its
+            // entry's lifetime above comes from the entire journal.
             let events = if status == RunStatus::Integrating {
                 let at = all_events
                     .iter()
@@ -1262,15 +1266,16 @@ fn landing_queue_view(
                 &all_events[..]
             };
             let priority = effective.get(&run.task_id()).copied().unwrap_or_default();
-            if let Some(entry) = Entry::from_events(
-                run.id().clone(),
-                run.task_id(),
-                events,
-                priority,
-                run.result_commit().map(|commit| commit.as_str()),
-            ) {
+            let head = run.result_commit().map(|commit| commit.as_str());
+            let ready = Entry::from_events(run.id().clone(), run.task_id(), events, priority, head);
+            let awaiting = ready.is_none();
+            if let Some(entry) = ready.or_else(|| {
+                Entry::awaiting_reapproval(run.id().clone(), run.task_id(), events, priority, head)
+            }) {
                 let waiting = if status == RunStatus::Integrating {
                     json!("integrating")
+                } else if awaiting {
+                    json!("awaiting_reapproval")
                 } else if queue.run_lease(run.id())?.is_some() {
                     json!("lease")
                 } else if !RunHistory::from_events(events).landing_ready() {

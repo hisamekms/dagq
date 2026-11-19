@@ -436,6 +436,25 @@ impl<E: TransactionEntries> StoreQueue<E> {
         // known rolled back.
         let _read = read_before_port(self, Closing::Event(id, kind, &payload))?;
         let tx = self.write_entry("record_runtime_event")?;
+        if kind == EventKind::LandingQueueEntered && payload.get("entry_id").is_some() {
+            let events = run_events_of(&tx, id)?;
+            let run = stored_run(&tx, id)?.with_context(|| format!("run {id} does not exist"))?;
+            let current = crate::domain::landing_queue::Entry::from_events(
+                id.clone(),
+                run.task_id(),
+                &events,
+                crate::domain::Priority::default(),
+                None,
+            );
+            if !current.is_some_and(|entry| {
+                payload["entry_id"] == json!(entry.entry_id)
+                    && payload["judgment"] == json!(entry.judgment)
+            }) {
+                // The candidate may have moved on between observation and
+                // the write. An entry for that stay must not be recreated.
+                return Ok(());
+            }
+        }
         run_event_port(&tx, id, kind, payload)?;
         tx.commit()?;
         Ok(())
