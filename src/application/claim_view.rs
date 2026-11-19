@@ -284,12 +284,13 @@ impl ExcludedTasks {
     }
 }
 
-/// `candidates`' `deferred` while `held` (its `held`) leads with the
-/// queue-wide hold on the claims (`claim_held`): each deferral carries that
-/// hold's reason as `claims_held`. No supervisor judges a task's deferral
-/// while the claims are held, so the one shown is the last recorded before
-/// the hold, and the queue-wide hold, not it, is why the task waits now.
-/// With no such hold, `deferred` is left as it is.
+/// When `held` includes a queue-wide claim hold (`claim_held`), each
+/// deferral shown in `candidates` carries the hold's reason as `claims_held`.
+/// The view uses the latest recorded deferral for each candidate.
+/// Even during the hold, the supervisor calls `claimable` when neither
+/// provider can take a worker (the routes are empty), so the pass can
+/// record provider-related deferrals for individual candidates.
+/// With no queue-wide claim hold, `deferred` is left as it is.
 pub fn under_claims_hold(deferred: &mut serde_json::Value, held: &[serde_json::Value]) {
     let Some(reason) = held
         .iter()
