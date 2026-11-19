@@ -158,7 +158,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
 - reviewのpassの後、衝突の事前判定の前に、supervisorが依頼を記録し（`before_landing`、定義のcommitはrunのhead）、周はlanding branchのcommitの`evals/dev.json`とpatchとprogramでrunの定義を測る。
   run branchのケースの追加・変更は使わない。
   依頼はheadごとに1回で、同じheadを引き継いだsupervisorは同じ周を待つ。
-- 待つ間と流す間、runはsessionを開いたまま自分のslotとleaseを持つ（e2eと同じくslotを放さない。差し戻しを生きているsessionに送るため、sessionを閉じる前に待つ）。
+- 待つ間と流す間、runはsessionを開いたまま自分のslotとleaseを持つ（差し戻しを生きているsessionに送るため、sessionを閉じる前に待つ）。
   待ちは`status`の`progress`に工程`agent_eval`として出る。
 - 行き先は全部の周の終わりで決め、`run_agent_eval_finished`に記録する。
   全部が`passed`なら衝突の事前判定へ進む。

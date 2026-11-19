@@ -54,7 +54,8 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   actorのbackendとhostに残るwrapperの境界は`Supervisor::actors`が持つ。
   containerが使えても、Codexに経路が向くrun（taskのproviderと`[provider_fallback]`で決まる行き先）は控える。
   queueのbrokerの宛先にOpenAIが無いため（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)決定2）。
-- verification: supervisorは着地を始めずに待ち（`domain::landing_hold`）、止めるdrainではleaseを返す（handoffは返さない）。
+- verification: `Admission`が着地を見送り、列ではleaseなしで待つ。
+  drainで列に戻すrunはleaseを返し、handoffでは保つ。
   supervisorはtaskの検証のコマンドの有無を見ず、全ての着地を待たせる。
   `integrate`自身も検証のコマンドの前に確かめ（`integrate::verification_runtime`）、どのコマンドもhostで流さずにrunを元のstatusへ戻す。
   `already_satisfied`のsnapshotの検証も使えない間は始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、hostで流さない。
