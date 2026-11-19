@@ -42,15 +42,21 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 ## 5. Start, stop and update the runtime
 
 ```sh
-"$DAGQ" up            # add --parallel N, --max-waiting N, --auto-update, --claude EXE --codex EXE
-"$DAGQ" down            # stop claiming; the supervisor drains its runs and exits
-"$DAGQ" down --wait     # the same, and block until it is gone
-"$DAGQ" install --from PATH  # swap the binary, hand over
+"$DAGQ" up
+"$DAGQ" down
+"$DAGQ" down --wait
+"$DAGQ" install --from PATH
 ```
 
-`--plugin-dir`: only a path the repository names, never `$CLAUDE_PLUGIN_ROOT`. `up --no-claude` forbids Claude (Codex workers; unsupported roles by hand); drain before changing it.
+For `restart supervisor`, run `up`. See `reference/up-down.md` for flags, duplicate or retired supervisors, and `inbox_guardrail` false.
 
-`up` is idempotent: one resident supervisor; no inbox (the person opens it with `dagq inbox` in their own terminal) and no planner (`plan` is refused; a plan is the inbox's request: `skills/dagq-inbox/reference/requests.md`). `inbox_guardrail` false (`status`, `doctor`): `reference/up-down.md`, "Open the inbox again". `restart supervisor`: `up`; `stop the stale supervisor's process`: stop its `pid`; `supervisor_duplicate`: `down --wait`, then `up` (`reference/up-down.md`, "Two supervisors of one queue"). A registered `in_cmux` supervisor: move it to launchd once (`down --wait`, then `up` with your usual flags). Update the binary with `install` (or `--rollback`), never `cp`; only a breaking migration drains, and a drain waits for runs waiting on an ask too; `up --auto-update`, `--allow-breaking` and the `update_failed` / `approve_update` asks: `reference/update.md`. `down --force` loses active runs: the person types it in their own TTY. `--claude` / `--codex` take real paths (such as `~/.local/bin/claude`). `reference/up-down.md`: outcomes, drains, a supervisor of the retired mode, logs.
+`down` and `down --wait` finish runs that can proceed. The next supervisor takes over the wait record and lease only for slot runs left `running` in a recorded answer wait blocked by a hold or that run's unanswered ask, or a recorded return wait blocked by a hold. An open ask alone is insufficient.
+
+After draining, `install --allow-breaking` checks queue use. The `approve_update` ask's `install` answer uses that same command. Any `claimed`, `starting`, `running`, `validating` or `integrating` run, regardless of lease, or any live wrapper or supervisor prevents a migration attempt. This includes the preserved waits. A lease-free `awaiting_integration` run pending landing approval is outside the handover and does not block migration by itself, even with an open ask.
+
+On refusal, install reuses an answering old service or tries to start it with the old binary. If the service is available and there is a drained supervisor registration, it tries to restart that supervisor with the same arguments. A failed service recovery skips the restart. The error gives the original reason and both recovery results.
+
+Before installing, show the person the asks and holds blocking these waits. Answer in their words or release holds as they direct. Check `status` for those runs to leave the in-use statuses before retrying. See `reference/update.md` for the steps and recovery.
 
 ## 6. Review by hand, and a failed push
 

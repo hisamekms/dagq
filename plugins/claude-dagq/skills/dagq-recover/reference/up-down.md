@@ -16,7 +16,7 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
 
 ### Explicitly run without Claude
 
-On the person's word, drain first, then `up --no-claude`; existing Claude workers must finish before switching. While a supervisor runs under `--no-claude`, `dagq inbox` opens no Claude inbox (only a Codex one that can be used, else it says why), so keep the inbox already open. Roles on Claude are off (`handle disabled roles manually` in `status`): handle their reviews, plan reviews and recovery with this skill's manual procedures. The flag implies no approval or bypass. Do not run `observe` in their place.
+On the person's word, use `down --wait` before switching to `up --no-claude`. While a supervisor runs under `--no-claude`, `dagq inbox` opens no Claude inbox (only a Codex one that can be used, else it says why), so keep the inbox already open. Roles on Claude are off (`handle disabled roles manually` in `status`): handle their reviews, plan reviews and recovery with this skill's manual procedures. The flag implies no approval or bypass. Do not run `observe` in their place.
 
 ### A supervisor of another build
 
@@ -28,7 +28,12 @@ A supervisor alive but no longer heartbeating is not replaced (`status` shows it
 
 ### Runs waiting for a person
 
-A drain (`down`, `down --wait`, `install --allow-breaking`) waits until each run waiting on an ask has its answer: show the person the open asks before a drain. A handoff does not wait for them.
+A stop drain (`down` or `down --wait`) finishes runs that can proceed, including waits that can return to a slot. It hands a slot run to the next supervisor with its `running` status, wait record and lease intact only in either of these cases:
+
+- Its recorded phase is waiting for an answer, and a task hold or that run's unanswered ask blocks it.
+- Its recorded phase is waiting to return, and a task hold blocks it.
+
+An open ask alone is insufficient for this handover. A run that gave up its lease to await landing approval is in `awaiting_integration`, outside this handover. For the separate queue-use check after the drain in `install --allow-breaking`, see [Breaking migrations](update.md#breaking-migrations).
 
 ### A supervisor of the retired mode
 
@@ -50,7 +55,7 @@ When `status` or `doctor` says the inbox's guardrail is off (`inbox_guardrail.gu
 
 ## down
 
-- Plain `down` ends the day's work: the supervisor stops claiming, drains its runs and exits.
+- Plain `down` requests a stop. The supervisor stops claiming, finishes the runs that can proceed and exits, leaving the blocked waits above for the next supervisor.
 - `--wait` blocks until it is gone. Use it when the next step needs that (changing flags, moving a supervisor of the retired mode, shutting down).
 - `--force` loses the active runs (handled afterwards with this skill): the person types `dagq down --force` in a separate terminal without `DAGQ_ROLE` and confirms the target on its TTY. The inbox cannot relay this.
 - Once no supervisor is left, `down` stops the queue's service too (at once with `--wait`, `--force` or no supervisor running; without `--wait`, when the last supervisor ends its drain). From then on `status` and `watch` fail as `unreachable`, with no outage record and no attention: that is the expected state, not a failure. The inbox tells the person once, does not restart its watch in a loop, and starts it again from the same cursor after `up`. `down` reaches the queue only through the service too: to read, `down` again or `recover` without a supervisor, start the service alone (`reference/doctor.md`).

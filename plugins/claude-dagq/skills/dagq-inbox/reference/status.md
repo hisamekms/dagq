@@ -83,7 +83,9 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
 
 ## Runs waiting for a person (outside the slots)
 
-A run whose session only waits for a person's answer leaves its slot while it waits; answering its ask is all it needs from you. A drain (`down --wait`) ends only once their asks are answered. The run of a held task waits for a `release`, not an answer: it is in `held`, not in `waiting`.
+A run whose session only waits for a person's answer can give up its active slot while it waits. Answer its ask on the person's word. A held task also needs a `release` before its run can return.
+
+A stop drain (`down` or `down --wait`) finishes the runs that can proceed. A slot run stays `running` with its wait record and lease for the next supervisor only if its recorded answer wait is blocked by a hold or its own unanswered ask, or its recorded return wait is blocked by a hold. An open ask alone is insufficient. A run waiting for landing approval after giving up its lease is in `awaiting_integration`, outside this handover.
 
 ## asks
 
