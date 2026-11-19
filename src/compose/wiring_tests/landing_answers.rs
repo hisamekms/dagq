@@ -2165,16 +2165,25 @@ fn approved_disk_landing(
     wiring: &Wiring,
     needs_e2e: bool,
 ) -> (crate::domain::TaskRun, crate::domain::EventId) {
+    approved_landing_with_commands(wiring, needs_e2e, &[])
+}
+
+fn approved_landing_with_commands(
+    wiring: &Wiring,
+    needs_e2e: bool,
+    commands: &[&str],
+) -> (crate::domain::TaskRun, crate::domain::EventId) {
     use crate::application::{RunFiles, integrate::binding};
     use crate::domain::{EventKind, Priority};
     use std::path::Path;
 
     let mut queue = wiring.queue();
-    let landing = direct_landing_fixture(
+    let landing = direct_landing_fixture_with_commands(
         wiring,
         &mut queue,
         Priority::High,
         RunStatus::AwaitingIntegration,
+        commands,
     );
     let receipt = succeeded_at_the_head(
         landing.id(),
@@ -2215,6 +2224,204 @@ fn approved_disk_landing(
         .unwrap()
         .id;
     (landing, approval_id)
+}
+
+fn source_update_wiring(name: &str) -> (Wiring, crate::domain::CommitSha) {
+    use crate::application::update;
+    use crate::domain::EventKind;
+    use std::sync::atomic::Ordering;
+
+    let wiring = disk_admission_wiring(
+        name,
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_auto_update();
+    wiring.free.store(100 * (1 << 30), Ordering::SeqCst);
+    wiring.git.set_dagq_source();
+    wiring.git.commit_files(
+        &[(
+            "dagq.toml",
+            "[review.programs.\"builtin:secrets\"]\nenabled = false\n",
+        )],
+        &["src/runtime.rs"],
+    );
+    let queue = wiring.queue();
+    let base = wiring.git.main();
+    for step in [EventKind::UpdateStarted, EventKind::UpdateFailed] {
+        update::record(&queue, step, Some(base.as_str()), json!({"pid": 1})).unwrap();
+    }
+    wiring.git.move_main();
+    (wiring, base)
+}
+
+fn source_update_starts(queue: &SqliteQueue) -> Vec<Value> {
+    queue
+        .update_events(20)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == crate::domain::EventKind::UpdateStarted)
+        .map(|event| event.payload)
+        .collect()
+}
+
+#[test]
+fn a_runnable_landing_starts_before_the_source_update_wait_limit() {
+    use crate::application::heavy_turn::HeavyTurn;
+
+    let (wiring, base) =
+        source_update_wiring("a_runnable_landing_starts_before_the_source_update_wait_limit");
+    let (landing, _) = approved_landing_with_commands(&wiring, false, &["verify-first"]);
+    let (pid, _) = wiring.processes().start();
+    let (_release, held) = mpsc::channel();
+    wiring.agent.hold_next_update(pid, held);
+
+    wiring.supervise_once();
+
+    let mut queue = wiring.queue();
+    let detail = queue.show(landing.task_id()).unwrap();
+    assert_eq!(
+        detail.runs[0].status(),
+        RunStatus::Integrated,
+        "{:?}",
+        payloads(&detail, "integration_held"),
+    );
+    assert!(
+        wiring
+            .verifier
+            .ran()
+            .iter()
+            .any(|(cmd, _)| cmd == "verify-first")
+    );
+    assert_eq!(source_update_starts(&queue).len(), 1);
+
+    let turn = HeavyTurn::under(wiring.db.parent().unwrap());
+    let pending = turn
+        .pending_update(&*wiring.files)
+        .unwrap()
+        .expect("queued update");
+    assert_eq!(pending.since, wiring.generators().clock.now());
+    assert_eq!(pending.base.as_deref(), Some(base.as_str()));
+}
+
+#[test]
+fn landing_precedes_source_update_until_the_shared_wait_expires() {
+    use crate::application::{
+        heavy_turn::{HeavyTurn, PendingUpdate},
+        update,
+    };
+    use crate::domain::EventKind;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let (wiring, base) =
+        source_update_wiring("landing_precedes_source_update_until_the_shared_wait_expires");
+    let turn = HeavyTurn::under(wiring.db.parent().unwrap());
+    let probe = wiring.files.observe_exclusive_lock(&turn.turn);
+    let clock = wiring.generators().clock;
+    {
+        // Start with the pending record of an earlier supervisor. The
+        // new one sees only the replacement head and the advanced clock.
+        let _schedule = turn.try_schedule_update(&*wiring.files).unwrap().unwrap();
+        turn.begin_update_wait(
+            &*wiring.files,
+            &PendingUpdate {
+                since: clock.now(),
+                base: Some(base.as_str().to_owned()),
+            },
+        )
+        .unwrap();
+    }
+    let clock = Arc::new(super::host::StoppedClock::new(
+        clock.system_time() + Duration::from_secs(7_201),
+        clock.monotonic(),
+    ));
+    let wiring = wiring.with_clock(clock).with_continuous_passes();
+    let head = wiring.git.move_main();
+    let (second, _) = approved_landing_with_commands(&wiring, false, &["verify-second"]);
+    let (pid, _) = wiring.processes().start();
+    let (release, held) = mpsc::channel();
+    wiring.agent.hold_next_update(pid, held);
+    let queue = wiring.queue();
+    let (mut gate, mut blocked_landing) = (None, None);
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        let detail = queue.show(second.task_id()).unwrap();
+        if !payloads(&detail, "integration_started").is_empty() {
+            stop();
+            return true;
+        }
+        if blocked_landing.is_some() {
+            return false;
+        }
+        if let Some((held, attempts)) = gate.take() {
+            if probe.blocked_attempts() == attempts {
+                gate = Some((held, attempts));
+                return false;
+            }
+            // The supervisor reached the turn while the fake job held it.
+            blocked_landing = Some((
+                detail.runs[0].status(),
+                wiring
+                    .verifier
+                    .ran()
+                    .iter()
+                    .any(|(cmd, _)| cmd == "verify-second"),
+            ));
+            update::record(
+                queue,
+                EventKind::UpdateFailed,
+                Some(head.as_str()),
+                json!({"pid": pid}),
+            )
+            .unwrap();
+            wiring.processes().end(pid);
+            release.send(()).unwrap();
+            drop(held);
+        } else if payloads(&detail, "landing_queue_waiting")
+            .last()
+            .is_some_and(|event| event["waiting_for"] == "turn")
+        {
+            // The child has not taken the lock: the reserved turn alone
+            // kept this landing queued on the supervisor's first pass.
+            let held = turn
+                .job_gate(&*wiring.files, pid, |_| {
+                    panic!("the build should start immediately")
+                })
+                .unwrap();
+            update::record(
+                queue,
+                EventKind::UpdateBuilt,
+                Some(head.as_str()),
+                json!({"pid": pid}),
+            )
+            .unwrap();
+            gate = Some((held, probe.blocked_attempts()));
+        }
+        false
+    });
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        blocked_landing,
+        Some((RunStatus::AwaitingIntegration, false))
+    );
+    let updates = source_update_starts(&queue);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0]["pid"], pid);
+    assert_eq!(updates[0]["commit"], head.as_str());
+    assert!(turn.pending_update(&*wiring.files).unwrap().is_none());
+    assert_eq!(
+        queue.run(second.id()).unwrap().status(),
+        RunStatus::Integrated
+    );
+    assert!(
+        wiring
+            .verifier
+            .ran()
+            .iter()
+            .any(|(cmd, _)| cmd == "verify-second")
+    );
 }
 
 #[test]

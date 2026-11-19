@@ -181,6 +181,7 @@ impl Supervisor<'_> {
         previous: RunStatus,
         main: CommitSha,
         batch: Option<integration::batch::Batch>,
+        turn: Option<crate::application::heavy_turn::Turn>,
     ) -> Result<LandingJob> {
         const CALLER: &str = "landing.spawn_landing";
         let _caller = crate::application::supervisor_service::caller::scope(CALLER);
@@ -227,6 +228,7 @@ impl Supervisor<'_> {
             previous,
             main,
             token: self.registration.token().clone(),
+            held_turn: turn.map(|guard| Arc::new(std::sync::Mutex::new(guard))),
         };
         let integrator = Integrator::of_process(pid);
         // Read at its verification's retry (ADR-t3344-1).
@@ -3231,7 +3233,9 @@ impl Supervisor<'_> {
         draining: bool,
         drain_may_adopt: bool,
     ) -> Result<()> {
-        if let Some(landing) = self.queued_landing(parallel, draining, drain_may_adopt)? {
+        if let (Some(landing), _) =
+            self.queued_landing(parallel, draining, drain_may_adopt, None)?
+        {
             let started = self.start_queued_landing(landing)?;
             self.note_landing_admission(started);
         }
@@ -3246,12 +3250,16 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Select a landing and report whether the update was already polled
+    /// ahead of it. With no runnable entry the caller polls the update at
+    /// its ordinary point, after the landing recheck has had a turn.
     pub(super) fn queued_landing(
         &mut self,
         parallel: usize,
         draining: bool,
         drain_may_adopt: bool,
-    ) -> Result<Option<QueuedLanding>> {
+        update: Option<&LoopSettings>,
+    ) -> Result<(Option<QueuedLanding>, bool)> {
         self.landing.pending_landings.retain(|id| {
             self.queue.run(id).is_ok_and(|run| {
                 matches!(
@@ -3346,29 +3354,34 @@ impl Supervisor<'_> {
                 .count(),
         );
         let queued = LandingQueue::new(entries);
-        let capacity = Capacity {
-            held,
-            integrating,
-            turn_busy: !queued.entries.is_empty()
-                && self.take_check_turn("landing queue")?.is_none(),
-            worker_full: !self.claim.slots.queued_e2e_has_room(parallel),
-        };
-        // The queue chooses the eligible prefix. Admission uses the
-        // leading entry's priority and worker needs for the landing turn.
+        // Select the eligible prefix independently of the shared heavy
+        // turn and of an in-flight landing. A queued successor keeps its
+        // priority over an update until the update's wait limit.
+        let worker_full = !self.claim.slots.queued_e2e_has_room(parallel);
         if queued.entries.is_empty() {
-            return Ok(None);
+            return Ok((None, false));
         }
         let limit = self.verifier.landing_batch_size()?;
         let selected_entries = crate::domain::landing_batch::select(
             &queued,
             Capacity {
-                worker_full: capacity.worker_full,
+                worker_full,
                 ..Capacity::default()
             },
             limit,
             |entry| candidates[&entry.run_id].3 || entry.e2e,
             |entry| candidates[&entry.run_id].1,
         );
+        let update = update.filter(|_| !held && !selected_entries.is_empty());
+        if let Some(options) = update {
+            self.on_host(|host, env| host.auto_update_pass(env, options, true));
+        }
+        let capacity = Capacity {
+            held,
+            integrating,
+            turn_busy: self.take_check_turn("landing queue")?.is_none(),
+            worker_full,
+        };
         let starts = admission::admit(
             selected_entries
                 .first()
@@ -3404,7 +3417,7 @@ impl Supervisor<'_> {
                 LandingQueue::explain(entry, capacity, candidates[&entry.run_id].1, selected);
             self.record_landing_queue_wait(entry, waiting)?;
         }
-        Ok(starts.starts.into_iter().next().map(|candidate| {
+        let landing = starts.starts.into_iter().next().map(|candidate| {
             let entry = candidate.item.clone();
             let (run, _, _, needs_e2e) = candidates.remove(&entry.run_id).expect("queue candidate");
             let batched = limit.get() > 1 && !needs_e2e && !entry.e2e;
@@ -3422,7 +3435,8 @@ impl Supervisor<'_> {
                 followers,
                 batched,
             }
-        }))
+        });
+        Ok((landing, update.is_some()))
     }
 
     pub(super) fn record_landing_queue_wait(
@@ -3553,26 +3567,29 @@ impl Supervisor<'_> {
             }
         };
         let over_handoff = !handoff::handoff_refuses_starts(self.registration.stopping());
-        let batch = if !batched {
-            drop((turn, batch_lock));
-            None
+        let (batch, turn) = if !batched {
+            drop(batch_lock);
+            (None, Some(turn))
         } else {
             for _ in &followers {
                 self.claim.slots.remove_unleased_landing_wait();
             }
-            Some(integration::batch::Batch {
-                followers,
-                directory,
-                turn,
-                lock: batch_lock,
-                over_handoff,
-            })
+            (
+                Some(integration::batch::Batch {
+                    followers,
+                    directory,
+                    turn,
+                    lock: batch_lock,
+                    over_handoff,
+                }),
+                None,
+            )
         };
         drop(guard);
         self.landing.pending_landings.remove(run.id());
         self.claim.slots.remove_unleased_landing_wait();
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
-        let job = self.spawn_landing(landing.clone(), run.status(), main, batch)?;
+        let job = self.spawn_landing(landing.clone(), run.status(), main, batch, turn)?;
         self.claim.slots.admit_noting(
             Slot::new(landing, Phase::Landing(Some(job))),
             EventKind::IntegrationStarted.as_str(),
@@ -3642,9 +3659,9 @@ impl Supervisor<'_> {
 
     /// The turn of the landing check `check` (a landing's verification or
     /// the landing recheck) among the host's heavy jobs (ADR-t2719-1), held
-    /// shared until it drops; `None` while the automatic update's job, of
-    /// any process of the queue, builds and runs its e2e gate or waits for
-    /// its turn. A wait is logged once per check.
+    /// shared until it drops; `None` while an admitted update in any
+    /// process has reserved its turn or runs its build and e2e gate.
+    /// A wait is logged once per check.
     pub(super) fn take_check_turn(
         &mut self,
         check: &str,
@@ -3654,8 +3671,8 @@ impl Supervisor<'_> {
             .db
             .parent()
             .context("queue database has no directory")?;
-        let taken =
-            crate::application::heavy_turn::HeavyTurn::under(queue_dir).try_check(&*self.files)?;
+        let taken = crate::application::heavy_turn::HeavyTurn::under(queue_dir)
+            .try_check(&*self.files, &*self.processes)?;
         self.host
             .tell_held_check(check, taken.as_ref().err().copied());
         Ok(taken.ok())

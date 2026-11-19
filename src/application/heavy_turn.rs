@@ -3,12 +3,12 @@
 //! exclusively while it builds and runs its e2e gate, and each landing
 //! check (a landing's verification, a direct `integrate`'s included, and
 //! the landing recheck) holds it shared while it runs. A job that waits for
-//! its turn says so by holding the queue's waiting lock, which keeps new
-//! landing checks from starting. Locks, not records: they go with a process
-//! that ends, so a killed job or check holds nothing. Who waits for whom is
-//! [`crate::domain::heavy_turn`].
+//! its turn says so by holding the queue's waiting lock. The supervisor
+//! reserves that turn only after the landing-first admission decision
+//! (ADR-t5283-4). The reservation covers the gap between spawn and the
+//! child's acquisition of the lock, including for direct integrations.
 
-use super::RunFiles;
+use super::{ProcessControl, RunFiles};
 use crate::domain::heavy_turn::{self, HeavyJob, HeavyLook};
 use anyhow::{Context, Result};
 use std::io;
@@ -28,6 +28,15 @@ pub struct HeavyTurn {
     pub turn: PathBuf,
     /// Held exclusively by the update's job while it waits for its turn.
     pub waiting: PathBuf,
+}
+
+/// A candidate waiting for the next opportunity, shared by the queue's
+/// supervisors. The base preserves the original comparison even when a
+/// supervisor whose build has no named commit is replaced.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PendingUpdate {
+    pub since: i64,
+    pub base: Option<String>,
 }
 
 /// The locks the turns take: the run files' locks, shared across
@@ -66,6 +75,73 @@ impl HeavyTurn {
         }
     }
 
+    /// Serialize update selection across supervisors. This lock alone
+    /// does not reserve the heavy turn or interfere with landings.
+    pub fn try_schedule_update(&self, files: &dyn RunFiles) -> Result<Option<Turn>> {
+        self.make_dir(files)?;
+        Ok(files.try_lock(&self.turn.with_file_name("update-schedule"))?)
+    }
+
+    /// Read under the scheduling lock so the same wait survives new heads
+    /// and replacement supervisors.
+    pub fn pending_update(&self, files: &dyn RunFiles) -> Result<Option<PendingUpdate>> {
+        read_state(files, &self.turn.with_file_name("update-wait"))
+    }
+
+    /// Write once on discovering a candidate, using Unix seconds from the
+    /// injected clock. The caller holds the update scheduling lock.
+    pub fn begin_update_wait(&self, files: &dyn RunFiles, pending: &PendingUpdate) -> Result<()> {
+        write_state(files, &self.turn.with_file_name("update-wait"), pending)
+    }
+
+    pub fn clear_update_wait(&self, files: &dyn RunFiles) -> Result<()> {
+        clear_state(files, &self.turn.with_file_name("update-wait"))
+    }
+
+    /// No landing can pass the waiting probe between spawn and publication
+    /// of the reservation. The child replaces it with the exclusive turn,
+    /// or liveness makes it ignorable if startup fails before then.
+    pub fn start_update(
+        &self,
+        files: &dyn RunFiles,
+        processes: &dyn ProcessControl,
+        spawn: impl FnOnce() -> Result<u32>,
+    ) -> Result<bool> {
+        let Some(_waiting) = files.try_lock(&self.waiting)? else {
+            return Ok(false);
+        };
+        if self.update_reserved(files, processes)? || files.try_lock_shared(&self.turn)?.is_none() {
+            return Ok(false);
+        }
+        let pid = spawn()?;
+        write_state(
+            files,
+            &self.turn.with_file_name("update-reservation"),
+            &(pid, processes.start_identity(pid)),
+        )?;
+        Ok(true)
+    }
+
+    fn update_reserved(
+        &self,
+        files: &dyn RunFiles,
+        processes: &dyn ProcessControl,
+    ) -> Result<bool> {
+        let Some((pid, start)) = read_state::<(u32, Option<String>)>(
+            files,
+            &self.turn.with_file_name("update-reservation"),
+        )?
+        else {
+            return Ok(false);
+        };
+        Ok(processes.alive(pid)
+            && start.is_none_or(|start| {
+                processes
+                    .start_identity(pid)
+                    .is_none_or(|current| start == current)
+            }))
+    }
+
     fn make_dir(&self, files: &dyn RunFiles) -> Result<()> {
         if let Some(dir) = self.turn.parent() {
             files
@@ -78,18 +154,29 @@ impl HeavyTurn {
     /// Take a landing check's turn without waiting: the turn shared, or
     /// what it waits for (the update's gate running or waiting for its
     /// turn).
-    pub fn try_check(&self, files: &dyn RunFiles) -> Result<Result<Turn, HeavyJob>> {
+    pub fn try_check(
+        &self,
+        files: &dyn RunFiles,
+        processes: &dyn ProcessControl,
+    ) -> Result<Result<Turn, HeavyJob>> {
         self.make_dir(files)?;
-        self.try_check_on(&FileLocks(files))
+        self.try_check_on(&FileLocks(files), || self.update_reserved(files, processes))
     }
 
     /// [`Self::try_check`] on `locks`. The probe of the waiting lock is held
     /// until the turn is taken, so a job cannot start to wait between the
     /// probe and the turn: once a job waits, no check starts.
-    fn try_check_on(&self, locks: &dyn Locks) -> Result<Result<Turn, HeavyJob>> {
+    fn try_check_on(
+        &self,
+        locks: &dyn Locks,
+        reserved: impl FnOnce() -> Result<bool>,
+    ) -> Result<Result<Turn, HeavyJob>> {
         let probe = locks
             .shared(&self.waiting)
             .with_context(|| format!("lock {}", self.waiting.display()))?;
+        if probe.is_some() && reserved()? {
+            return Ok(Err(HeavyJob::UpdateGate));
+        }
         let turn = match &probe {
             Some(_) => locks
                 .shared(&self.turn)
@@ -113,12 +200,13 @@ impl HeavyTurn {
     pub fn check(
         &self,
         files: &dyn RunFiles,
+        processes: &dyn ProcessControl,
         poll: Duration,
         on_wait: impl FnOnce(HeavyJob),
     ) -> Result<Turn> {
         let mut on_wait = Some(on_wait);
         loop {
-            match self.try_check(files)? {
+            match self.try_check(files, processes)? {
                 Ok(turn) => return Ok(turn),
                 Err(what) => {
                     if let Some(tell) = on_wait.take() {
@@ -135,11 +223,35 @@ impl HeavyTurn {
     /// held exclusively; `on_wait` is told once what it waits for.
     pub fn gate(&self, files: &dyn RunFiles, on_wait: impl FnOnce(HeavyJob)) -> Result<Turn> {
         self.make_dir(files)?;
-        self.gate_on(&FileLocks(files), on_wait)
+        self.gate_on(&FileLocks(files), on_wait, || Ok(()))
+    }
+
+    /// The admitted child exchanges its reservation for the actual turn.
+    pub fn job_gate(
+        &self,
+        files: &dyn RunFiles,
+        pid: u32,
+        on_wait: impl FnOnce(HeavyJob),
+    ) -> Result<Turn> {
+        self.make_dir(files)?;
+        self.gate_on(&FileLocks(files), on_wait, || {
+            let path = self.turn.with_file_name("update-reservation");
+            if read_state::<(u32, Option<String>)>(files, &path)?
+                .is_some_and(|(owner, _)| owner == pid)
+            {
+                clear_state(files, &path)?;
+            }
+            Ok(())
+        })
     }
 
     /// [`Self::gate`] on `locks`.
-    fn gate_on(&self, locks: &dyn Locks, on_wait: impl FnOnce(HeavyJob)) -> Result<Turn> {
+    fn gate_on(
+        &self,
+        locks: &dyn Locks,
+        on_wait: impl FnOnce(HeavyJob),
+        acquired: impl FnOnce() -> Result<()>,
+    ) -> Result<Turn> {
         let waiting = locks
             .wait_exclusive(&self.waiting)
             .with_context(|| format!("lock {}", self.waiting.display()))?;
@@ -159,8 +271,36 @@ impl HeavyTurn {
                     .with_context(|| format!("lock {}", self.turn.display()))?
             }
         };
+        acquired()?;
         drop(waiting);
         Ok(turn)
+    }
+}
+
+fn read_state<T: serde::de::DeserializeOwned>(
+    files: &dyn RunFiles,
+    path: &Path,
+) -> Result<Option<T>> {
+    match files.read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Each state file has a single writer at a time under its corresponding
+/// lock. Rename keeps a terminated writer from leaving a partial record.
+fn write_state(files: &dyn RunFiles, path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let staging = path.with_extension("tmp");
+    files.write(&staging, &serde_json::to_vec(value)?)?;
+    Ok(files.rename(&staging, path)?)
+}
+
+fn clear_state(files: &dyn RunFiles, path: &Path) -> Result<()> {
+    match files.remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
 }
 
@@ -275,14 +415,14 @@ mod tests {
     fn a_job_cannot_begin_to_wait_between_a_checks_probe_and_its_turn() {
         let turns = turns();
         let model = Model::default();
-        let first = turns.try_check_on(&model).unwrap().unwrap();
+        let first = turns.try_check_on(&model, || Ok(false)).unwrap().unwrap();
         let job_took_waiting = Arc::new(Mutex::new(None));
         let took = job_took_waiting.clone();
         let waiting = turns.waiting.clone();
         *model.before_turn.lock().unwrap() = Some(Box::new(move |model: &Model| {
             *took.lock().unwrap() = Some(model.exclusive(&waiting).unwrap().is_some());
         }));
-        let second = turns.try_check_on(&model).unwrap().unwrap();
+        let second = turns.try_check_on(&model, || Ok(false)).unwrap().unwrap();
         assert_eq!(*job_took_waiting.lock().unwrap(), Some(false));
         assert_eq!(model.held(&turns.waiting).shared, 0, "the probe went");
         assert_eq!(model.held(&turns.turn).shared, 2);
@@ -296,19 +436,21 @@ mod tests {
         let model = Model::default();
         let waiting = model.exclusive(&turns.waiting).unwrap().unwrap();
         assert_eq!(
-            turns.try_check_on(&model).unwrap().err(),
+            turns.try_check_on(&model, || Ok(false)).unwrap().err(),
             Some(HeavyJob::UpdateGate)
         );
         assert_eq!(model.held(&turns.turn).shared, 0);
         drop(waiting);
-        let gate = turns.gate_on(&model, |_| panic!("free")).unwrap();
+        let gate = turns
+            .gate_on(&model, |_| panic!("free"), || Ok(()))
+            .unwrap();
         assert!(!model.held(&turns.waiting).exclusive);
         assert_eq!(
-            turns.try_check_on(&model).unwrap().err(),
+            turns.try_check_on(&model, || Ok(false)).unwrap().err(),
             Some(HeavyJob::UpdateGate)
         );
         drop(gate);
-        assert!(turns.try_check_on(&model).unwrap().is_ok());
+        assert!(turns.try_check_on(&model, || Ok(false)).unwrap().is_ok());
     }
 
     /// A gate that finds a check running is told so and waits for the turn
@@ -317,14 +459,18 @@ mod tests {
     fn a_gate_waits_for_the_checks_running_holding_the_waiting_lock() {
         let turns = turns();
         let model = Model::default();
-        let check = turns.try_check_on(&model).unwrap().unwrap();
+        let check = turns.try_check_on(&model, || Ok(false)).unwrap().unwrap();
         let mut told = None;
         let waiting_held = Arc::new(Mutex::new(None));
         let held = waiting_held.clone();
-        let waited = turns.gate_on(&model, |what| {
-            told = Some(what);
-            *held.lock().unwrap() = Some(model.held(&turns.waiting).exclusive);
-        });
+        let waited = turns.gate_on(
+            &model,
+            |what| {
+                told = Some(what);
+                *held.lock().unwrap() = Some(model.held(&turns.waiting).exclusive);
+            },
+            || Ok(()),
+        );
         assert!(waited.is_err(), "the model does not wait");
         assert_eq!(told, Some(HeavyJob::LandingCheck));
         assert_eq!(*waiting_held.lock().unwrap(), Some(true));

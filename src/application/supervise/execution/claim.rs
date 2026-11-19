@@ -70,7 +70,8 @@ impl Supervisor<'_> {
     /// claimable. Records the decision for status and KPI.
     /// `main` is reread per claim so a task released by
     /// `integrate` starts from the main that contains its predecessor.
-    pub(super) fn fill_slots(&mut self, parallel: usize, sweep_interval: Duration) -> Result<()> {
+    /// Whether the source update was polled before landing admission.
+    pub(super) fn fill_slots(&mut self, parallel: usize, options: &LoopSettings) -> Result<bool> {
         const CALLER: &str = "claim.fill_slots";
         let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         // A run that waits for a person is adopted without a free slot
@@ -102,11 +103,19 @@ impl Supervisor<'_> {
         // A claim a held container kept from its verification starts it
         // once the verification may run.
         self.start_awaiting_claims(parallel)?;
-        let landing = match self.queued_landing(parallel, false, false) {
-            Ok(landing) => landing,
+        let (landing, update_polled) = match self.queued_landing(
+            parallel,
+            false,
+            false,
+            Some(options),
+        ) {
+            Ok(admission) => admission,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the landing queue could not be read: {error:#}");
-                None
+                // Without a readiness snapshot, keep yielding until
+                // the wait limit instead of treating the queue as empty.
+                self.on_host(|host, env| host.auto_update_pass(env, options, true));
+                (None, true)
             }
         };
         // A run recovered from a landing it may not land again (task 1118),
@@ -221,7 +230,7 @@ impl Supervisor<'_> {
             ));
         }
         // Takes no slot: only closes and frees what ended runs left.
-        if let Err(error) = self.sweep_ended_runs(sweep_interval) {
+        if let Err(error) = self.sweep_ended_runs(options.sweep_interval) {
             warn!(error = %format_args!("{error:#}"), "the workspaces and worktrees of ended runs could not all be swept: {error:#}");
         }
         // A wait for the claim spacing goes on only from one claim pass to
@@ -490,7 +499,7 @@ impl Supervisor<'_> {
             self.with_env(|env| env.claim_hold_transition(end, hold_details.as_ref()))?
         };
         self.sample_candidates(parallel, end, hold);
-        Ok(())
+        Ok(update_polled)
     }
 
     pub(super) fn admission_gates(&self) -> Gates {

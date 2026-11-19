@@ -219,6 +219,7 @@ pub(super) struct FakeAgent {
     /// What lets each next recovery job end, in order: its process runs
     /// until it says so.
     held_recovery: Mutex<VecDeque<mpsc::Receiver<()>>>,
+    held_update: Mutex<Option<(u32, mpsc::Receiver<()>)>>,
 }
 
 impl FakeAgent {
@@ -255,7 +256,12 @@ impl FakeAgent {
             recoveries: Mutex::default(),
             recovery_prompts: Mutex::default(),
             held_recovery: Mutex::default(),
+            held_update: Mutex::default(),
         }
+    }
+
+    pub(super) fn hold_next_update(&self, pid: u32, release: mpsc::Receiver<()>) {
+        *self.held_update.lock().unwrap() = Some((pid, release));
     }
 
     /// The prompts each review agent's job received, in start order.
@@ -866,6 +872,24 @@ impl Spawner for FakeAgent {
                 }
                 self.program_runs.lock().unwrap().push((name, cwd));
                 String::new()
+            }
+            "wiring-dagq"
+                if args
+                    .get(2)
+                    .is_some_and(|arg| arg == Path::new("auto-update")) =>
+            {
+                let (pid, release) = self
+                    .held_update
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .context("the wiring test did not expect an update")?;
+                return Ok(Box::new(Held {
+                    pid,
+                    release,
+                    end: None,
+                    ended: false,
+                }));
             }
             other => bail!("the wiring test's agent starts no {other}"),
         };

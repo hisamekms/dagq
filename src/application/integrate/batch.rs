@@ -178,6 +178,7 @@ impl BatchLanding<'_, '_> {
             previous: member.status(),
             main: base.clone(),
             token: self.first.token.clone(),
+            held_turn: None,
         });
         Ok(true)
     }

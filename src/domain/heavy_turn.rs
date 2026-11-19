@@ -6,11 +6,24 @@
 //! `application::heavy_turn`). The landing checks still run beside each
 //! other, as they did; only the two kinds take turns.
 //!
-//! The order: the update's gate waits only for the landing checks that
-//! run, and once it waits, no landing check starts until its job built and
-//! ran its e2e. So the update waits for the checks already running and no
-//! longer, however often runs land; a landing check waits for one job at a
-//! time, and the next job needs main to move again.
+//! Landing admission gives a runnable landing priority until the queued
+//! update reaches its wait limit (ADR-t5283-4). Only an admitted gate
+//! reserves the next turn. An in-flight landing, including a batch and
+//! its splits, keeps its turn until it finishes.
+
+use std::time::Duration;
+
+/// A source update may yield to runnable landings for up to two hours
+/// after first finding a candidate. The limit grants the next turn; it
+/// does not interrupt work or include time spent discovering a candidate.
+pub const UPDATE_WAIT_LIMIT: Duration = Duration::from_hours(2);
+
+/// Whether to reserve the next turn for a pending source update. An empty
+/// queue and a queue whose entries are all blocked both have no runnable
+/// landing. Candidate changes do not change the elapsed wait.
+pub fn admit_update(landing_ready: bool, waited: Duration) -> bool {
+    !landing_ready || waited >= UPDATE_WAIT_LIMIT
+}
 
 /// A kind of the host's heavy jobs that take turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +52,7 @@ impl HeavyJob {
 pub struct HeavyLook {
     /// An automatic update's job builds or runs its e2e gate.
     pub update_gate_running: bool,
-    /// The automatic update has a head to build and waits for its turn.
+    /// An admitted update has reserved the next turn.
     pub update_gate_waiting: bool,
     /// A landing's verification or a landing recheck runs.
     pub landing_checks_running: bool,
@@ -108,25 +121,17 @@ mod tests {
         );
     }
 
-    /// Landings that keep coming do not starve the update: once it waits,
-    /// the checks running end and none starts, so its next look starts it;
-    /// while its gate runs, the landings wait, and they go on once it ended.
     #[test]
-    fn a_flow_of_landings_takes_turns_with_the_update() {
-        // A landing's verification runs; the update finds a head to build.
-        let mut state = look(false, false, true);
-        assert_eq!(update_gate_waits_for(state), Some(HeavyJob::LandingCheck));
-        state.update_gate_waiting = true;
-        // The next landing is ready while the first still verifies: it waits.
-        assert_eq!(landing_check_waits_for(state), Some(HeavyJob::UpdateGate));
-        // The verification ends: the update starts, the landing still waits.
-        state.landing_checks_running = false;
-        assert_eq!(update_gate_waits_for(state), None);
-        state = look(true, false, false);
-        assert_eq!(landing_check_waits_for(state), Some(HeavyJob::UpdateGate));
-        // The gate ends: the landing starts.
-        state.update_gate_running = false;
-        assert_eq!(landing_check_waits_for(state), None);
+    fn a_runnable_landing_has_priority_until_the_update_wait_limit() {
+        assert!(!admit_update(true, Duration::ZERO));
+        assert!(!admit_update(true, Duration::from_secs(7_199)));
+        assert!(admit_update(true, Duration::from_secs(7_200)));
+        assert!(admit_update(true, Duration::from_secs(7_201)));
+    }
+
+    #[test]
+    fn the_update_can_start_on_an_empty_or_entirely_blocked_queue() {
+        assert!(admit_update(false, Duration::ZERO));
     }
 
     #[test]

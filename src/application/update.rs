@@ -601,7 +601,7 @@ pub fn run(
     // (ADR-t2719-1): held from the build to the gate's verdict, not
     // through the swap, the handoff and the watch.
     let turns = super::heavy_turn::HeavyTurn::under(db.parent().unwrap_or(Path::new(".")));
-    let gate = match turns.gate(ports.files, |what| {
+    let gate = match turns.job_gate(ports.files, options.pid, |what| {
         tracing::info!(
             "automatic update: the job for main's {} waits for {} to end before it builds; no landing check starts meanwhile",
             options.commit,

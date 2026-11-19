@@ -847,8 +847,8 @@ impl Supervisor<'_> {
             } else {
                 HashSet::new()
             };
-            if self.claim.claiming && !stopping {
-                self.fill_slots(self.claim.parallel, options.sweep_interval)?;
+            let update_polled = if self.claim.claiming && !stopping {
+                self.fill_slots(self.claim.parallel, options)?
             } else {
                 let reason = if stopping {
                     admission::Blocked::Draining
@@ -871,7 +871,8 @@ impl Supervisor<'_> {
                 {
                     warn!(error = %format_args!("{error:#}"), "a run returned by this drain could not start its landing: {error:#}");
                 }
-            }
+                false
+            };
             self.record_admission_pass()?;
             self.poll_observer();
             self.record_session_turns(false);
@@ -921,7 +922,9 @@ impl Supervisor<'_> {
                     self.start_observer_when_due(options);
                 }
                 self.on_host(|host, env| {
-                    host.auto_update_pass(env, options);
+                    if !update_polled {
+                        host.auto_update_pass(env, options, false);
+                    }
                     host.release_update_pass(env, options);
                 });
             }

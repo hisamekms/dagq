@@ -9,12 +9,14 @@
 //! dagq's source repository (ADR-t614-1); elsewhere it builds nothing.
 
 use super::*;
+use crate::application::heavy_turn::{HeavyTurn, PendingUpdate};
 use crate::application::update::{
     JOB_STEPS, UPDATE_ASKER, UPDATE_HISTORY, base_commit, changes_runtime, failed_release,
     in_progress, job_pid, latest_job_step, latest_job_step_of, record, retry_requested,
     step_commit,
 };
 use crate::domain::EventKind;
+use crate::domain::heavy_turn::{UPDATE_WAIT_LIMIT, admit_update};
 use crate::domain::{AskKind, RunEvent, UPDATE_FAILED_OPTIONS};
 
 /// How many of the newest update events a look at the automatic update's
@@ -31,7 +33,7 @@ pub struct UpdateSettings {
     /// which `up --auto-update` starts); `up` turns it on and off on a
     /// registered supervisor too.
     pub register: bool,
-    /// Least time between two looks at main.
+    /// Least time between routine looks at main.
     pub interval: Duration,
     /// A shell command the job runs in place of `cargo build --release
     /// --locked` (tests).
@@ -68,6 +70,9 @@ impl Default for UpdateSettings {
 #[derive(Default)]
 pub(in crate::application::supervise) struct UpdateWatch {
     last_check: Option<Instant>,
+    /// Wake on the first pass at the wait limit, even when the next
+    /// routine look at main would otherwise be later.
+    wait_deadline: Option<Instant>,
     /// The job this process started, reaped once it exits.
     job: Option<Box<dyn Spawned>>,
     /// A head already found to change nothing of the runtime.
@@ -115,8 +120,9 @@ impl HostOpsState {
         &mut self,
         env: &mut HostEnv<'_>,
         options: &LoopSettings,
+        landing_ready: bool,
     ) {
-        if let Err(error) = self.auto_update(env, options) {
+        if let Err(error) = self.auto_update(env, options, landing_ready) {
             warn!(error = %format_args!("{error:#}"), "automatic update: {error:#}");
         }
     }
@@ -130,25 +136,38 @@ impl HostOpsState {
     /// the queue after exec; see [`look_at_job`]). Compare main with
     /// [`base_commit`]: the latest start, this build's commit, or the first
     /// main head this process saw. An unchanged or already-seen head does
-    /// nothing. A runtime change starts one job; an unknown Git base builds
-    /// the head once. A head without runtime changes is remembered and
-    /// logged once. A newer retry bypasses the diff. Release steps do not
-    /// set the source build's base or retry request.
-    fn auto_update(&mut self, env: &mut HostEnv<'_>, options: &LoopSettings) -> Result<()> {
+    /// nothing. A runtime change or an unknown Git base supplies a candidate.
+    /// Re-read the candidate on each due pass, keeping one queue-wide wait
+    /// across heads until the candidate is admitted or goes away. A head
+    /// without runtime changes is remembered and logged once. A newer retry
+    /// bypasses the diff. Release steps do not set the source build's base
+    /// or retry request.
+    fn auto_update(
+        &mut self,
+        env: &mut HostEnv<'_>,
+        options: &LoopSettings,
+        landing_ready: bool,
+    ) -> Result<()> {
         if let Some(job) = self.update.job.as_mut()
             && let Some(exit) = job.try_wait()?
         {
             info!("automatic update job exited: {exit}");
             self.update.job = None;
         }
+        let at = env.generators.clock.monotonic();
         let since_last = self
             .update
             .last_check
-            .map(|at| env.generators.clock.since(at));
-        if !check_due(since_last, options.update.interval) {
+            .map(|last| at.saturating_duration_since(last));
+        let deadline_due = self
+            .update
+            .wait_deadline
+            .is_some_and(|deadline| at >= deadline);
+        if !deadline_due && !check_due(since_last, options.update.interval) {
             return Ok(());
         }
-        self.update.last_check = Some(env.generators.clock.monotonic());
+        self.update.last_check = Some(at);
+        self.update.wait_deadline = None;
         let enabled = env
             .queue
             .supervisors()?
@@ -174,6 +193,14 @@ impl HostOpsState {
             return Ok(());
         }
         self.update.not_source = false;
+        let queue_dir = env.layout.db.parent().unwrap_or(Path::new("."));
+        let turns = HeavyTurn::under(queue_dir);
+        let files = env.files.clone();
+        let processes = env.processes.clone();
+        let Some(_schedule) = turns.try_schedule_update(&*files)? else {
+            self.update.last_check = None;
+            return Ok(());
+        };
         self.apply_update_answers(env)?;
         if self.update.job.is_some() {
             return Ok(());
@@ -187,7 +214,12 @@ impl HostOpsState {
             .first_head
             .get_or_insert_with(|| head.clone())
             .clone();
-        let base = base_commit(&updates, &env.layout.version, Some(&first));
+        let pending = turns.pending_update(&*files)?;
+        let fallback = pending
+            .as_ref()
+            .and_then(|pending| pending.base.as_deref())
+            .unwrap_or(&first);
+        let base = base_commit(&updates, &env.layout.version, Some(fallback));
         let look = landing_look(
             &head,
             base.as_deref(),
@@ -195,7 +227,7 @@ impl HostOpsState {
             retry_requested(&updates),
         );
         if look == LandingLook::Ignore {
-            return Ok(());
+            return turns.clear_update_wait(&*files);
         }
         if look == LandingLook::Compare {
             let changes = match &base {
@@ -213,10 +245,36 @@ impl HostOpsState {
             if !changes {
                 self.log_nothing_built(&head, "it changes no runtime path");
                 self.update.seen = Some(head);
-                return Ok(());
+                return turns.clear_update_wait(&*files);
             }
         }
-        self.start_update_job(env, &head, base.as_deref(), options)
+        let now = env.generators.clock.now();
+        let since = match pending {
+            Some(pending) => pending.since,
+            None => {
+                turns.begin_update_wait(
+                    &*files,
+                    &PendingUpdate {
+                        since: now,
+                        base: base.clone(),
+                    },
+                )?;
+                now
+            }
+        };
+        let waited = Duration::from_secs(now.saturating_sub(since).max(0).cast_unsigned());
+        if !admit_update(landing_ready, waited) {
+            self.update.wait_deadline = at.checked_add(UPDATE_WAIT_LIMIT.saturating_sub(waited));
+            return Ok(());
+        }
+        if turns.start_update(&*files, &*processes, || {
+            self.start_update_job(env, &head, base.as_deref(), options)
+        })? {
+            turns.clear_update_wait(&*files)?;
+        } else {
+            self.update.last_check = None;
+        }
+        Ok(())
     }
 
     /// Log once per head that a look at main's `head` builds nothing, and
@@ -276,7 +334,7 @@ impl HostOpsState {
         head: &str,
         base: Option<&str>,
         options: &LoopSettings,
-    ) -> Result<()> {
+    ) -> Result<u32> {
         let layout = env.layout;
         let queue_dir = layout.db.parent().unwrap_or(Path::new("."));
         let logs = queue_dir.join("logs");
@@ -305,12 +363,14 @@ impl HostOpsState {
                 stderr: &log,
             },
         )?;
-        record(
+        let pid = job.id();
+        self.update.job = Some(job);
+        if let Err(error) = record(
             &*env.queue,
             EventKind::UpdateStarted,
             Some(head),
             json!({
-                "pid": job.id(),
+                "pid": pid,
                 "base": base,
                 "supervisor": env.token,
                 "version": layout.version,
@@ -318,15 +378,18 @@ impl HostOpsState {
                 "build_log": build_log,
                 "report": report,
             }),
-        )?;
+        ) {
+            // The child already exists. Reserve its turn even if the
+            // reporting write fails, so no landing can race its startup.
+            warn!(error = %format_args!("{error:#}"), "could not record the start of automatic update job {pid}: {error:#}");
+        }
         info!(
             "automatic update: main's {head} changes the runtime since {}; job {} builds it (log {})",
             base.unwrap_or("(none)"),
-            job.id(),
+            pid,
             log.display()
         );
-        self.update.job = Some(job);
-        Ok(())
+        Ok(pid)
     }
 }
 

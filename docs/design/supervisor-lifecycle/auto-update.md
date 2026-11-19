@@ -20,6 +20,7 @@ related:
   - adr-t1582-1
   - adr-t1632-1
   - adr-t2719-1
+  - adr-t5283-4
   - design-persistence
 ---
 
@@ -42,7 +43,7 @@ mainをいつ見てどの差分をビルドするかは`HostOpsState::auto_updat
 停止・claimの停止・引き継ぎの要求の後は新しい更新を始めない。
 自動更新のjobは同時に1つで、exec後も記録から生死を判定し、中断は勝手にやり直さずaskで判断を渡す（`look_at_job`）。
 mainが進めばsupervisorの着地も人の`integrate`も同じように拾う。
-ビルド中の着地は積まず、jobの後の見直しでそのときのheadを拾う。
+jobの途中でmainが進んでも候補を積まず、jobが終わってからそのときのheadを見直す。
 
 ## job
 
@@ -65,10 +66,12 @@ checkoutとRustのprofileによる出力先、ビルドの記録は`update::run`
 
 ### 着地の検証との順番
 
-自動更新のbuildとe2eの関門は着地の検証と番を交代する（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)）。
-jobが待ち始めたら新しい検証が追い越さず、走行中の検証の終わりまでしか待たない。
+自動更新のbuildとe2eの関門は着地の検証と同じturnを使い、実行できる着地を優先する（[ADR-t5283-4](../../adr/2026-11-18-t5283-4-budget-auto-update-and-e2e-with-landings.md)）。
+列が空くか全entryが控えにあると更新に番が回り、列が続いても待ちの上限に達すると次の番を更新に渡す。
+更新候補が変わっても待ちの起点を保つ。
+進行中の検証は更新のために止めず、関門が終われば着地に番を返す。
 入れ替え・引き継ぎ・見張りはこの排他の外にある。
-lockの順序と待つときの通知は`application::heavy_turn::HeavyTurn`、待つ相手の判断は`domain::heavy_turn`が持つ。
+processをまたぐ番の確保は `application::heavy_turn::HeavyTurn`、更新の間合いの判定は `domain::heavy_turn::admit_update` を参照する。
 
 ### e2eの関門
 

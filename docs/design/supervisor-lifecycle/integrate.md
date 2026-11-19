@@ -115,7 +115,9 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 - 人とinboxが直接打つ`dagq integrate`は、今の差分に結んで承認を記録する（`integrate::approvable`）。
   今の差分への直接の承認が有効なら再利用し、別の差分への承認なら今の差分で、照合で失効した承認なら差分が同じでも承認し直せる。
 - 着地直前の照合は、run自身の差分の同一性を確かめ、承認を持ち越すか聞き直すかを決める（`integrate::binding::compare_landing`、下の「判断との照合」）。
-- 検証のコマンドは自動更新のjobの関門（buildとe2e）と同時に流れず、関門が走るか番を待つ間、supervisorは着地を次のpassに回し、`land_integrating`は番を取れるまで待つ（ADR-t2719-1、[Auto-update](auto-update.md)の「着地の検証との順番」）。
+- 着地の検証は自動更新のbuildとe2eの関門と同時に流れず、実行できる着地を更新の待ち上限まで優先する（[Auto-update](auto-update.md#着地の検証との順番)）。
+  更新に番を渡すのは着地の区切りであり、バッチの共同検証と二分の間には割り込まない。
+  この順番と排他はsupervisorによる着地にも直接の `integrate` にも効く。
 
 ## receiptの検査とrebase
 

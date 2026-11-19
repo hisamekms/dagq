@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -36,11 +36,11 @@ pub struct MemoryFiles {
     ticks: Option<std::sync::atomic::AtomicU64>,
 }
 
-/// An opt-in exclusive in-memory lock. A failed probe records the
-/// contention and dropping the holder makes the lock available again.
+/// An opt-in in-memory flock model. A failed probe records contention
+/// and dropping a guard releases its share of the lock.
 #[derive(Default)]
 pub(crate) struct ExclusiveLockProbe {
-    held: AtomicBool,
+    holders: AtomicUsize,
     blocked: AtomicUsize,
 }
 
@@ -50,11 +50,20 @@ impl ExclusiveLockProbe {
     }
 }
 
-struct ExclusiveLock(Arc<ExclusiveLockProbe>);
+const EXCLUSIVE: usize = usize::MAX;
 
-impl Drop for ExclusiveLock {
+struct ObservedLock {
+    probe: Arc<ExclusiveLockProbe>,
+    exclusive: bool,
+}
+
+impl Drop for ObservedLock {
     fn drop(&mut self) {
-        self.0.held.store(false, Ordering::SeqCst);
+        if self.exclusive {
+            self.probe.holders.store(0, Ordering::SeqCst);
+        } else {
+            self.probe.holders.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -79,6 +88,26 @@ impl MemoryFiles {
             .entry(path.to_owned())
             .or_default()
             .clone()
+    }
+
+    fn observed_lock(&self, path: &Path, exclusive: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        let Some(probe) = self.observed_locks.lock().unwrap().get(path).cloned() else {
+            return Some(Box::new(()));
+        };
+        let acquired = probe
+            .holders
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |holders| {
+                if exclusive {
+                    (holders == 0).then_some(EXCLUSIVE)
+                } else {
+                    holders.checked_add(1)
+                }
+            });
+        if acquired.is_err() {
+            probe.blocked.fetch_add(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Box::new(ObservedLock { probe, exclusive }))
     }
 
     /// Files whose reads take at most `limit` bytes each.
@@ -166,19 +195,21 @@ impl RunFiles for MemoryFiles {
         if self.busy_locks.lock().unwrap().contains(path) {
             return Ok(None);
         }
-        match self.observed_locks.lock().unwrap().get(path) {
-            Some(probe) if probe.held.swap(true, Ordering::SeqCst) => {
-                probe.blocked.fetch_add(1, Ordering::SeqCst);
-                Ok(None)
-            }
-            Some(probe) => Ok(Some(Box::new(ExclusiveLock(probe.clone())))),
-            None => Ok(Some(Box::new(()))),
-        }
+        Ok(self.observed_lock(path, true))
     }
 
     fn try_lock_shared(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
-        let busy = self.busy_next_shared_locks.lock().unwrap().remove(path);
-        Ok((!busy).then(|| Box::new(()) as Box<dyn std::any::Any + Send>))
+        if self.busy_next_shared_locks.lock().unwrap().remove(path) {
+            return Ok(None);
+        }
+        Ok(self.observed_lock(path, false))
+    }
+
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send>> {
+        // The observed model reports contention instead of waiting on
+        // the test thread that has to release the competing guard.
+        self.observed_lock(path, true)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))
     }
 
     fn create_dir_all(&self, dir: &Path) -> io::Result<()> {

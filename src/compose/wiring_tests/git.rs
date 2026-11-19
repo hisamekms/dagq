@@ -96,6 +96,7 @@ struct State {
     /// one named conflicts on, once ([`FakeGit::conflict_once_main_moves`]).
     conflict_next_merge: Option<(Vec<String>, CommitSha)>,
     merge_clean: bool,
+    dagq_source: bool,
     /// Tree identities for a fake that exercises stacked landings.
     batch_trees: Option<HashMap<String, String>>,
     /// A member that conflicts with a particular tree, whether the tree
@@ -168,6 +169,7 @@ impl FakeGit {
                 refs: HashMap::new(),
                 conflict_next_merge: None,
                 merge_clean: false,
+                dagq_source: false,
                 batch_trees: None,
                 stack_conflict: None,
                 clean_rebases: HashMap::new(),
@@ -199,6 +201,10 @@ impl FakeGit {
     pub(super) fn conflict_with_prefix(&self, prefix: &CommitSha, member: CommitSha, path: &str) {
         let mut state = self.lock();
         state.stack_conflict = Some((state.tree_label(prefix.as_str()), member, path.to_owned()));
+    }
+
+    pub(super) fn set_dagq_source(&self) {
+        self.lock().dagq_source = true;
     }
 
     /// Every commit holds `files` (path and text), and every range
@@ -541,7 +547,7 @@ impl RepositoryReads for FakeGit {
 
 impl Repository for FakeGit {
     fn is_dagq_source(&self) -> bool {
-        false
+        self.lock().dagq_source
     }
 
     fn reachable_commit(&self, commit: &str) -> Result<bool> {

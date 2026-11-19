@@ -148,6 +148,7 @@ pub(super) struct Wiring {
     deadline: Instant,
     tick: Duration,
     continuous: bool,
+    auto_update: bool,
     generators: Generators,
     pid: u32,
     /// Whether the supervisor also runs Codex headless workers and jobs
@@ -273,6 +274,7 @@ impl Wiring {
             deadline,
             tick: TICK,
             continuous: false,
+            auto_update: false,
             generators,
             pid,
             codex: false,
@@ -308,6 +310,12 @@ impl Wiring {
             service_wrap: None,
             repository_startup_file: None,
         }
+    }
+
+    /// Register the source-update supervisor through the real startup path.
+    pub(super) fn with_auto_update(mut self) -> Self {
+        self.auto_update = true;
+        self
     }
 
     /// This wiring's supervisor and queues read `clock` (a test that moves
@@ -982,6 +990,7 @@ impl Wiring {
                 service: self.service(),
                 tick: self.tick,
                 continuous: self.continuous,
+                auto_update: self.auto_update,
                 db: self.db.clone(),
                 pid: self.pid,
                 codex: self.codex,
@@ -1080,6 +1089,7 @@ impl Wiring {
 struct Parts {
     tick: Duration,
     continuous: bool,
+    auto_update: bool,
     service: Arc<dyn ServiceCaller>,
     db: PathBuf,
     pid: u32,
@@ -1292,6 +1302,7 @@ impl Parts {
                 self.passes,
             )
         };
+        settings.update.register = self.auto_update;
         settings.tick = self.tick;
         settings.idle_poll = self.tick;
         settings.handoff_token = self.handoff;

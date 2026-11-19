@@ -868,6 +868,9 @@ pub struct IntegrationRequest {
     pub previous: RunStatus,
     pub main: CommitSha,
     pub token: LeaseToken,
+    /// Keeps the admitted turn through verification and publishing. The
+    /// request can be cloned by the batch runner.
+    pub(crate) held_turn: Option<std::sync::Arc<std::sync::Mutex<super::heavy_turn::Turn>>>,
 }
 
 /// Proof that a push of the landing branch is the [`Integrator`]'s
@@ -1336,13 +1339,18 @@ fn begin(
     first_direct_landing(queue, capacity, target, Some(&run))?;
     // Leave the run queued while the update owns the common turn. Read
     // the order again after waiting, while holding the turn for the start.
-    let _turn = match ctx.heavy_turn.as_ref() {
-        Some(turn) => match turn.try_check(ctx.files)? {
+    let turn = match ctx.heavy_turn.as_ref() {
+        Some(turn) => match turn.try_check(ctx.files, ctx.processes)? {
             Ok(guard) => Some(guard),
             Err(_) => {
-                let guard = turn.check(ctx.files, super::heavy_turn::CHECK_POLL, |what| {
-                    info!(run_id = %run.id(), "the landing waits for {}", what.describe());
-                })?;
+                let guard = turn.check(
+                    ctx.files,
+                    ctx.processes,
+                    super::heavy_turn::CHECK_POLL,
+                    |what| {
+                        info!(run_id = %run.id(), "the landing waits for {}", what.describe());
+                    },
+                )?;
                 let capacity = Capacity {
                     integrating: !queue.runs_with_status(RunStatus::Integrating)?.is_empty(),
                     ..capacity
@@ -1368,6 +1376,7 @@ fn begin(
         previous,
         main,
         token,
+        held_turn: turn.map(|guard| std::sync::Arc::new(std::sync::Mutex::new(guard))),
     }))
 }
 
@@ -1720,14 +1729,13 @@ fn land_integrating(
         if let Err(error) = &guarded {
             return Ok((onto, unguarded(run, error)));
         }
-        // The verification takes turns with the automatic update's build
-        // and e2e (ADR-t2719-1): it waits while the update's job, of any
-        // process of the queue, holds or waits for its turn, and holds its
-        // own until the verdict. A task with no command waits for nothing.
+        // Ordinarily the start holds the turn through the landing
+        // (ADR-t5283-4). If the caller did not supply a guard, acquire it
+        // before any verification commands.
         let _turn = match &ctx.heavy_turn {
-            Some(turns) if !task.verification_commands().is_empty() => {
+            Some(turns) if request.held_turn.is_none() && !task.verification_commands().is_empty() => {
                 Some(
-                    turns.check(ctx.files, super::heavy_turn::CHECK_POLL, |what| {
+                    turns.check(ctx.files, ctx.processes, super::heavy_turn::CHECK_POLL, |what| {
                         info!(
                             op = "integrate",
                             "run {}'s landing waits for {} to end before its verification",
