@@ -77,6 +77,7 @@ pub fn status(
         crate::domain::disk::relax_view(latest_relax.as_ref(), now.saturating_mul(1000));
     let graph = queue.graph_input()?;
     let landing_queue = landing_queue_view(queue, &graph)?;
+    let landing_batch = landing_batch_view(queue)?;
     let asks = queue
         .asks(AskQuery {
             open: true,
@@ -114,6 +115,7 @@ pub fn status(
         "runs": runs,
         "waiting": waiting,
         "landing_queue": landing_queue,
+        "landing_batch": landing_batch,
         "attention": attention(
             queue,
             &registrations,
@@ -1272,6 +1274,30 @@ pub fn recurring(
         Ok(items) if items.is_empty() => Ok(None),
         Ok(items) => Ok(Some(json!({"schedule": schedule(&items)?}))),
     }
+}
+
+/// The most recent batch's members, verification stage and removals.
+/// A batch interrupted by a dead supervisor without its closing event
+/// disappears when recovery releases its members' leases.
+fn landing_batch_view(
+    queue: &(impl crate::application::EventStore + CoordinationReads + ?Sized),
+) -> Result<Option<crate::domain::landing_batch::Progress>> {
+    use crate::domain::landing_batch::Progress;
+    let Some(event) = queue.latest_event_of(EventKind::LandingBatchProgress.as_str())? else {
+        return Ok(None);
+    };
+    let Ok(progress) = serde_json::from_value::<Progress>(event.payload) else {
+        return Ok(None);
+    };
+    if progress.finished {
+        return Ok(Some(progress));
+    }
+    for run in &progress.runs {
+        if queue.run_lease(run)?.is_some() {
+            return Ok(Some(progress));
+        }
+    }
+    Ok(None)
 }
 
 /// Status's `landing_queue` is in domain priority/time order. `position`

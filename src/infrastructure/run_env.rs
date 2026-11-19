@@ -1884,12 +1884,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
-                let secs = parse_positive(rest.trim(), "number of seconds").with_context(with)?;
-                config.verification.command_timeout_secs = Some(
-                    verification_limit::checked_timeout_secs(secs)
-                        .map_err(anyhow::Error::msg)
-                        .with_context(with)?,
-                );
+                if key == verification_limit::LANDING_BATCH_SIZE {
+                    let size = parse_positive(rest.trim(), "batch size").with_context(with)?;
+                    config.verification.landing_batch_size =
+                        std::num::NonZeroUsize::new(usize::try_from(size)?)
+                            .context("the landing batch size must be positive")?;
+                } else {
+                    let secs =
+                        parse_positive(rest.trim(), "number of seconds").with_context(with)?;
+                    config.verification.command_timeout_secs = Some(
+                        verification_limit::checked_timeout_secs(secs)
+                            .map_err(anyhow::Error::msg)
+                            .with_context(with)?,
+                    );
+                }
                 verification_keys.push(key.to_owned());
             }
             Some(THROUGHPUT_REVIEW_TABLE) => {
@@ -5333,6 +5341,9 @@ impl Verifier for ShellVerifier {
     }
     fn runtimes(&self) -> Result<RuntimeConfig> {
         load_runtimes(&self.checkout)
+    }
+    fn landing_batch_size(&self) -> Result<std::num::NonZeroUsize> {
+        Ok(load_verification_config(&self.checkout)?.landing_batch_size)
     }
     fn landing_verification(&self) -> Result<Option<LandingVerification>> {
         load_landing_verification(&self.checkout)
@@ -9996,6 +10007,24 @@ LITERAL = 'no \n escapes # here'
         )
         .unwrap();
         assert_eq!(load_retention_config(dir.path()).unwrap().backups, 1);
+    }
+
+    #[test]
+    fn parses_the_landing_batch_cap_and_preserves_the_default() {
+        let size = |text| {
+            parse_config(text)
+                .unwrap()
+                .verification
+                .landing_batch_size
+                .get()
+        };
+        assert_eq!(size(""), 1);
+        assert_eq!(size("[verification]\nlanding_batch_size = 2\n"), 2);
+        assert!(parse_config("[verification]\nlanding_batch_size = 0\n").is_err());
+        assert!(
+            parse_config("[verification]\nlanding_batch_size = 2\nlanding_batch_size = 3\n")
+                .is_err()
+        );
     }
 
     /// `[verification] command_timeout_secs` is a whole number of seconds

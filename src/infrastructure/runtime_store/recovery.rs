@@ -198,6 +198,28 @@ impl<E: TransactionEntries> StoreQueue<E> {
         self.lease_awaiting(id, token, "e2e")
     }
 
+    /// Reserve a queued run for the batch's owner using the landing fence.
+    pub fn lease_for_landing_batch(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        let status = self.run(id)?.status();
+        if !matches!(
+            status,
+            RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+        ) {
+            return Ok(None);
+        }
+        self.lease_unheld(
+            id,
+            token,
+            "landing_batch",
+            status,
+            Some(GuardedStep::Integrate),
+        )
+    }
+
     /// Take up an `awaiting_integration` run left with no lease row and no
     /// open ask (ADR-t3049-1), leasing it to `token`, recorded as
     /// `lease_acquired` with `reason: stranded_landing`. Unlike an adoption
@@ -692,7 +714,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
         };
         // An approved resume stays needs_session. Recheck its authorization
         // under the lease's write transaction, not at the caller's earlier read.
-        if reason == "e2e"
+        if matches!(reason, "e2e" | "landing_batch")
             && status == RunStatus::NeedsSession
             && RunHistory::from_events(&run_events_of(&tx, id)?)
                 .queued_after_resume()
@@ -1970,6 +1992,13 @@ impl<E: TransactionEntries> RunRecovery for StoreQueue<E> {
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         StoreQueue::lease_for_e2e(self, id, token)
     }
+    fn lease_for_landing_batch(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        StoreQueue::lease_for_landing_batch(self, id, token)
+    }
     fn lease_stranded_landing(
         &mut self,
         id: &RunId,
@@ -2526,7 +2555,7 @@ fn lease_in(
         )
         .optional()?;
     if let Some(lease) = &lease {
-        if !lease_is_stale(lease, now) {
+        if payload["reason"] == "landing_batch" || !lease_is_stale(lease, now) {
             return Ok(false);
         }
         conn.execute("DELETE FROM run_leases WHERE run_id=?1", sql_params![id])?;

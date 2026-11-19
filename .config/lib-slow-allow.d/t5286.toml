@@ -1,0 +1,44 @@
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_passing_batch_publishes_both_squashes_in_order_after_one_check"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、共同検証一回で別々の着地を列の順に記録することを確かめる。着地待ち2本を直接作り、supervisor一回と1 msの待ち間隔に縮めた。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::failed_joint_verification_exposes_the_serial_split_in_events_and_status"
+reason = "境界: 実際の supervisor・queue service・SQLite を通し、共同検証と直列の二分が event と進行中の status に届くことを確かめる。着地待ち2本を直接作り、supervisor一回と1 msの待ち間隔に縮めた。二分の判断は domain::landing_batch が単独で確かめる。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_conflicting_member_is_sent_back_after_the_clean_prefix_lands"
+reason = "境界: supervisor・queue service・SQLite を通し、競合する後続だけが衝突解消へ戻り、先行の着地とバッチの除外が記録されることを確かめる。着地待ち2本を直接作り、supervisorは先行の検証開始からdrainする。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_member_without_an_admissible_receipt_takes_the_ordinary_path"
+reason = "境界: supervisor・queue service・SQLite を通し、receiptの検査を通らないrunを通常の経路で差し戻して後続を検証することを確かめる。着地待ち2本を直接作り、supervisorは後続の検証開始からdrainする。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::recheck_waits_between_squashes_and_checks_the_remaining_run_on_final_main"
+reason = "境界: supervisor・queue service・SQLite を通し、一件目の着地を記録した時点のlockの競合と、完了後の一回のrecheckを確かめる。実Gitやsessionを立てず、着地待ちと未回答askを直接作り、recheckの記録でsupervisorを止める。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::handoff_after_the_first_squash_leaves_the_following_member_queued"
+reason = "境界: 実supervisorとqueue service・SQLiteで、先行の着地の記録後にhandoffを要求し、後続の開始拒否とleaseの返却を確認する。着地待ち2本を直接作り、実Gitやsessionの起動を省く。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_batch_and_claim_can_start_in_the_same_admission_pass"
+reason = "境界: supervisor・queue service・SQLiteで、2本の着地が空けるworker枠と共通のdisk判定でclaimが同じ回に始まることを確かめる。着地待ちは直接作り、sessionの起動はfakeで止める。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::an_unanswered_request_between_squashes_leaves_the_follower_with_the_batch"
+reason = "境界: 実supervisor・queue service・SQLiteで、二つのsquashの間に応答を失っても復旧の回が後続のleaseを取らないことを確かめる。着地待ちを直接作り、復旧の回を観測してからバッチを再開する。"
+task = 5286
+
+[[test]]
+name = "compose::wiring_tests::landing_answers::a_token_sweep_between_a_followers_squash_and_push_keeps_its_integrator"
+reason = "境界: 実supervisor・queue service・SQLiteで、後続のsquash後の掃除をまたいでpush結果を記録し、その後にintegrator tokenが失効することを確かめる。着地待ちを直接作り、fake clockで掃除を起こす。"
+task = 5286

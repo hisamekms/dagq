@@ -5,7 +5,10 @@ use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +23,7 @@ pub struct MemoryFiles {
     read_limit: Option<u64>,
     busy_locks: Mutex<std::collections::HashSet<PathBuf>>,
     busy_next_shared_locks: Mutex<std::collections::HashSet<PathBuf>>,
+    observed_locks: Mutex<HashMap<PathBuf, Arc<ExclusiveLockProbe>>>,
     rejected_suffix: Mutex<Option<String>>,
     /// The directories that are there ([`Self::put_dir`]); none else is.
     dirs: Mutex<std::collections::HashSet<PathBuf>>,
@@ -30,6 +34,28 @@ pub struct MemoryFiles {
     /// each write, when the files tick ([`Self::ticking`]); `None` keeps
     /// one `now`.
     ticks: Option<std::sync::atomic::AtomicU64>,
+}
+
+/// An opt-in exclusive in-memory lock. A failed probe records the
+/// contention and dropping the holder makes the lock available again.
+#[derive(Default)]
+pub(crate) struct ExclusiveLockProbe {
+    held: AtomicBool,
+    blocked: AtomicUsize,
+}
+
+impl ExclusiveLockProbe {
+    pub(crate) fn blocked_attempts(&self) -> usize {
+        self.blocked.load(Ordering::SeqCst)
+    }
+}
+
+struct ExclusiveLock(Arc<ExclusiveLockProbe>);
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        self.0.held.store(false, Ordering::SeqCst);
+    }
 }
 
 impl MemoryFiles {
@@ -44,6 +70,15 @@ impl MemoryFiles {
             .lock()
             .unwrap()
             .insert(path.to_owned());
+    }
+
+    pub(crate) fn observe_exclusive_lock(&self, path: &Path) -> Arc<ExclusiveLockProbe> {
+        self.observed_locks
+            .lock()
+            .unwrap()
+            .entry(path.to_owned())
+            .or_default()
+            .clone()
     }
 
     /// Files whose reads take at most `limit` bytes each.
@@ -128,8 +163,17 @@ fn missing() -> io::Error {
 
 impl RunFiles for MemoryFiles {
     fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
-        Ok((!self.busy_locks.lock().unwrap().contains(path))
-            .then(|| Box::new(()) as Box<dyn std::any::Any + Send>))
+        if self.busy_locks.lock().unwrap().contains(path) {
+            return Ok(None);
+        }
+        match self.observed_locks.lock().unwrap().get(path) {
+            Some(probe) if probe.held.swap(true, Ordering::SeqCst) => {
+                probe.blocked.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }
+            Some(probe) => Ok(Some(Box::new(ExclusiveLock(probe.clone())))),
+            None => Ok(Some(Box::new(()))),
+        }
     }
 
     fn try_lock_shared(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {

@@ -267,6 +267,7 @@ const SUPERVISE: &[&str] = &[
     "park_live",
     "park_e2e_failed",
     "lease_for_e2e",
+    "lease_for_landing_batch",
     "begin_e2e",
     "park_rechecked",
     "record_workspace_closed",

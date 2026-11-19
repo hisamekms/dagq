@@ -1632,9 +1632,9 @@ impl Principal {
     /// (ADR-t3102-1 decision 2): its actor is the one the landing's events
     /// record (`integrator:<pid>`), its one target the run, and its
     /// registration the lease, which every lease it names has to be. The
-    /// run is its target, not its `run_id`, so the landing still records
-    /// as it after the run is integrated; the token is revoked as the
-    /// landing leaves `integrating` ([`Self::credential_key`]).
+    /// run is its target, so the landing still records as it after the
+    /// run is integrated. The landing revokes the token once its records
+    /// are complete ([`Self::credential_key`]).
     pub fn integrator(run: &RunId, lease: &LeaseToken, pid: u32) -> Self {
         Self {
             target: Some(StepTarget::run(run)),

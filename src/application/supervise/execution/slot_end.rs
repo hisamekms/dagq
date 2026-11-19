@@ -25,9 +25,10 @@ impl Supervisor<'_> {
     /// like any other, never into a second slot (task 1361). A pass adopts
     /// before it steps the slots, so a lease that moved after the last
     /// step of the pass before would otherwise be adopted back while its
-    /// slot still drives the run.
+    /// slot still drives the run. This includes followers owned by a
+    /// slot's landing job.
     pub(super) fn in_slot(&self, id: &RunId) -> bool {
-        self.claim.slots.holds(id)
+        self.claim.slots.holds(id) || self.claim.slots.batch_owns(id)
     }
     /// Drop a slot whose lease another process holds now, writing nothing
     /// about the run: the new owner's record is the record.

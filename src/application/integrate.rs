@@ -56,6 +56,7 @@ use crate::domain::{
 };
 use crate::migration_numbers;
 
+pub(super) mod batch;
 pub mod binding;
 mod programs;
 pub use programs::LandingPrograms;
@@ -959,7 +960,7 @@ impl Integrator {
         let requested_by = ctx.queue.request_as(Some(&request.requester));
         let landed = self
             .check(&mut *ctx.queue, request, ctx.build)
-            .and_then(|()| land_integrating(ctx, &grant, request));
+            .and_then(|()| land_integrating(ctx, &grant, request, batch::Gate::Ordinary));
         ctx.queue.restore_request(requested_by);
         if let Some(previous) = previous {
             ctx.queue.act_as(previous);
@@ -1683,6 +1684,7 @@ fn land_integrating(
     ctx: &mut Integration<'_>,
     grant: &PushGrant,
     request: &IntegrationRequest,
+    gate: batch::Gate,
 ) -> Result<IntegrationOutcome> {
     let IntegrationRequest {
         run,
@@ -1692,7 +1694,6 @@ fn land_integrating(
         ..
     } = request;
     let previous = *previous;
-    let queue = &mut *ctx.queue;
     // The git that handles a container run's commits runs none of their
     // hooks and drivers (ADR-t2179-1 decision 8); one that cannot be kept
     // from it lands nothing.
@@ -1701,7 +1702,7 @@ fn land_integrating(
         Ok(repository) => &**repository,
         Err(_) => ctx.repository,
     };
-    let task = queue.show(run.task_id())?.task;
+    let task = ctx.queue.show(run.task_id())?.task;
     // Every event of the landing, the push and the follow-ups carries the run.
     let _span =
         tracing::info_span!("integrate", run_id = %run.id(), task_id = %run.task_id()).entered();
@@ -1744,26 +1745,11 @@ fn land_integrating(
             .steps
             .as_ref()
             .map(|steps| super::step_report::Ticking::start(steps.shared.clone(), steps.clock.clone()));
-        let verdict = land(
-            queue,
-            repository,
-            ctx.verifier,
-            ctx.container,
-            ctx.load_average,
-            ctx.files,
-            ctx.retry_disk.as_ref(),
-            ctx.sccache,
-            ctx.verification_tokens,
-            ctx.verification_containers,
-            ctx.clock,
-            ctx.steps.as_ref().map(|steps| &*steps.shared),
-            ctx.handing_off,
-            ctx.programs.as_ref(),
-            &task,
-            run,
-            &onto,
-            main,
-        );
+        let verdict = match gate {
+            batch::Gate::Stop(verdict) => Ok(verdict),
+            batch::Gate::Abort(error) => Err(error),
+            gate => land(ctx, repository, &task, run, &onto, main, gate),
+        };
         // What the verification ran is sent before the run lands, while
         // its token holds; a failure is only logged.
         drop(ticking);
@@ -1778,6 +1764,7 @@ fn land_integrating(
         }
         Ok((onto, verdict?))
     });
+    let queue = &mut *ctx.queue;
     let (onto, verdict) = match landed {
         Ok(landed) => landed,
         Err(error) => {
@@ -1810,6 +1797,25 @@ fn land_integrating(
             )));
         }
     };
+    finish_landing(ctx, repository, grant, request, &onto, verdict)
+}
+
+fn finish_landing(
+    ctx: &mut Integration<'_>,
+    repository: &dyn Repository,
+    grant: &PushGrant,
+    request: &IntegrationRequest,
+    onto: &LandingBranch,
+    verdict: Verdict,
+) -> Result<IntegrationOutcome> {
+    let IntegrationRequest {
+        run,
+        main,
+        token,
+        previous,
+        ..
+    } = request;
+    let queue = &mut *ctx.queue;
     Ok(match verdict {
         Verdict::Landed(landing, proposed) => {
             let verification_skipped = landing.verification_skipped;
@@ -1842,7 +1848,7 @@ fn land_integrating(
                 queue,
                 repository,
                 grant,
-                &onto,
+                onto,
                 ctx.remote,
                 run.id(),
                 &landing.commit,
@@ -2620,25 +2626,16 @@ enum Verdict {
 /// landing itself (Git, files) before `main` moved.
 #[allow(clippy::too_many_arguments)]
 fn land(
-    queue: &mut dyn Queue,
+    ctx: &mut Integration<'_>,
     repository: &dyn Repository,
-    verifier: &dyn Verifier,
-    container: &dyn super::ContainerRuntime,
-    load_average: fn() -> Option<f64>,
-    files: &dyn RunFiles,
-    retry_disk: Option<&RetryDisk<'_>>,
-    sccache: Option<&dyn super::SccacheServer>,
-    verification_tokens: &dyn super::queue_broker::VerificationTokens,
-    verification_containers: &dyn super::run_container::VerificationContainers,
-    clock: &dyn Clock,
-    steps: Option<&super::step_report::SharedVerification>,
-    handing_off: Option<HandoffDrain<'_>>,
-    programs: Option<&LandingPrograms<'_>>,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
     main: &CommitSha,
+    gate: batch::Gate,
 ) -> Result<Verdict> {
+    let queue = &mut *ctx.queue;
+    let files = ctx.files;
     let defer = |code: Reason, reason: String, detail: Value| {
         Ok(Verdict::Deferred {
             reason,
@@ -2933,17 +2930,40 @@ fn land(
             });
         }
     };
+    let tree = repository.tree_of(rebased.as_str())?;
+    let batched = matches!(gate, batch::Gate::Proof { .. });
+    let verified = match gate {
+        batch::Gate::Ordinary => false,
+        batch::Gate::Proof { branch, .. } if branch != *landing_branch => {
+            return Ok(batch_base_moved(main));
+        }
+        batch::Gate::Proof {
+            tree: expected,
+            rejection,
+            ..
+        } if expected == tree => {
+            if let Some(verdict) = rejection {
+                return Ok(verdict);
+            }
+            true
+        }
+        batch::Gate::Proof { .. } => false,
+        batch::Gate::Stop(_) | batch::Gate::Abort(_) => {
+            unreachable!("resolved before the landing gate")
+        }
+    };
     // The review programs the diff that lands requires, the cheap gate
     // before the commands (ADR-t3749-1): one that fails sends the run back
     // before any command runs.
-    if let Some(programs) = programs
+    if !verified
+        && let Some(programs) = ctx.programs.as_ref()
         && let Some(verdict) = programs::landing_programs(
             queue,
             repository,
-            verifier,
-            (files, clock),
+            ctx.verifier,
+            (files, ctx.clock),
             programs,
-            handing_off,
+            ctx.handing_off,
             &programs::ProgramsAt {
                 run,
                 worktree,
@@ -2956,13 +2976,81 @@ fn land(
     {
         return Ok(verdict);
     }
-    // The task's verification commands run here, once per commit, on the
-    // rebased tree: validation only checks the receipt (ADR-0023 decision 1).
-    // So they run even when the rebase moved nothing and the head is still
-    // the run's `result_commit`.
-    // The repository's landing verification runs in place of those its
-    // `dagq.toml` names; the registered commands stay (ADR-t1925-1).
-    let commands = landing_plan(verifier, task)?;
+    if !verified {
+        let commands = landing_plan(ctx.verifier, task)?;
+        if let Some(verdict) = verify_landing(
+            ctx,
+            run,
+            worktree,
+            (main, &rebased, main),
+            &commands,
+            &|| KnownFailures::read(&*ctx.queue, ctx.verifier, task),
+        )? {
+            return Ok(verdict);
+        }
+    }
+    // One commit on main with the rebased tree; the run's own history stays
+    // reachable under refs/dagq/runs/<run-id>.
+    let paragraphs = commit_message(task, run, &receipt);
+    let commit = repository.commit_tree(&tree, main.as_str(), &paragraphs)?;
+    let history_ref = format!("refs/dagq/runs/{}", run.id());
+    repository.update_ref(&history_ref, rebased.as_str())?;
+    if batched && repository.landing_branch()? != *landing_branch {
+        return Ok(batch_base_moved(main));
+    }
+    if let Err(error) = repository.advance_main(landing_branch, main.as_str(), commit.as_str()) {
+        if batched && repository.main_head().is_ok_and(|head| head != *main) {
+            return Ok(batch_base_moved(main));
+        }
+        return Err(error);
+    }
+    let merged = binding::merged_record(merged, &commit);
+    Ok(Verdict::Landed(
+        Landing {
+            commit,
+            source_commit: rebased,
+            main_before: main.clone(),
+            history_ref,
+            message: paragraphs.join("\n\n"),
+            verification_skipped: false,
+            merged: Some(merged),
+        },
+        receipt.into_follow_ups(),
+    ))
+}
+
+fn batch_base_moved(main: &CommitSha) -> Verdict {
+    Verdict::HandedOver {
+        reason: "the landing branch moved during the batch".to_owned(),
+        detail: json!({"main": main}),
+    }
+}
+
+/// Run one landing gate against a rebased tree. Batch stages use the same
+/// classification, retry, container and handoff rules as a single run.
+/// The selection base stays at the original main across splits so a
+/// path-selected gate still covers all accepted members in the tree.
+fn verify_landing(
+    ctx: &Integration<'_>,
+    run: &TaskRun,
+    worktree: &Path,
+    (main, rebased, selection_base): (&CommitSha, &CommitSha, &CommitSha),
+    commands: &[landing_verification::Planned],
+    known: &dyn Fn() -> Result<KnownFailures>,
+) -> Result<Option<Verdict>> {
+    let queue = &*ctx.queue;
+    let verifier = ctx.verifier;
+    let files = ctx.files;
+    let clock = ctx.clock;
+    let container = ctx.container;
+    let load_average = ctx.load_average;
+    let retry_disk = ctx.retry_disk.as_ref();
+    let sccache = ctx.sccache;
+    let verification_tokens = ctx.verification_tokens;
+    let verification_containers = ctx.verification_containers;
+    let steps = ctx.steps.as_ref().map(|steps| &*steps.shared);
+    let handing_off = ctx.handing_off;
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
     // The profiles that read the commands' output (ADR-t2268-1), read like
     // `[landing_verification]`: a declaration that cannot be resolved stops
     // before the commands, as an unreadable dagq.toml does.
@@ -2977,15 +3065,15 @@ fn land(
     // On the host the landing's command reads its known failures from the
     // run directory, written before anything else runs.
     let replaced = commands.iter().any(landing_verification::Planned::replaced);
-    let host_landing_env = if replaced && !verification_in_container(verifier, &commands)? {
-        KnownFailures::read(&*queue, verifier, task)?.env(files, run_dir, run_dir, main)?
+    let host_landing_env = if replaced && !verification_in_container(verifier, commands)? {
+        known()?.env(files, run_dir, run_dir, selection_base)?
     } else {
         Vec::new()
     };
     let in_container = if commands.is_empty() {
         false
     } else {
-        match verification_runtime(&*queue, verifier, container)? {
+        match verification_runtime(queue, verifier, container)? {
             Ok(runtime) => runtime == crate::domain::container_runtime::Runtime::Container,
             Err(message) => bail!("{message}"),
         }
@@ -2998,7 +3086,7 @@ fn land(
         // No program of the host runs the commands, and no cache of the
         // host's or the workers' is theirs (ADR-t2114-4 decision 4).
         let mut env = verifier.run_env(run_dir)?;
-        without_wrapper(&*queue, clock, run, &mut env);
+        without_wrapper(queue, clock, run, &mut env);
         env
     } else {
         // A program [run.env] names that cannot be executed would fail
@@ -3011,7 +3099,7 @@ fn land(
         _verification_tmp = host_verification_tmpdir(files, run.id(), &mut env)?;
         if let Some((port, why)) = guard_verification(sccache, run_dir, &mut env) {
             super::sccache::record_wrapper_removed(
-                &*queue,
+                queue,
                 run.id(),
                 clock.now(),
                 "integrate",
@@ -3053,12 +3141,12 @@ fn land(
         (Some(token), true) => {
             // The wait for the machine's memory is the run's record, between
             // the landing's start and its first command.
-            let records = &*queue;
+            let records = queue;
             Some(ContainerVerification::start(
                 verification_containers,
                 verifier,
                 run,
-                &rebased,
+                rebased,
                 &token.file,
                 &mut |ask, note| {
                     let Some((kind, payload)) =
@@ -3079,11 +3167,11 @@ fn land(
     // from the materials it mounts: staged with the preparation command's,
     // then copied into the run directory with them.
     let landing_env = match &container_verification {
-        Some(verification) if replaced => KnownFailures::read(&*queue, verifier, task)?.env(
+        Some(verification) if replaced => known()?.env(
             files,
             &verification.prepared.staged,
             &verification.prepared.materials,
-            main,
+            selection_base,
         )?,
         _ => host_landing_env,
     };
@@ -3136,7 +3224,7 @@ fn land(
                 steps,
             };
             let first = step.run(
-                &*queue,
+                queue,
                 index,
                 &integrate_verify_log(run_dir, attempt, index),
                 None,
@@ -3156,7 +3244,7 @@ fn land(
                             landing_short_decision(&decision, run.id())
                         } else {
                             disk_short(
-                                &*queue,
+                                queue,
                                 &room.config,
                                 (room.free)(),
                                 room.total,
@@ -3177,31 +3265,31 @@ fn land(
                     _ => None,
                 };
                 if let Some(short) = short {
-                    return Ok(held(
+                    return Ok(Some(held(
                         run,
                         main,
-                        &rebased,
+                        rebased,
                         command,
                         index,
                         &last,
                         None,
                         Some(short),
-                    ));
+                    )));
                 }
                 // Not retried while the supervisor drains for a handoff
                 // (ADR-t3344-1): the next process lands it anew.
                 if drains_for_handoff(handing_off) {
-                    return Ok(handed_over(
+                    return Ok(Some(handed_over(
                         main,
-                        &rebased,
+                        rebased,
                         command,
                         (index, attempt),
                         &last,
                         &first_failure,
-                    ));
+                    )));
                 }
                 let retried = step.run(
-                    &*queue,
+                    queue,
                     index,
                     &integrate_retry_log(run_dir, attempt, index),
                     Some(&last),
@@ -3209,16 +3297,16 @@ fn land(
                 match &retried.failure {
                     None => continue,
                     Some(failure) if failure.class.is_environmental() => {
-                        return Ok(held(
+                        return Ok(Some(held(
                             run,
                             main,
-                            &rebased,
+                            rebased,
                             command,
                             index,
                             &retried,
                             Some(&last),
                             None,
-                        ));
+                        )));
                     }
                     // The code's own failure on the retry: the worker's, as
                     // any other.
@@ -3235,14 +3323,14 @@ fn land(
                 // (ADR-t3344-1): the next process lands it anew, its once
                 // counted from that landing.
                 if drains_for_handoff(handing_off) {
-                    return Ok(handed_over(
+                    return Ok(Some(handed_over(
                         main,
-                        &rebased,
+                        rebased,
                         command,
                         (index, attempt),
                         &last,
                         failure,
-                    ));
+                    )));
                 }
                 let retry_env = toolchains.flaky_retry_env(failure.profile.unwrap_or_default());
                 let reason = format!(
@@ -3280,35 +3368,15 @@ fn land(
                 run_env.extend(retry_env);
                 continue 'verify;
             }
-            return Ok(verification_failed(
-                main, &rebased, command, index, &last, failure,
-            ));
+            return Ok(Some(verification_failed(
+                main, rebased, command, index, &last, failure,
+            )));
         }
         break;
     }
     drop(container_verification);
     drop(verification_token);
-    // One commit on main with the rebased tree; the run's own history stays
-    // reachable under refs/dagq/runs/<run-id>.
-    let paragraphs = commit_message(task, run, &receipt);
-    let tree = repository.tree_of(rebased.as_str())?;
-    let commit = repository.commit_tree(&tree, main.as_str(), &paragraphs)?;
-    let history_ref = format!("refs/dagq/runs/{}", run.id());
-    repository.update_ref(&history_ref, rebased.as_str())?;
-    repository.advance_main(landing_branch, main.as_str(), commit.as_str())?;
-    let merged = binding::merged_record(merged, &commit);
-    Ok(Verdict::Landed(
-        Landing {
-            commit,
-            source_commit: rebased,
-            main_before: main.clone(),
-            history_ref,
-            message: paragraphs.join("\n\n"),
-            verification_skipped: false,
-            merged: Some(merged),
-        },
-        receipt.into_follow_ups(),
-    ))
+    Ok(None)
 }
 
 /// Whether the supervisor that asked for the landing drains for a
@@ -3491,6 +3559,36 @@ impl KnownFailures {
             Some(task.id()),
         )?;
         let fix_run = !queue.ci_failure_findings_of(task.id())?.is_empty();
+        Ok(Self { failures, fix_run })
+    }
+
+    /// A shared gate may omit only failures every member could omit.
+    fn for_batch(policies: &[Self]) -> Result<Self> {
+        let first = policies
+            .first()
+            .context("missing batch verification policy")?;
+        let mut failures = first.failures.clone();
+        let fix_run = policies.iter().any(|policy| policy.fix_run);
+        if let Some(skipped) = failures["failures"].as_array_mut() {
+            skipped.retain(|item| {
+                policies.iter().all(|policy| {
+                    policy.failures["failures"]
+                        .as_array()
+                        .is_some_and(|items| items.contains(item))
+                })
+            });
+        }
+        let mut kept = Vec::new();
+        for policy in policies {
+            if let Some(items) = policy.failures["kept_for_task"].as_array() {
+                for item in items {
+                    if !kept.contains(item) {
+                        kept.push(item.clone());
+                    }
+                }
+            }
+        }
+        failures["kept_for_task"] = json!(kept);
         Ok(Self { failures, fix_run })
     }
 
@@ -5083,6 +5181,7 @@ mod tests {
         changed: Vec<String>,
         tree: Vec<String>,
         contents: Vec<(String, String)>,
+        merged_head: Option<CommitSha>,
         /// Whether reading the configuration for the guard fails, rather
         /// than the guard not holding.
         guard_unread: bool,
@@ -5104,6 +5203,7 @@ mod tests {
                 changed: vec!["src/lib.rs".to_owned()],
                 tree: Vec::new(),
                 contents: Vec::new(),
+                merged_head: None,
                 guard_unread: false,
                 branch_unread: false,
                 admin: WorktreeAdmin::Unreadable,
@@ -5171,7 +5271,10 @@ mod tests {
         fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
             Ok(self.changed.clone())
         }
-        fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+        fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("added_paths {from} {to}"));
             Ok(self.added.clone())
         }
         fn paths_in(&self, _: &str, dir: &str) -> Result<Vec<String>> {
@@ -5199,8 +5302,30 @@ mod tests {
         ) -> Result<std::result::Result<CommitSha, String>> {
             unimplemented!()
         }
-        fn tree_of(&self, _: &str) -> Result<String> {
-            unimplemented!()
+        fn blobs_in(&self, _: &str, paths: &[&str]) -> Result<Vec<(String, String)>> {
+            Ok(self
+                .tree
+                .iter()
+                .filter(|path| paths.contains(&path.as_str()))
+                .map(|path| (path.clone(), format!("blob:{path}")))
+                .collect())
+        }
+        fn diff_text(&self, from: &str, to: &str) -> Result<Vec<u8>> {
+            Ok(format!("{from}..{to}").into_bytes())
+        }
+        fn tree_of(&self, commit: &str) -> Result<String> {
+            Ok(format!("tree:{commit}"))
+        }
+        fn merged_tree(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<std::result::Result<String, Vec<String>>> {
+            let head = self
+                .merged_head
+                .as_ref()
+                .context("no merge in the fixture")?;
+            Ok(Ok(self.tree_of(head.as_str())?))
         }
         fn commit_tree(&self, _: &str, _: &str, _: &[String]) -> Result<CommitSha> {
             unimplemented!()
@@ -6070,6 +6195,52 @@ mod tests {
             failures: json!({"failures": [{"kind": "test", "name": "dagq::it m::broken"}], "kept_for_task": []}),
             fix_run: false,
         }
+    }
+
+    #[test]
+    fn a_batch_omits_only_failures_all_its_members_can_omit() {
+        let failure = |name| json!({"kind": "test", "name": name});
+        let shared = failure("dagq::it m::already_failing");
+        let until_fixed = failure("dagq::it m::fixed_by_one_member");
+        let partial = failure("dagq::it m::skipped_by_two_members");
+        let other_fix = failure("dagq::it m::also_fixed");
+        let policy = |failures, kept_for_task, fix_run| KnownFailures {
+            failures: json!({
+                "enabled": true,
+                "branch": "main",
+                "failures": failures,
+                "kept_for_task": kept_for_task,
+            }),
+            fix_run,
+        };
+        let batch = KnownFailures::for_batch(&[
+            policy(
+                vec![shared.clone(), until_fixed.clone(), partial.clone()],
+                vec![],
+                false,
+            ),
+            policy(
+                vec![shared.clone(), partial],
+                vec![until_fixed.clone()],
+                true,
+            ),
+            policy(
+                vec![shared.clone()],
+                vec![until_fixed.clone(), other_fix.clone()],
+                true,
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            batch.failures,
+            json!({
+                "enabled": true,
+                "branch": "main",
+                "failures": [shared],
+                "kept_for_task": [until_fixed, other_fix],
+            })
+        );
+        assert!(batch.fix_run);
     }
 
     /// On the host the replacing command of a snapshot gets what the
@@ -7122,6 +7293,58 @@ mod tests {
         assert_eq!(old_digits, "0002");
         assert_eq!(collision.next_digits, "0003");
         assert_eq!(collision.taken, ["migrations/0002_asks.sql"]);
+    }
+
+    #[test]
+    fn a_batch_member_with_a_migration_collision_takes_ordinary_landing() {
+        let dir = Path::new(DIR);
+        let files = MemoryFiles::default();
+        write_receipt(&files, dir, "passed");
+        let run = run_in(dir, RunStatus::Integrating);
+        let task = task(&[]);
+        let source = sha(HEAD);
+        let prefix = sha(MIGRATION_MAIN);
+        let stacked = sha("4444444444444444444444444444444444444444");
+        let own = "migrations/0002_asks.sql";
+        let taken = "migrations/0002_goals.sql";
+
+        for (repo, can_stack) in [
+            // A free number and a clean merge can share the batch.
+            (renumbering(&[own], &[own], &[own]), true),
+            // These otherwise admissible members would collide with the prefix.
+            (renumbering(&[own], &[own], &[taken, own]), false),
+            (
+                FakeRepository {
+                    contents: vec![("notes.md".into(), "the 0002 migration".into())],
+                    ..renumbering(&[own], &[own, "notes.md"], &[taken, own])
+                },
+                false,
+            ),
+        ] {
+            let repo = FakeRepository {
+                merged_head: Some(stacked.clone()),
+                ..repo
+            };
+            let mut judgment = json!({"verdict": "pass"});
+            binding::put(&mut judgment, &binding::bind(&repo, BASE, HEAD).unwrap());
+            let event = landing_event(event_kind::REVIEW_FINISHED, judgment);
+            assert_eq!(
+                batch::can_verify(
+                    &repo,
+                    &files,
+                    &run,
+                    &task,
+                    &[event],
+                    (&prefix, &source, &stacked)
+                )
+                .unwrap(),
+                can_stack,
+            );
+            assert_eq!(
+                repo.calls.into_inner(),
+                [format!("added_paths {prefix} {stacked}")],
+            );
+        }
     }
 
     #[test]

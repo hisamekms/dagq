@@ -74,6 +74,15 @@ pub(super) enum ReviewRoute {
 pub(super) struct QueuedLanding {
     pub(super) entry: Entry,
     run: TaskRun,
+    followers: Vec<(Entry, TaskRun)>,
+    batched: bool,
+}
+
+impl QueuedLanding {
+    pub(super) fn run_ids(&self) -> impl Iterator<Item = &RunId> {
+        std::iter::once(&self.entry.run_id)
+            .chain(self.followers.iter().map(|(entry, _)| &entry.run_id))
+    }
 }
 
 impl Supervisor<'_> {
@@ -171,7 +180,8 @@ impl Supervisor<'_> {
         run: TaskRun,
         previous: RunStatus,
         main: CommitSha,
-    ) -> Result<thread::JoinHandle<Result<IntegrationOutcome>>> {
+        batch: Option<integration::batch::Batch>,
+    ) -> Result<LandingJob> {
         const CALLER: &str = "landing.spawn_landing";
         let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         // The verification is the run's executor too (ADR-t1662-3 decision
@@ -233,7 +243,11 @@ impl Supervisor<'_> {
             0,
             "integrate",
         ));
-        Ok(spawn_traced(move || {
+        let followers = batch
+            .iter()
+            .flat_map(|batch| batch.followers.iter().map(|run| run.id().clone()))
+            .collect();
+        let handle = spawn_traced(move || {
             const CALLER: &str = "landing.integrate";
             let _caller = crate::application::supervisor_service::caller::scope(CALLER);
             let mut queue = queues.open()?;
@@ -250,53 +264,55 @@ impl Supervisor<'_> {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone()
             };
-            integrator.land(
-                &mut Integration {
-                    queue: &mut *queue,
-                    repository: &*repository,
-                    verifier: &*verifier,
-                    container: &*container,
-                    remote: push.then_some(&*remote as &dyn MainRemote),
-                    files: &*files,
-                    common_dir: &common_dir,
-                    clock: &*generators.clock,
-                    ids: &*generators.ids,
-                    processes: &*processes,
-                    pid,
-                    load_average,
-                    disk: None,
-                    retry_disk: Some(integration::RetryDisk {
-                        config: disk.config,
-                        free: &free,
-                        total,
-                        moving: Some(&moving),
-                        decision: Some(&decision),
-                    }),
-                    sccache: sccache.as_ref().map(|SccachePort(server)| {
-                        &**server as &dyn crate::application::SccacheServer
-                    }),
-                    verification_tokens: &*verification_tokens,
-                    verification_containers: &*verification_containers,
-                    heavy_turn: Some(heavy_turn),
-                    steps,
-                    handing_off: Some(integration::HandoffDrain {
-                        handing_off: &handing_off,
-                        stop: &stop,
-                    }),
-                    programs: Some(integration::LandingPrograms {
-                        backends: crate::application::review_programs::ProgramBackends::new(
-                            &*program_host.host,
-                            program_config,
-                        ),
-                        spawner: &*program_host.spawner,
-                        scratch: &program_scratch,
-                        timeout: program_timeout,
-                    }),
-                    build: &build,
-                },
-                &request,
-            )
-        }))
+            let mut ctx = Integration {
+                queue: &mut *queue,
+                repository: &*repository,
+                verifier: &*verifier,
+                container: &*container,
+                remote: push.then_some(&*remote as &dyn MainRemote),
+                files: &*files,
+                common_dir: &common_dir,
+                clock: &*generators.clock,
+                ids: &*generators.ids,
+                processes: &*processes,
+                pid,
+                load_average,
+                disk: None,
+                retry_disk: Some(integration::RetryDisk {
+                    config: disk.config,
+                    free: &free,
+                    total,
+                    moving: Some(&moving),
+                    decision: Some(&decision),
+                }),
+                sccache: sccache
+                    .as_ref()
+                    .map(|SccachePort(server)| &**server as &dyn crate::application::SccacheServer),
+                verification_tokens: &*verification_tokens,
+                verification_containers: &*verification_containers,
+                heavy_turn: Some(heavy_turn),
+                steps,
+                handing_off: Some(integration::HandoffDrain {
+                    handing_off: &handing_off,
+                    stop: &stop,
+                }),
+                programs: Some(integration::LandingPrograms {
+                    backends: crate::application::review_programs::ProgramBackends::new(
+                        &*program_host.host,
+                        program_config,
+                    ),
+                    spawner: &*program_host.spawner,
+                    scratch: &program_scratch,
+                    timeout: program_timeout,
+                }),
+                build: &build,
+            };
+            match batch {
+                Some(batch) => integrator.land_batch(&mut ctx, &request, batch, &*remote),
+                None => integrator.land(&mut ctx, &request),
+            }
+        });
+        Ok(LandingJob { handle, followers })
     }
     /// Review an accepted run whose session stays open (ADR-0027 decision
     /// 1): first its program reviews ([`Self::start_review_programs`]),
@@ -3203,7 +3219,7 @@ impl Supervisor<'_> {
         })
     }
 
-    /// Start the first independently runnable landing in the domain queue.
+    /// Start the selected landing or batch in the domain queue.
     /// All authorizations share effective-priority/time order, including
     /// drain and handoff. Leased runs remain their owner's responsibility.
     /// E2e takes a worker lease first; after e2e its owner returns it to
@@ -3316,14 +3332,15 @@ impl Supervisor<'_> {
                     && (!drain_may_adopt || history.recovered_landing().is_some()),
                 ..self.landing_readiness(&run, &history)?
             };
-            candidates.insert(run.id().clone(), (run, resources, facts));
+            let needs_e2e = crate::domain::run_e2e::required(&events);
+            candidates.insert(run.id().clone(), (run, resources, facts, needs_e2e));
             entries.push(entry);
         }
         drop(guard);
         self.claim.slots.set_unleased_landing_waits(
             candidates
                 .values()
-                .filter(|(_, resources, progress)| {
+                .filter(|(_, resources, progress, _)| {
                     resources.counts_toward_backpressure() && progress.can_progress()
                 })
                 .count(),
@@ -3336,17 +3353,27 @@ impl Supervisor<'_> {
                 && self.take_check_turn("landing queue")?.is_none(),
             worker_full: !self.claim.slots.queued_e2e_has_room(parallel),
         };
-        // The queue chooses the first eligible entry. Admission applies
-        // the shared landing gates to that selection.
-        let next = queued.select(
+        // The queue chooses the eligible prefix. Admission uses the
+        // leading entry's priority and worker needs for the landing turn.
+        if queued.entries.is_empty() {
+            return Ok(None);
+        }
+        let limit = self.verifier.landing_batch_size()?;
+        let selected_entries = crate::domain::landing_batch::select(
+            &queued,
             Capacity {
                 worker_full: capacity.worker_full,
                 ..Capacity::default()
             },
+            limit,
+            |entry| candidates[&entry.run_id].3 || entry.e2e,
             |entry| candidates[&entry.run_id].1,
         );
         let starts = admission::admit(
-            next.into_iter()
+            selected_entries
+                .first()
+                .copied()
+                .into_iter()
                 .map(|entry| admission::Candidate {
                     item: entry,
                     kind: admission::Kind::Landing {
@@ -3379,8 +3406,22 @@ impl Supervisor<'_> {
         }
         Ok(starts.starts.into_iter().next().map(|candidate| {
             let entry = candidate.item.clone();
-            let (run, _, _) = candidates.remove(&entry.run_id).expect("queue candidate");
-            QueuedLanding { entry, run }
+            let (run, _, _, needs_e2e) = candidates.remove(&entry.run_id).expect("queue candidate");
+            let batched = limit.get() > 1 && !needs_e2e && !entry.e2e;
+            let followers = selected_entries
+                .into_iter()
+                .skip(1)
+                .map(|entry| {
+                    let (run, _, _, _) = candidates.remove(&entry.run_id).expect("queue candidate");
+                    (entry.clone(), run)
+                })
+                .collect();
+            QueuedLanding {
+                entry,
+                run,
+                followers,
+                batched,
+            }
         }))
     }
 
@@ -3408,7 +3449,12 @@ impl Supervisor<'_> {
     }
 
     pub(super) fn start_queued_landing(&mut self, landing: QueuedLanding) -> Result<bool> {
-        let QueuedLanding { entry, run } = landing;
+        let QueuedLanding {
+            entry,
+            run,
+            followers: selected_followers,
+            batched,
+        } = landing;
         let entry = &entry;
         self.record_landing_queue_wait(entry, None)?;
         let kind = admission::Kind::Landing {
@@ -3466,30 +3512,69 @@ impl Supervisor<'_> {
         if !self.landing_still_admitted(&run, entry, kind)? {
             return Ok(false);
         }
-        let starting = self.begin_landing(run.id(), &main);
-        drop(turn);
-        let landing = match starting {
+        let directory = self.landing_batch_dir()?;
+        let Some(batch_lock) = integration::batch::lock(&*self.files, &directory)? else {
+            return Ok(false);
+        };
+        let mut followers = Vec::new();
+        let leased = (|| {
+            for (follower, run) in &selected_followers {
+                if !guard.may_lease(run.id())
+                    || self.park_queued_by_recheck(run, &main)?.is_some()
+                    || !self.landing_still_admitted(run, follower, kind)?
+                {
+                    break;
+                }
+                let Some(leased) = self
+                    .queue
+                    .lease_for_landing_batch(run.id(), self.registration.token())?
+                else {
+                    break;
+                };
+                followers.push(leased);
+            }
+            self.begin_landing(run.id(), &main)
+        })();
+        let landing = match leased {
             Ok(landing) => landing,
-            // A handoff asked since this pass read none at its start: the
-            // same write refused the landing (ADR-t3077-1 decision 1), and
-            // the run stays queued for the next process.
-            Err(error)
+            Err(error) => {
+                for follower in &followers {
+                    self.queue
+                        .release_lease(follower.id(), self.registration.token())?;
+                }
                 if error
                     .downcast_ref::<crate::application::HandoffAsked>()
-                    .is_some() =>
-            {
-                info!(run_id = %run.id(), "run {} does not land as queued: its supervisor was asked to hand off", run.id());
-                return Ok(false);
+                    .is_some()
+                {
+                    info!(run_id = %run.id(), "run {} does not land as queued: its supervisor was asked to hand off", run.id());
+                    return Ok(false);
+                }
+                return Err(error);
             }
-            Err(error) => return Err(error),
+        };
+        let over_handoff = !handoff::handoff_refuses_starts(self.registration.stopping());
+        let batch = if !batched {
+            drop((turn, batch_lock));
+            None
+        } else {
+            for _ in &followers {
+                self.claim.slots.remove_unleased_landing_wait();
+            }
+            Some(integration::batch::Batch {
+                followers,
+                directory,
+                turn,
+                lock: batch_lock,
+                over_handoff,
+            })
         };
         drop(guard);
         self.landing.pending_landings.remove(run.id());
         self.claim.slots.remove_unleased_landing_wait();
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
-        let handle = self.spawn_landing(landing.clone(), run.status(), main)?;
+        let job = self.spawn_landing(landing.clone(), run.status(), main, batch)?;
         self.claim.slots.admit_noting(
-            Slot::new(landing, Phase::Landing(Some(handle))),
+            Slot::new(landing, Phase::Landing(Some(job))),
             EventKind::IntegrationStarted.as_str(),
             &*self.queue,
         );
@@ -3543,6 +3628,15 @@ impl Supervisor<'_> {
             self.queue.begin_integration_over_handoff(id, &token, main)
         }
     }
+    pub(super) fn landing_batch_dir(&self) -> Result<PathBuf> {
+        Ok(self
+            .layout
+            .db
+            .parent()
+            .context("queue database has no directory")?
+            .join("landing-batch"))
+    }
+
     /// The turn of the landing check `check` (a landing's verification or
     /// the landing recheck) among the host's heavy jobs (ADR-t2719-1), held
     /// shared until it drops; `None` while the automatic update's job, of

@@ -9,7 +9,7 @@
 //! which is the same for every language (ADR-t2268-1). The release of a
 //! dead landing waits as long ([`super::landing_release::grace_secs`]).
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 /// The table of `dagq.toml` that declares the limit.
 ///
@@ -23,7 +23,10 @@ pub const TABLE: &str = "verification";
 pub const COMMAND_TIMEOUT_SECS: &str = "command_timeout_secs";
 
 /// The keys [`TABLE`] takes.
-pub const KEYS: [&str; 1] = [COMMAND_TIMEOUT_SECS];
+pub const KEYS: [&str; 2] = [COMMAND_TIMEOUT_SECS, LANDING_BATCH_SIZE];
+
+/// The key of [`VerificationConfig::landing_batch_size`].
+pub const LANDING_BATCH_SIZE: &str = "landing_batch_size";
 
 /// The limit without a declaration: an hour, about twice a full run of a
 /// large project's tests with room for a loaded host, while a timed-out
@@ -36,7 +39,7 @@ pub const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60 * 60;
 pub const MAX_COMMAND_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// `[verification]` of `dagq.toml`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerificationConfig {
     /// `command_timeout_secs`: the limit of one verification command, in
     /// whole seconds above 0 and at most [`MAX_COMMAND_TIMEOUT_SECS`]
@@ -44,6 +47,18 @@ pub struct VerificationConfig {
     /// `dagq.toml`). `None` (no key, no table) leaves the runtime's limit:
     /// [`DEFAULT_COMMAND_TIMEOUT_SECS`], or a shorter one tests set.
     pub command_timeout_secs: Option<u64>,
+    /// `landing_batch_size` caps the immediately available landing
+    /// prefix. The default of one preserves per-run verification.
+    pub landing_batch_size: NonZeroUsize,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            command_timeout_secs: None,
+            landing_batch_size: NonZeroUsize::MIN,
+        }
+    }
 }
 
 impl VerificationConfig {
@@ -82,10 +97,12 @@ mod tests {
         );
         let declared = VerificationConfig {
             command_timeout_secs: Some(5400),
+            ..Default::default()
         };
         assert_eq!(declared.command_timeout(default), Duration::from_secs(5400));
         let short = VerificationConfig {
             command_timeout_secs: Some(1),
+            ..Default::default()
         };
         assert_eq!(short.command_timeout(default), Duration::from_secs(1));
     }

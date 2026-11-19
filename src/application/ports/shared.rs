@@ -875,6 +875,11 @@ pub trait EventStore {
     ) -> Option<crate::domain::actor::ActorContext> {
         None
     }
+    /// Restore the supervisor while a batch member retains its slot and
+    /// its integrator credential for the next stage.
+    fn pause_integration_actor(&self, actor: crate::domain::actor::ActorContext) {
+        self.act_as(actor);
+    }
 }
 
 /// The StateStore of ADR-t1662-2: the current state of the tasks and

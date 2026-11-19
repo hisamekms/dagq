@@ -96,6 +96,13 @@ impl SlotTable {
         self.slots.iter().any(|slot| slot.run.id() == id)
     }
 
+    /// Whether a landing job still owns this follower on behalf of its slot.
+    pub(super) fn batch_owns(&self, id: &RunId) -> bool {
+        self.slots.iter().any(
+            |slot| matches!(&slot.phase, Phase::Landing(Some(job)) if job.followers.contains(id)),
+        )
+    }
+
     /// Take the slot of the run `id` out, if one holds it.
     pub(super) fn take(&mut self, id: &RunId) -> Option<Slot> {
         let index = self.slots.iter().position(|slot| slot.run.id() == id)?;
@@ -119,11 +126,11 @@ impl SlotTable {
         light_slots::worker_slots(self.active_workers(), self.queued_landings(), parallel)
     }
 
-    /// Whether claiming has worker room after the selected entry leaves for landing.
-    pub(super) fn projected_landing_room(&self, parallel: usize) -> bool {
+    /// Whether claiming has worker room once the selected landings leave the queue.
+    pub(super) fn projected_landing_room(&self, parallel: usize, selected: usize) -> bool {
         light_slots::worker_slots(
             self.active_workers(),
-            self.queued_landings().saturating_sub(1),
+            self.queued_landings().saturating_sub(selected),
             parallel,
         ) < parallel
     }

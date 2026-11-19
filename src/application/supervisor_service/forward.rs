@@ -1577,6 +1577,16 @@ impl RunRecovery for SupervisorQueue {
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         self.remote("lease_for_e2e", vec![to_value(id)?, to_value(token)?])
     }
+    fn lease_for_landing_batch(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        self.remote(
+            "lease_for_landing_batch",
+            vec![to_value(id)?, to_value(token)?],
+        )
+    }
     fn lease_stranded_landing(
         &mut self,
         id: &RunId,
@@ -2450,6 +2460,10 @@ impl EventStore for SupervisorQueue {
     }
     fn act_as(&self, actor: ActorContext) -> Option<ActorContext> {
         self.write_as(actor)
+    }
+    fn pause_integration_actor(&self, _: ActorContext) {
+        self.integrator.take();
+        self.tokenless.set(false);
     }
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         self.remote("update_events", vec![to_value(limit)?])

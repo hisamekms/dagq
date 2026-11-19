@@ -1,0 +1,6 @@
+[[boundary]]
+id = "landing-batch-verifies-stacked-runs-once-and-bisects-to-the-breaking-run"
+kind = "Git"
+test = "runtime_integrate::a_batch_that_fails_only_when_stacked_lands_the_first_run_and_sends_back_the_one_that_breaks_it"
+reason = "未着地の複数のrunを実のGitで積んだ木でだけコマンドが落ちる境界を確かめる。着地済みの変更への一本ずつのrebaseを扱う既存の代表では共同検証の木を作れない"
+task = 5286

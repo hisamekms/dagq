@@ -1,8 +1,8 @@
-//! The landing recheck (ADR-0068): after this supervisor lands a run, or
-//! whenever main differs from the main the last recheck finished against
-//! (a direct `integrate`, a landing before a handoff or a restart, a push
-//! outside dagq; ADR-t1310-1), the runs that wait to land are checked
-//! against the new main off the loop,
+//! The landing recheck (ADR-0068) checks the remaining waiting runs once
+//! against the latest main after a batch finishes (ADR-t5283-3).
+//! It also checks when main differs from the main the last recheck
+//! finished against (a direct `integrate`, a landing before a handoff or
+//! a restart, a push outside dagq; ADR-t1310-1). It checks off the loop,
 //! one recheck at a time: `git merge-tree` for a conflict, then the
 //! `[recheck] command` of `dagq.toml` on main's tree with the run merged
 //! in, in one scratch worktree of the queue's with the build output of
@@ -690,6 +690,12 @@ impl Supervisor<'_> {
         let Some(lock) = self.files.try_lock(&dir.join(RECHECK_LOCK))? else {
             return Ok(Start::Later { locked_out: true });
         };
+        // A batch can briefly have no integrating member between
+        // publications. Its lock still fences this recheck.
+        let directory = self.landing_batch_dir()?;
+        let Some(batch_probe) = integration::batch::lock(&*self.files, &directory)? else {
+            return Ok(Start::Later { locked_out: false });
+        };
         // A landing in progress, this supervisor's or a direct
         // `integrate`'s, may have moved main before its `run_integrated`:
         // looked at once it ended, so the recheck names it.
@@ -731,7 +737,11 @@ impl Supervisor<'_> {
             self.landing.rechecks.remember_idle(main, seen, release);
             return Ok(Start::Nothing);
         }
+        if self.repository.main_head()? != main {
+            return Ok(Start::Later { locked_out: false });
+        }
         let landed = self.landing_at(&main)?;
+        drop(batch_probe);
         self.start(landed, main, targets, config, Box::new((lock, turn)))?;
         Ok(Start::Started)
     }

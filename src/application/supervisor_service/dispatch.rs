@@ -682,6 +682,15 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             own(&token)?;
             answer(RunRecovery::lease_for_e2e(&mut *store, &id, &token))
         }
+        "lease_for_landing_batch" => {
+            let (id, token): (RunId, LeaseToken) = read(op, args)?;
+            own(&token)?;
+            answer(RunRecovery::lease_for_landing_batch(
+                &mut *store,
+                &id,
+                &token,
+            ))
+        }
         "lease_stranded_landing" => {
             let (id, token): (RunId, LeaseToken) = read(op, args)?;
             own(&token)?;

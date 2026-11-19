@@ -196,6 +196,7 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             // No landing was rechecked yet (ADR-0068 decision 6).
             expected["landing_recheck"] = serde_json::Value::Null;
             expected["landing_queue"] = serde_json::json!([]);
+            expected["landing_batch"] = serde_json::Value::Null;
             // No run waits for a person (ADR-0062 decision 12).
             expected["waiting"] = serde_json::json!([]);
             // No claim is deferred on a conflict hotspot (ADR-0069).

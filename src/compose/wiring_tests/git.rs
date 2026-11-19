@@ -96,6 +96,11 @@ struct State {
     /// one named conflicts on, once ([`FakeGit::conflict_once_main_moves`]).
     conflict_next_merge: Option<(Vec<String>, CommitSha)>,
     merge_clean: bool,
+    /// Tree identities for a fake that exercises stacked landings.
+    batch_trees: Option<HashMap<String, String>>,
+    /// A member that conflicts with a particular tree, whether the tree
+    /// is still in the stack or already published as a squash.
+    stack_conflict: Option<(String, CommitSha, String)>,
     /// The result of combining an unmodified run with another main. The
     /// fake has no per-commit trees, so it remembers the made commit.
     clean_rebases: HashMap<(String, String), CommitSha>,
@@ -163,6 +168,8 @@ impl FakeGit {
                 refs: HashMap::new(),
                 conflict_next_merge: None,
                 merge_clean: false,
+                batch_trees: None,
+                stack_conflict: None,
                 clean_rebases: HashMap::new(),
                 conflict_next_rebase: None,
                 conflicted: Vec::new(),
@@ -183,6 +190,15 @@ impl FakeGit {
 
     pub(super) fn allow_clean_merges(&self) {
         self.lock().merge_clean = true;
+    }
+
+    pub(super) fn model_batch_trees(&self) {
+        self.lock().batch_trees = Some(HashMap::new());
+    }
+
+    pub(super) fn conflict_with_prefix(&self, prefix: &CommitSha, member: CommitSha, path: &str) {
+        let mut state = self.lock();
+        state.stack_conflict = Some((state.tree_label(prefix.as_str()), member, path.to_owned()));
     }
 
     /// Every commit holds `files` (path and text), and every range
@@ -406,6 +422,22 @@ impl State {
         self.parents.keys().any(|known| known.as_str() == commit)
     }
 
+    fn tree_label(&self, commit: &str) -> String {
+        self.batch_trees
+            .as_ref()
+            .and_then(|trees| trees.get(commit))
+            .cloned()
+            .unwrap_or_else(|| format!("tree of {commit}"))
+    }
+
+    fn merged_tree_label(&self, base: &str, source: &str) -> String {
+        format!(
+            "merge of {} with {}",
+            self.tree_label(base),
+            self.tree_label(source)
+        )
+    }
+
     /// `commit` and its ancestors, nearest first; empty for a commit not
     /// made.
     fn line(&self, commit: &str) -> Vec<CommitSha> {
@@ -625,6 +657,11 @@ impl Repository for FakeGit {
                 .clean_rebases
                 .insert((onto.to_string(), at.head.to_string()), head.clone());
         }
+        let batch_tree =
+            (at.base != onto).then(|| state.merged_tree_label(onto.as_str(), at.head.as_str()));
+        if let (Some(tree), Some(trees)) = (batch_tree, &mut state.batch_trees) {
+            trees.insert(head.to_string(), tree);
+        }
         let moved = state
             .worktrees
             .get_mut(worktree)
@@ -734,16 +771,20 @@ impl Repository for FakeGit {
     }
 
     fn tree_of(&self, commit: &str) -> Result<String> {
-        ensure!(self.known(commit), "no commit {commit}");
-        Ok(format!("tree of {commit}"))
+        let state = self.lock();
+        ensure!(state.known(commit), "no commit {commit}");
+        Ok(state.tree_label(commit))
     }
 
-    /// A new commit on `parent`: a commit holds no tree to tell apart.
-    fn commit_tree(&self, _: &str, parent: &str, _: &[String]) -> Result<CommitSha> {
+    fn commit_tree(&self, tree: &str, parent: &str, _: &[String]) -> Result<CommitSha> {
         let mut state = self.lock();
         ensure!(state.known(parent), "no commit {parent}");
         let parent = CommitSha::parse(parent, "commit")?;
-        Ok(state.make(Some(parent)))
+        let commit = state.make(Some(parent));
+        if let Some(trees) = &mut state.batch_trees {
+            trees.insert(commit.to_string(), tree.to_owned());
+        }
+        Ok(commit)
     }
 
     fn update_ref(&self, name: &str, value: &str) -> Result<()> {
@@ -868,18 +909,36 @@ impl Repository for FakeGit {
         Ok(Box::new(self.clone()))
     }
 
-    /// The requested conflict once main moves, or a clean merge when the
-    /// test enabled it; otherwise this fake cannot merge a tree.
+    /// A conflict set by the test, or a clean merge when the test enabled
+    /// it; otherwise this fake cannot merge a tree.
     fn merged_tree(
         &self,
         main: &str,
         head: &str,
     ) -> Result<std::result::Result<String, Vec<String>>> {
         let mut state = self.lock();
+        if let Some((tree, member, path)) = &state.stack_conflict
+            && member.as_str() == head
+            && *tree == state.tree_label(main)
+        {
+            return Ok(Err(vec![path.clone()]));
+        }
         match state.conflict_next_merge.take() {
             Some((paths, before)) if before.as_str() != main => Ok(Err(paths)),
             unmoved => {
                 state.conflict_next_merge = unmoved;
+                if state.batch_trees.is_some() {
+                    let tree = if state
+                        .line(head)
+                        .iter()
+                        .any(|ancestor| ancestor.as_str() == main)
+                    {
+                        state.tree_label(head)
+                    } else {
+                        state.merged_tree_label(main, head)
+                    };
+                    return Ok(Ok(tree));
+                }
                 if let Some(rebased) = state.clean_rebases.get(&(main.to_owned(), head.to_owned()))
                 {
                     Ok(Ok(format!("tree of {rebased}")))

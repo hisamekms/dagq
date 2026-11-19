@@ -368,6 +368,14 @@ impl Verifier for FakeVerifier {
         Ok(crate::infrastructure::run_env::parse_config(&self.config.lock().unwrap())?.recheck)
     }
 
+    fn landing_batch_size(&self) -> Result<std::num::NonZeroUsize> {
+        Ok(
+            crate::infrastructure::run_env::parse_config(&self.config.lock().unwrap())?
+                .verification
+                .landing_batch_size,
+        )
+    }
+
     fn landing_verification(
         &self,
     ) -> Result<Option<crate::domain::landing_verification::LandingVerification>> {

@@ -12,11 +12,13 @@
 //! supervisor reconciles the runs its registration leases with its slots
 //! ([`plan`]): a run in no slot is taken back into one ([`orphan`]), and a
 //! slot whose step the service did not answer is judged by what that step
-//! may have done ([`Doubt`]). A request that no connection took, and a
-//! read, did nothing, so a step that tried no write and failed on one
-//! changed nothing on the queue: a slot holding work in flight (an e2e,
-//! a validation, a verification, a landing, a review's or a recovery's
-//! job, [`Phase::holds_work`]) is kept as it was, and its step looks at the
+//! may have done ([`Doubt`]). A landing job's follower leases belong to
+//! its slot until it is joined. The next reconciliation can take back any
+//! follower still leased if the job could not release it. A request that
+//! no connection took, and a read, did nothing. If a step tried no writes
+//! and failed on such a request, a slot holding work in flight (an e2e,
+//! a validation, a verification, a landing, a review's or a recovery's job,
+//! [`Phase::holds_work`]) is kept as it was, and its step looks at the
 //! work again, whose start and result stay this slot's. Any other slot in
 //! doubt is never stepped again: its step may have changed the slot before
 //! the call that went unanswered (taken the session of an `/exit` and
@@ -213,7 +215,11 @@ impl Supervisor<'_> {
             }
         }
         let own = self.queue.runs_leased_by(self.registration.token())?;
-        let owned: Vec<RunId> = own.iter().map(|run| run.id().clone()).collect();
+        let owned: Vec<RunId> = own
+            .iter()
+            .filter(|run| !self.claim.slots.batch_owns(run.id()))
+            .map(|run| run.id().clone())
+            .collect();
         let working: Vec<RunId> = self
             .claim
             .slots

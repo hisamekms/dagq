@@ -69,7 +69,7 @@ impl Slot {
     /// Whether this slot's landing runs on: one that ended and is not
     /// joined yet runs no more.
     pub(super) fn landing_runs(&self) -> bool {
-        matches!(&self.phase, Phase::Landing(Some(handle)) if !handle.is_finished())
+        matches!(&self.phase, Phase::Landing(Some(job)) if !job.handle.is_finished())
     }
 }
 

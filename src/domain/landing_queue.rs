@@ -435,6 +435,8 @@ impl LandingQueue {
 
     /// First independently runnable entry in priority/time order. A
     /// skipped entry retains its original queue position and timestamp.
+    /// For a batch, [`super::landing_batch::select`] takes up to the limit
+    /// from the runnable prefix when the turn opens.
     pub fn select(
         &self,
         capacity: Capacity,

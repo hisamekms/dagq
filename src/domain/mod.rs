@@ -1297,6 +1297,7 @@ pub mod interned;
 pub mod investigation;
 pub mod kpi;
 pub mod landing_approval;
+pub mod landing_batch;
 pub mod landing_binding;
 pub mod landing_branch;
 pub mod landing_hold;

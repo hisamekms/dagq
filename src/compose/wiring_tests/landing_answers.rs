@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     application::TaskReads,
-    domain::{Ask, AskId, AskKind, RunStatus, TaskDetail, TaskId, TaskStatus},
+    domain::{Ask, AskId, AskKind, RunId, RunStatus, TaskDetail, TaskId, TaskStatus},
     infrastructure::sqlite::SqliteQueue,
 };
 
@@ -306,6 +306,776 @@ fn a_land_answer_waits_unleased_and_does_not_hold_worker_claims_behind_a_landing
         measured.load(std::sync::atomic::Ordering::SeqCst),
         "the unleased run queued by land was measured"
     );
+}
+
+const JOINT_CHECK: &str = "check-stacked-tree";
+
+fn approved_batch(name: &str) -> (Wiring, [(TaskId, RunId); 2]) {
+    approved_batch_with_commands(name, [&[JOINT_CHECK]; 2])
+}
+
+fn approved_batch_with_commands(
+    name: &str,
+    commands: [&[&str]; 2],
+) -> (Wiring, [(TaskId, RunId); 2]) {
+    use crate::domain::Priority;
+    use std::time::Duration;
+
+    let wiring = Wiring::new(
+        name,
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    )
+    .with_tick(Duration::from_millis(1));
+    wiring
+        .verifier
+        .set_config("[verification]\nlanding_batch_size = 2\n");
+    wiring.git.model_batch_trees();
+    let mut queue = wiring.queue();
+    let members = [
+        (Priority::High, commands[0]),
+        (Priority::Normal, commands[1]),
+    ]
+    .map(|(priority, commands)| approved_batch_member(&wiring, &mut queue, priority, commands));
+    (wiring, members)
+}
+
+fn approved_batch_member(
+    wiring: &Wiring,
+    queue: &mut SqliteQueue,
+    priority: crate::domain::Priority,
+    commands: &[&str],
+) -> (TaskId, RunId) {
+    use crate::{application::integrate::binding, domain::EventKind};
+    use std::path::Path;
+
+    let run = direct_landing_fixture_with_commands(
+        wiring,
+        queue,
+        priority,
+        RunStatus::AwaitingIntegration,
+        commands,
+    );
+    let receipt = succeeded_at_the_head(
+        run.id(),
+        Path::new(run.worktree_path().unwrap()),
+        &wiring.git,
+    )
+    .unwrap();
+    wiring.files.put(
+        Path::new(run.receipt_path().unwrap()),
+        std::time::SystemTime::UNIX_EPOCH,
+        &receipt.to_string(),
+    );
+    let facts = binding::bind(
+        &wiring.git,
+        run.base_commit().as_str(),
+        run.result_commit().unwrap().as_str(),
+    )
+    .unwrap();
+    let mut judgment = json!({"verdict": "pass"});
+    binding::put(&mut judgment, &facts);
+    queue
+        .record_runtime_event(run.id(), EventKind::ReviewFinished, judgment)
+        .unwrap();
+    queue
+        .record_runtime_event(run.id(), EventKind::LandingQueued, json!({"via": "exit"}))
+        .unwrap();
+    (run.task_id(), run.id().clone())
+}
+
+#[test]
+fn a_passing_batch_publishes_both_squashes_in_order_after_one_check() {
+    use crate::domain::{
+        ci_watch::FINDING_KIND,
+        finding::{FindingStatus, FindingTarget, NewFinding},
+        landing_verification::FIX_RUN_ENV,
+    };
+
+    let (wiring, [(first, _), (second, _)]) = approved_batch_with_commands(
+        "a_passing_batch_publishes_both_squashes_in_order_after_one_check",
+        [&[JOINT_CHECK], &[]],
+    );
+    wiring.verifier.set_config(&format!(
+        "[verification]\nlanding_batch_size = 2\n[landing_verification]\nreplaces = ['{JOINT_CHECK}']\ncommand = 'shared-gate'\n"
+    ));
+    let mut queue = wiring.queue();
+    let finding = queue
+        .record_finding(NewFinding {
+            kind: FINDING_KIND.to_owned(),
+            target: FindingTarget::Queue,
+            subject: "existing CI failure".to_owned(),
+            summary: "the second member fixes this failure".to_owned(),
+            detail: None,
+            impact: None,
+            evidence: vec![],
+            propose: None,
+            by: "human".to_owned(),
+        })
+        .unwrap();
+    queue
+        .set_finding_status_covered(
+            finding.finding.id,
+            FindingStatus::Dismissed,
+            "covered by the second member",
+            "human",
+            Some(second),
+        )
+        .unwrap();
+    wiring.supervise_once();
+    let first_run = queue.show(first).unwrap().runs[0].clone();
+    let second_run = queue.show(second).unwrap().runs[0].clone();
+    assert_eq!(first_run.status(), RunStatus::Integrated);
+    assert_eq!(second_run.status(), RunStatus::Integrated);
+    assert_ne!(first_run.result_commit(), second_run.result_commit());
+    assert!(
+        first_event(&mut queue, first, "run_integrated")
+            < first_event(&mut queue, second, "run_integrated")
+    );
+    assert_eq!(wiring.verifier.ran().len(), 1);
+    let environments = wiring.verifier.environments.lock().unwrap();
+    assert!(environments.iter().any(|(command, env)| {
+        command == "shared-gate"
+            && env
+                .iter()
+                .any(|(key, value)| key == FIX_RUN_ENV && value == "1")
+    }));
+}
+
+#[test]
+fn a_batch_and_claim_can_start_in_the_same_admission_pass() {
+    use crate::{
+        application::supervise::PausePoint,
+        domain::{
+            Priority,
+            disk::{DiskConfig, DiskEstimate},
+        },
+    };
+    use std::sync::{Arc, atomic::Ordering};
+
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("a_batch_and_claim_can_start_in_the_same_admission_pass");
+    let gib = 1 << 30;
+    let wiring = wiring.with_parallel(1).with_disk(DiskConfig {
+        estimate: DiskEstimate::Fixed,
+        run_size: Some(20 * gib),
+        landing_size: Some(20 * gib),
+        ..DiskConfig::default()
+    });
+    let mut queue = wiring.queue();
+    let (third, _) = approved_batch_member(&wiring, &mut queue, Priority::Low, &[JOINT_CHECK]);
+    let claim = wiring.ready_task(&["true"]);
+    wiring.fail_claim_launches(true);
+    let free = wiring.free.clone();
+    free.store(45 * gib, Ordering::SeqCst);
+    let wiring = wiring.with_pauses(Arc::new(move |point, _| {
+        if point == PausePoint::LandingStart {
+            // A claim can use the current pass's budget. The following
+            // pass will have no disk room for it.
+            free.store(0, Ordering::SeqCst);
+        }
+    }));
+
+    let outcome = wiring.supervise_once_reporting();
+    assert!(
+        outcome["errors"]
+            .to_string()
+            .contains("refuses to start the wrapper"),
+        "{outcome}"
+    );
+    let first_detail = queue.show(first).unwrap();
+    let second_detail = queue.show(second).unwrap();
+    assert_eq!(first_detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(second_detail.runs[0].status(), RunStatus::Integrated);
+    let progress = payloads(&first_detail, "landing_batch_progress");
+    assert_eq!(progress[0]["runs"], json!([first_run, second_run]));
+    assert_eq!(wiring.verifier.ran().len(), 1);
+    assert!(payloads(&queue.show(third).unwrap(), "integration_started").is_empty());
+    assert_eq!(
+        payloads(&queue.show(claim).unwrap(), "run_claimed").len(),
+        1
+    );
+    assert!(
+        first_event(&mut queue, first, "integration_started")
+            < first_event(&mut queue, claim, "run_claimed")
+    );
+}
+
+/// Run a hook once the service commits a member's landing, before it
+/// returns the answer to the landing thread.
+fn after_landing_recorded(wiring: Wiring, run: RunId, hook: super::host::Hook) -> Wiring {
+    let hook = std::sync::Mutex::new(Some(hook));
+    with_queue_service_call(wiring, move |inner, case, params| {
+        let landed = params["op"] == "finish_integration" && params["args"][0] == run.as_str();
+        let result = inner.call(case, params)?;
+        if landed {
+            let hook = hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        Ok(result)
+    })
+}
+
+fn with_queue_service_call(
+    wiring: Wiring,
+    call: impl Fn(
+        &dyn crate::application::supervisor_service::ServiceCaller,
+        crate::domain::queue_service::UseCase,
+        Value,
+    ) -> anyhow::Result<Value>
+    + Send
+    + Sync
+    + 'static,
+) -> Wiring {
+    use crate::{
+        application::supervisor_service::ServiceCaller,
+        domain::{LeaseToken, queue_service::UseCase},
+    };
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    struct Caller<F> {
+        inner: Arc<dyn ServiceCaller>,
+        call: Arc<F>,
+    }
+
+    impl<F> ServiceCaller for Caller<F>
+    where
+        F: Fn(&dyn ServiceCaller, UseCase, Value) -> anyhow::Result<Value> + Send + Sync + 'static,
+    {
+        fn call(&self, case: UseCase, params: Value) -> anyhow::Result<Value> {
+            (self.call)(&*self.inner, case, params)
+        }
+
+        fn with_token(&self, file: &Path) -> anyhow::Result<Arc<dyn ServiceCaller>> {
+            Ok(Arc::new(Self {
+                inner: self.inner.with_token(file)?,
+                call: self.call.clone(),
+            }))
+        }
+
+        fn sign_in(&self, token: &LeaseToken, pid: u32) -> anyhow::Result<()> {
+            self.inner.sign_in(token, pid)
+        }
+
+        fn take_back(&self, token: &LeaseToken, pid: u32) -> anyhow::Result<()> {
+            self.inner.take_back(token, pid)
+        }
+
+        fn hand_over(&self) {
+            self.inner.hand_over();
+        }
+
+        fn sign_out(&self) {
+            self.inner.sign_out();
+        }
+
+        fn credential(&self) -> Option<PathBuf> {
+            self.inner.credential()
+        }
+    }
+
+    let call = Arc::new(call);
+    wiring.with_service_wrap(Arc::new(move |inner| {
+        Arc::new(Caller {
+            inner,
+            call: call.clone(),
+        })
+    }))
+}
+
+#[test]
+fn an_unanswered_request_between_squashes_leaves_the_follower_with_the_batch() {
+    use crate::application::supervisor_service::ServiceUnreachable;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering::SeqCst},
+    };
+
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("an_unanswered_request_between_squashes_leaves_the_follower_with_the_batch");
+    let original = wiring.git.main();
+    let (release, resume) = mpsc::channel();
+    let (reconciling, reconciliation) = mpsc::channel();
+    let resume = Mutex::new(Some(resume));
+    let reconciling = Mutex::new(Some(reconciling));
+    let first_recorded = AtomicBool::new(false);
+    let lost = AtomicBool::new(false);
+    let wiring = with_queue_service_call(
+        wiring.with_continuous_passes(),
+        move |inner, case, params| {
+            let op = params["op"].as_str();
+            if op == Some("active_runs") && first_recorded.load(SeqCst) && !lost.swap(true, SeqCst)
+            {
+                return Err(ServiceUnreachable::not_done("lost a supervisor pass's read").into());
+            }
+            if op == Some("runs_leased_by")
+                && lost.load(SeqCst)
+                && let Some(reconciling) = reconciling.lock().unwrap().take()
+            {
+                reconciling.send(()).unwrap();
+            }
+            let first_squash =
+                op == Some("finish_integration") && params["args"][0] == first_run.as_str();
+            let result = inner.call(case, params)?;
+            if first_squash {
+                let resume = resume.lock().unwrap().take();
+                if let Some(resume) = resume {
+                    first_recorded.store(true, SeqCst);
+                    resume
+                        .recv_timeout(super::harness::LIMIT)
+                        .expect("observer releases the batch");
+                }
+            }
+            Ok(result)
+        },
+    );
+
+    let mut reconciliation_pass = None;
+    let mut release = Some(release);
+    let mut midpoint = None;
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        if reconciliation_pass.is_none() && reconciliation.try_recv().is_ok() {
+            reconciliation_pass = Some(wiring.passes());
+        }
+        // Let the entire recovery pass step any slot it rebuilt before
+        // allowing the batch to move on to the next squash.
+        if release.is_some() && reconciliation_pass.is_some_and(|pass| wiring.passes() > pass) {
+            let [owner] = queue.supervisors().unwrap().try_into().unwrap();
+            midpoint = Some((
+                queue.show(first).unwrap().runs[0].status(),
+                queue.show(second).unwrap().runs[0].status(),
+                queue.holds_lease(&second_run, &owner.token).unwrap(),
+            ));
+            release.take().unwrap().send(()).unwrap();
+        }
+        if payloads(&queue.show(first).unwrap(), "landing_batch_progress")
+            .iter()
+            .any(|progress| progress["finished"] == true)
+        {
+            stop();
+            return true;
+        }
+        false
+    });
+    assert_eq!(
+        midpoint,
+        Some((RunStatus::Integrated, RunStatus::AwaitingIntegration, true)),
+        "the in-flight batch must keep its follower's lease through reconciliation"
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let mut queue = wiring.queue();
+    let first = queue.show(first).unwrap();
+    let second = queue.show(second).unwrap();
+    assert_eq!(second.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(payloads(&second, "integration_started").len(), 1);
+    assert!(queue.run_lease(&second_run).unwrap().is_none());
+    assert_eq!(
+        wiring.git.main_line(),
+        [
+            original,
+            first.runs[0].result_commit().unwrap().clone(),
+            second.runs[0].result_commit().unwrap().clone(),
+        ]
+    );
+    assert_eq!(wiring.verifier.ran().len(), 1);
+}
+
+#[test]
+fn a_token_sweep_between_a_followers_squash_and_push_keeps_its_integrator() {
+    use crate::{
+        application::{Clock, queue_service::ServiceBackend},
+        domain::queue_service::Principal,
+    };
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering::SeqCst},
+        },
+        time::{Duration, Instant, SystemTime},
+    };
+
+    struct SweepClock {
+        base: Arc<dyn Clock>,
+        due: AtomicBool,
+    }
+
+    impl Clock for SweepClock {
+        fn system_time(&self) -> SystemTime {
+            self.base.system_time()
+        }
+
+        fn monotonic(&self) -> Instant {
+            let now = self.base.monotonic();
+            if self.due.load(SeqCst) {
+                now + Duration::from_secs(61)
+            } else {
+                now
+            }
+        }
+    }
+
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("a_token_sweep_between_a_followers_squash_and_push_keeps_its_integrator");
+    let clock = Arc::new(SweepClock {
+        base: wiring.generators().clock,
+        due: AtomicBool::new(false),
+    });
+    let backend = wiring.service_backend();
+    let stale = Principal::worker(&first_run, first);
+    let (release, resume) = mpsc::channel();
+    let pause = {
+        let clock = clock.clone();
+        let backend = backend.clone();
+        let db = wiring.db.clone();
+        let stale = stale.clone();
+        Box::new(move || {
+            // A leftover token on the already landed leader tells us
+            // when the periodic sweep has actually run.
+            backend.access().issue(&db, &stale).unwrap();
+            clock.due.store(true, SeqCst);
+            resume
+                .recv_timeout(super::harness::LIMIT)
+                .expect("observer releases the second landing");
+        })
+    };
+    let wiring = after_landing_recorded(
+        wiring.with_clock(clock.clone()).with_continuous_passes(),
+        second_run.clone(),
+        pause,
+    );
+
+    let mut release = Some(release);
+    let mut sweep_pass = None;
+    let mut midpoint = None;
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        if release.is_some() && clock.due.load(SeqCst) {
+            let principals = backend.principals().unwrap();
+            if sweep_pass.is_none() && !principals.contains(&stale) {
+                sweep_pass = Some(wiring.passes());
+            }
+            // Wait for the full sweep, including principals visited
+            // after the stale worker, while the follower is paused.
+            if sweep_pass.is_some_and(|pass| wiring.passes() > pass) {
+                let detail = queue.show(second).unwrap();
+                midpoint = Some((
+                    detail.runs[0].status(),
+                    payloads(&detail, "push_finished").len(),
+                    backend
+                        .principals()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.landing_run().as_ref() == Some(&second_run)),
+                ));
+                release.take().unwrap().send(()).unwrap();
+            }
+        }
+        if payloads(&queue.show(first).unwrap(), "landing_batch_progress")
+            .iter()
+            .any(|progress| progress["finished"] == true)
+        {
+            stop();
+            return true;
+        }
+        false
+    });
+    assert_eq!(midpoint, Some((RunStatus::Integrated, 0, true)));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        payloads(&wiring.queue().show(second).unwrap(), "push_finished").len(),
+        1
+    );
+    assert!(
+        backend
+            .principals()
+            .unwrap()
+            .iter()
+            .all(|p| p.landing_run().as_ref() != Some(&second_run))
+    );
+}
+
+#[test]
+fn handoff_after_the_first_squash_leaves_the_following_member_queued() {
+    const NEXT: &str = "/wiring/next/dagq";
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("handoff_after_the_first_squash_leaves_the_following_member_queued");
+    let original = wiring.git.main();
+    let db = wiring.db.clone();
+    let generators = wiring.generators();
+    let wiring = after_landing_recorded(
+        wiring.with_continuous_passes(),
+        first_run.clone(),
+        Box::new(move || {
+            let queue = SqliteQueue::open(&db).unwrap().with_generators(generators);
+            let [registration] = queue.supervisors().unwrap().try_into().unwrap();
+            assert!(queue.request_handoff(&registration.token, NEXT).unwrap());
+        }),
+    );
+    let outcome = wiring.supervise_once_reporting();
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["binary"], NEXT);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let [landed] = outcome["runs"].as_array().unwrap().as_slice() else {
+        panic!("expected one landed run, got {outcome}");
+    };
+    assert_eq!(landed["id"], json!(first_run));
+    assert_eq!(landed["status"], "integrated");
+
+    let mut queue = wiring.queue();
+    let first = queue.show(first).unwrap();
+    let second = queue.show(second).unwrap();
+    assert_eq!(first.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(
+        wiring.git.main_line(),
+        [original, first.runs[0].result_commit().unwrap().clone()]
+    );
+    assert_eq!(second.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(payloads(&second, "integration_started").is_empty());
+    assert!(queue.run_lease(&second_run).unwrap().is_none());
+    let status = wiring.status();
+    assert_eq!(status["landing_queue"][0]["run_id"], json!(second_run));
+    assert_eq!(status["landing_batch"]["finished"], true);
+    assert_eq!(status["landing_batch"]["removed"], json!([]));
+    assert_eq!(wiring.verifier.ran().len(), 1);
+}
+
+#[test]
+fn recheck_waits_between_squashes_and_checks_the_remaining_run_on_final_main() {
+    const RECHECK: &str = "check-waiting-run";
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("recheck_waits_between_squashes_and_checks_the_remaining_run_on_final_main");
+    wiring.verifier.set_config(&format!(
+        "[verification]\nlanding_batch_size = 2\n[recheck]\ncommand = \"{RECHECK}\"\n"
+    ));
+    let (waiting, ask) = reviewed_landing_waiting_for_an_answer(&wiring, &mut wiring.queue());
+    let probe = wiring
+        .files
+        .observe_exclusive_lock(&wiring.db.parent().unwrap().join("landing-batch/turn"));
+    let (paused, reached) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let count = probe.clone();
+    let pause = Box::new(move || {
+        paused.send(count.blocked_attempts()).unwrap();
+        resume
+            .recv_timeout(super::harness::LIMIT)
+            .expect("observer releases the first landing");
+    });
+    // The batch still holds its lock and has no integrating member yet.
+    let wiring = after_landing_recorded(wiring.with_continuous_passes(), first_run, pause);
+
+    let mut at_pause = None;
+    let mut release = Some(release);
+    let mut midpoint = None;
+    let outcome = wiring.supervise_once_while_stoppable(|queue, stop| {
+        if release.is_some() {
+            if at_pause.is_none() {
+                at_pause = reached.try_recv().ok();
+            }
+            let Some(at_pause) = at_pause else {
+                return false;
+            };
+            let blocked = probe.blocked_attempts() > at_pause;
+            let ran_early = wiring.verifier.ran().iter().any(|(cmd, _)| cmd == RECHECK);
+            if !blocked && !ran_early {
+                return false;
+            }
+            midpoint = Some((
+                blocked,
+                ran_early,
+                wiring.git.main(),
+                queue.show(first).unwrap().runs[0].status(),
+                queue.show(second).unwrap().runs[0].status(),
+            ));
+            release.take().unwrap().send(()).unwrap();
+        }
+        if queue
+            .latest_event_of("landing_recheck_finished")
+            .unwrap()
+            .is_some()
+        {
+            stop();
+            return true;
+        }
+        false
+    });
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let (blocked, ran_early, intermediate_main, first_status, second_status) = midpoint.unwrap();
+    assert!(blocked, "recheck must attempt the held batch lock");
+    assert!(!ran_early);
+    assert_eq!(first_status, RunStatus::Integrated);
+    assert_eq!(second_status, RunStatus::AwaitingIntegration);
+
+    let mut queue = wiring.queue();
+    let first = queue.show(first).unwrap();
+    let second = queue.show(second).unwrap();
+    let waiting = queue.show(waiting.task_id()).unwrap();
+    assert_eq!(first.runs[0].result_commit(), Some(&intermediate_main));
+    assert_eq!(second.runs[0].status(), RunStatus::Integrated);
+    let final_main = wiring.git.main();
+    assert_ne!(final_main, intermediate_main);
+    assert_eq!(second.runs[0].result_commit(), Some(&final_main));
+    assert!(queue.read_ask(ask).unwrap().is_open());
+    for member in [&first, &second] {
+        assert!(payloads(member, "landing_recheck_clean").is_empty());
+    }
+    assert!(payloads(&first, "landing_recheck_finished").is_empty());
+    let [finished] = payloads(&second, "landing_recheck_finished")
+        .try_into()
+        .unwrap();
+    assert_eq!(finished["main"], json!(final_main));
+    assert_eq!(finished["checked"], 1);
+    let [clean] = payloads(&waiting, "landing_recheck_clean")
+        .try_into()
+        .unwrap();
+    assert_eq!(clean["main"], json!(final_main));
+    assert_eq!(clean["landed_run_id"], json!(second_run));
+    let ran = wiring.verifier.ran();
+    assert_eq!(
+        ran.iter()
+            .map(|(command, _)| command.as_str())
+            .collect::<Vec<_>>(),
+        [JOINT_CHECK, RECHECK]
+    );
+}
+
+#[test]
+fn a_conflicting_member_is_sent_back_after_the_clean_prefix_lands() {
+    use crate::application::Repository;
+
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("a_conflicting_member_is_sent_back_after_the_clean_prefix_lands");
+    let mut queue = wiring.queue();
+    let original = wiring.git.main();
+    let first_head = queue.show(first).unwrap().runs[0]
+        .result_commit()
+        .unwrap()
+        .clone();
+    let second_head = queue.show(second).unwrap().runs[0]
+        .result_commit()
+        .unwrap()
+        .clone();
+    wiring
+        .git
+        .conflict_with_prefix(&first_head, second_head, "same.txt");
+    wiring.supervise_until_command(JOINT_CHECK);
+
+    let first_detail = queue.show(first).unwrap();
+    let landed = &first_detail.runs[0];
+    assert_eq!(landed.status(), RunStatus::Integrated);
+    let squash = landed.result_commit().unwrap();
+    assert_ne!(squash, &first_head);
+    assert_eq!(wiring.git.main_line(), [original, squash.clone()]);
+    assert_eq!(
+        wiring.git.tree_of(squash.as_str()).unwrap(),
+        wiring.git.tree_of(first_head.as_str()).unwrap()
+    );
+    let second_detail = queue.show(second).unwrap();
+    assert_eq!(second_detail.runs[0].status(), RunStatus::NeedsSession);
+    let [deferred] = payloads(&second_detail, "integration_deferred")
+        .try_into()
+        .unwrap();
+    assert_eq!(deferred["code"], "rebase_conflict");
+    assert_eq!(deferred["conflicts"], json!(["same.txt"]));
+    assert!(
+        first_event(&mut queue, first, "run_integrated")
+            < first_event(&mut queue, second, "integration_deferred")
+    );
+    let events = payloads(&first_detail, "landing_batch_progress");
+    let stages: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["stage"].as_object())
+        .collect();
+    assert_eq!(stages.len(), 1);
+    assert_eq!(stages[0]["runs"], json!([first_run]));
+    assert_eq!(stages[0]["depth"], 0);
+    assert_eq!(wiring.verifier.ran().len(), 1);
+    assert_eq!(wiring.status()["landing_queue"], json!([]));
+    let finished = events.last().unwrap();
+    assert_eq!(finished["finished"], true);
+    assert_eq!(finished["removed"], json!([second_run]));
+}
+
+#[test]
+fn a_member_without_an_admissible_receipt_takes_the_ordinary_path() {
+    use std::path::Path;
+
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("a_member_without_an_admissible_receipt_takes_the_ordinary_path");
+    let mut queue = wiring.queue();
+    let first = queue.show(first).unwrap();
+    wiring.files.put(
+        Path::new(first.runs[0].receipt_path().unwrap()),
+        std::time::SystemTime::UNIX_EPOCH,
+        "invalid receipt",
+    );
+    wiring.supervise_until_command(JOINT_CHECK);
+    let first = queue.show(first.task.id()).unwrap();
+    let second = queue.show(second).unwrap();
+    assert_eq!(first.runs[0].status(), RunStatus::NeedsSession);
+    let [deferred] = payloads(&first, "integration_deferred").try_into().unwrap();
+    assert_eq!(deferred["code"], "receipt_invalid");
+    assert_eq!(second.runs[0].status(), RunStatus::Integrated);
+    let events = payloads(&first, "landing_batch_progress");
+    let stages: Vec<_> = events
+        .iter()
+        .filter_map(|event| event["stage"].as_object())
+        .collect();
+    assert_eq!(stages.len(), 1);
+    assert_eq!(stages[0]["runs"], json!([second_run]));
+    assert_eq!(stages[0]["depth"], 0);
+    assert_eq!(wiring.verifier.ran().len(), 1);
+    assert_eq!(events.last().unwrap()["removed"], json!([first_run]));
+}
+
+#[test]
+fn failed_joint_verification_exposes_the_serial_split_in_events_and_status() {
+    let (wiring, [(first, first_run), (second, second_run)]) =
+        approved_batch("failed_joint_verification_exposes_the_serial_split_in_events_and_status");
+    let runs = [first_run, second_run];
+    let mut queue = wiring.queue();
+    wiring.verifier.fail_once(JOINT_CHECK);
+    let (release, wait) = mpsc::channel();
+    wiring.verifier.on_command(
+        JOINT_CHECK,
+        Box::new(move || {
+            wait.recv_timeout(super::harness::LIMIT)
+                .expect("batch start observed");
+        }),
+    );
+    wiring.supervise_once_while(|_| {
+        let status = wiring.status();
+        let stage = &status["landing_batch"]["stage"];
+        let commands = wiring.verifier.ran();
+        if stage["depth"] != 0 || commands.is_empty() {
+            return false;
+        }
+        assert_eq!(stage["runs"], json!(runs));
+        assert_eq!(commands.len(), 1);
+        release.send(()).unwrap();
+        true
+    });
+    let detail = queue.show(first).unwrap();
+    let stages: Vec<_> = payloads(&detail, "landing_batch_progress")
+        .into_iter()
+        .filter_map(|event| event.get("stage").filter(|stage| !stage.is_null()).cloned())
+        .collect();
+    assert_eq!(stages[0]["runs"], json!(runs));
+    assert_eq!(stages[1]["runs"], json!([runs[0]]));
+    assert_eq!(stages[1]["depth"], 1);
+    assert_eq!(stages[2]["runs"], json!([runs[1]]));
+    assert!(
+        [first, second]
+            .iter()
+            .all(|&task| queue.show(task).unwrap().runs[0].status() == RunStatus::Integrated)
+    );
+    assert_eq!(wiring.verifier.ran().len(), 3);
 }
 
 /// `land` answers are applied while a `[run.env]` program is missing, but
@@ -1120,11 +1890,21 @@ fn direct_landing_fixture(
     priority: crate::domain::Priority,
     status: RunStatus,
 ) -> crate::domain::TaskRun {
+    direct_landing_fixture_with_commands(wiring, queue, priority, status, &[])
+}
+
+fn direct_landing_fixture_with_commands(
+    wiring: &Wiring,
+    queue: &mut SqliteQueue,
+    priority: crate::domain::Priority,
+    status: RunStatus,
+    commands: &[&str],
+) -> crate::domain::TaskRun {
     use crate::application::{Repository, TaskStore};
     use crate::domain::ClaimOutcome;
     use std::path::Path;
 
-    let task = wiring.ready_task(&[]);
+    let task = wiring.ready_task(commands);
     queue.set_priority(task, Some(priority)).unwrap();
     let ClaimOutcome::Claimed { run } = queue.claim(&wiring.git.main()).unwrap() else {
         panic!("claim the fixture task");

@@ -185,17 +185,31 @@ fn own_change_proof(
     }
 }
 
-/// Compare the latest judgment with the final landing tree. Publish the
-/// evidence, including the judged and landed ranges and any rewrite.
-pub fn compare_landing(
-    queue: &dyn crate::application::EventStore,
+/// Check a speculative tree before executing its verification. The
+/// authoritative comparison and its event are still made at publication.
+pub(super) fn permits_stack(
     repository: &dyn Repository,
-    run: &TaskRun,
+    events: &[crate::domain::RunEvent],
+    rewrites: Rewrites<'_>,
+) -> Result<bool> {
+    Ok(comparison(repository, events, rewrites, &[])?.decision == Decision::Land)
+}
+
+struct Comparison<'a> {
+    judgment: Judgment<'a>,
+    landed: LandingFacts,
+    conflict_resolved: bool,
+    proof: ChangeProof,
+    decision: Decision,
+}
+
+fn comparison<'a>(
+    repository: &dyn Repository,
+    events: &'a [crate::domain::RunEvent],
     rewrites: Rewrites<'_>,
     protected_paths: &[String],
-) -> Result<Compared> {
-    let events = queue.run_events(run.id())?;
-    let history = RunHistory::from_events(&events);
+) -> Result<Comparison<'a>> {
+    let history = RunHistory::from_events(events);
     let judgment = history
         .last_judgment()
         .context("the run has no judgment that lets it land to compare with")?;
@@ -213,7 +227,7 @@ pub fn compare_landing(
                 ) && event.payload["rewrite"]
                     == crate::domain::landing_binding::CONFLICT_RESOLUTION)
     });
-    let proof = own_change_proof(repository, &events, &judgment, rewrites);
+    let proof = own_change_proof(repository, events, &judgment, rewrites);
     // A person's re-approval still due is not stood for by a review's
     // judgment after it (the session's new receipt reviewed again): the
     // landing goes back to the person (ADR-t4840-2 decision 8).
@@ -238,6 +252,32 @@ pub fn compare_landing(
             protected_paths,
         ),
     };
+    Ok(Comparison {
+        judgment,
+        landed,
+        conflict_resolved,
+        proof,
+        decision,
+    })
+}
+
+/// Compare the latest judgment with the final landing tree. Publish the
+/// evidence, including the judged and landed ranges and any rewrite.
+pub fn compare_landing(
+    queue: &dyn crate::application::EventStore,
+    repository: &dyn Repository,
+    run: &TaskRun,
+    rewrites: Rewrites<'_>,
+    protected_paths: &[String],
+) -> Result<Compared> {
+    let events = queue.run_events(run.id())?;
+    let Comparison {
+        judgment,
+        landed,
+        conflict_resolved,
+        proof,
+        decision,
+    } = comparison(repository, &events, rewrites, protected_paths)?;
     if decision == Decision::Land
         && matches!(proof, ChangeProof::CleanMerge { .. })
         && let Some(change) = judgment

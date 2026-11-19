@@ -139,18 +139,23 @@ impl Supervisor<'_> {
     pub(super) fn step(&mut self, slot: &mut Slot) -> Result<Step> {
         // A landing releases the lease itself when it ends, so it is joined
         // before the lease is checked.
-        if let Phase::Landing(handle) = &mut slot.phase {
+        if let Phase::Landing(job) = &mut slot.phase {
             // Joined already when the read of what it left the run as was
             // not answered: only that read is made again.
-            if let Some(running) = handle {
-                if !running.is_finished() {
+            if let Some(running) = job {
+                if !running.handle.is_finished() {
                     return Ok(Step::Continue);
                 }
+                let LandingJob { handle, followers } =
+                    job.take().context("landing already joined")?;
                 let landed = handle
-                    .take()
-                    .context("landing already joined")?
                     .join()
                     .map_err(|_| anyhow!("landing thread panicked"));
+                if !followers.is_empty() {
+                    // Recover any follower lease the job could not release,
+                    // even if a pass already reconciled while it was running.
+                    self.unanswered.lost();
+                }
                 match landed.and_then(|result| result) {
                     // Handed over before its verification was done again
                     // (ADR-t3344-1): it waits for the landing slot again

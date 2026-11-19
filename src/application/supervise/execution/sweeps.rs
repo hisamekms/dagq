@@ -641,7 +641,9 @@ impl Supervisor<'_> {
             // of a live one is on it.
             if let Some(run) = principal.landing_run() {
                 let landing_here = principal.actor_id == own_integrator.actor_id();
-                if landing_here && landing.contains(&run) {
+                // A batch's slot also owns followers through their
+                // post-squash records, until the landing job is joined.
+                if landing_here && (landing.contains(&run) || self.claim.slots.batch_owns(&run)) {
                     return false;
                 }
                 let gone = landing_here

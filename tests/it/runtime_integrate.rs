@@ -2578,3 +2578,126 @@ fn a_program_past_its_limit_twice_holds_the_landing_for_a_person() {
         ]
     );
 }
+
+/// Real Git builds one tree from both unlanded runs. The same command
+/// succeeds on either source, but the second run breaks the first's tree.
+#[test]
+fn a_batch_that_fails_only_when_stacked_lands_the_first_run_and_sends_back_the_one_that_breaks_it()
+{
+    let (_dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[verification]\nlanding_batch_size = 2\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-qm", "configure landing batch"]);
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let check = "test ! -f left.txt || test ! -f right.txt";
+    let a = add_file_task(
+        &mut queue,
+        &backend,
+        "land left",
+        "left.txt",
+        "left",
+        &[check],
+    );
+    let b = add_file_task(
+        &mut queue,
+        &backend,
+        "land right",
+        "right.txt",
+        "right",
+        &[check],
+    );
+    let concern = verdict("concern", &["please confirm"], "unsure");
+    let reviewer = TestReviewer::new(&[concern.clone(), concern]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let asks = queue.asks(Default::default()).unwrap();
+    let mut ordered = [(a, "land left", "left.txt"), (b, "land right", "right.txt")].map(
+        |(task, title, file)| {
+            let run = queue.show(task).unwrap().runs[0].clone();
+            let paths = git_out(
+                &repo,
+                &[
+                    "ls-tree",
+                    "--name-only",
+                    run.result_commit().unwrap().as_str(),
+                ],
+            );
+            assert_ne!(paths.contains("left.txt"), paths.contains("right.txt"));
+            let ask = asks
+                .iter()
+                .find(|ask| ask.run_id.as_ref() == Some(run.id()))
+                .unwrap();
+            (ask.id, task, title, file, run)
+        },
+    );
+    // The supervisor applies both answers in ask order. Review may have
+    // finished in either order so take that order from the fixture.
+    ordered.sort_by_key(|item| item.0);
+    for (ask, ..) in &ordered {
+        queue.answer(*ask, "land").unwrap();
+    }
+    let [
+        (_, first, first_title, first_file, first_run),
+        (_, second, _, second_file, second_run),
+    ] = ordered;
+
+    backend.resume_script_for(
+        second.as_i64(),
+        "receipt \"$(git rev-parse HEAD)\" failed 'the combined tree still breaks the check'",
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        git_out(&repo, &["log", "-1", "--format=%s", "main"]),
+        first_title
+    );
+    assert_eq!(git_out(&repo, &["rev-parse", "main^"]), base);
+    let paths = git_out(&repo, &["ls-tree", "--name-only", "main"]);
+    assert!(
+        paths.contains(first_file) && !paths.contains(second_file),
+        "{paths}"
+    );
+    let left = queue.show(first).unwrap();
+    let right = queue.show(second).unwrap();
+    assert_eq!(left.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(
+        payloads(&right, "integration_deferred")[0]["code"],
+        "verification_failed"
+    );
+    let runs = [first_run, second_run];
+    let progress = events_of(&db, runs[0].id(), "landing_batch_progress");
+    let finished = progress.last().unwrap();
+    assert_eq!(finished["finished"], true);
+    assert_eq!(finished["removed"], json!([runs[1].id()]));
+    assert_eq!(payloads(&right, "resume_started").len(), 1);
+    let stages: Vec<_> = progress
+        .iter()
+        .filter_map(|event| event.get("stage").filter(|stage| !stage.is_null()).cloned())
+        .collect();
+    assert_eq!(
+        stages
+            .iter()
+            .map(|stage| &stage["runs"])
+            .collect::<Vec<_>>(),
+        vec![
+            &json!([runs[0].id(), runs[1].id()]),
+            &json!([runs[0].id()]),
+            &json!([runs[1].id()]),
+        ]
+    );
+    assert_eq!(
+        events_of(&db, runs[0].id(), "verification_command").len(),
+        2
+    );
+    assert_eq!(
+        events_of(&db, runs[1].id(), "verification_command").len(),
+        1
+    );
+}

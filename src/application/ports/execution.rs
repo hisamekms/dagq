@@ -1734,6 +1734,15 @@ pub trait RunRecovery {
     /// [`Self::lease_for_review`] for the e2e a run queued to land runs
     /// first (ADR-t1233-2).
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
+    /// Reserve a queued member while its batch holds the landing turn.
+    fn lease_for_landing_batch(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        let _ = (id, token);
+        anyhow::bail!("this queue cannot reserve a landing batch member")
+    }
     /// Lease an `awaiting_integration` run with no lease row and no open
     /// ask to `token`, to put it back in its landing's line (ADR-t3049-1);
     /// `None` when another process leased it or it changed meanwhile.
@@ -2865,6 +2874,11 @@ pub trait Verifier {
         Ok(std::time::Duration::from_secs(
             crate::domain::verification_limit::DEFAULT_COMMAND_TIMEOUT_SECS,
         ))
+    }
+    /// The cap on the immediately available landing queue prefix. The
+    /// default of one preserves per-run verification and landing.
+    fn landing_batch_size(&self) -> Result<std::num::NonZeroUsize> {
+        Ok(std::num::NonZeroUsize::MIN)
     }
     /// The command the landing runs in place of some of a task's
     /// verification commands (`[landing_verification]` of `dagq.toml`,

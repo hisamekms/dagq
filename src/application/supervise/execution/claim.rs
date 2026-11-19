@@ -182,10 +182,18 @@ impl Supervisor<'_> {
             .map(|node| (node.id, node.effective_priority))
             .collect();
         let mut line = Vec::new();
-        let landing_disk = landing
+        // A batch uses one landing turn. Budget claims against its most
+        // demanding member so the reservation also covers later stages.
+        let landing_disk = landing.as_ref().and_then(|landing| {
+            landing
+                .run_ids()
+                .filter_map(|run| self.host.landing_claims(run))
+                .min_by_key(|disk| disk.claims.unwrap_or(usize::MAX))
+        });
+        let landings_leaving_queue = landing
             .as_ref()
-            .and_then(|landing| self.host.landing_claims(&landing.entry.run_id));
-        let landing_uses_no_worker = landing.as_ref().is_some_and(|landing| !landing.entry.e2e);
+            .filter(|landing| !landing.entry.e2e)
+            .map_or(0, |landing| landing.run_ids().count());
         if let Some(landing) = landing {
             line.push(Candidate {
                 kind: Kind::Landing {
@@ -269,8 +277,11 @@ impl Supervisor<'_> {
                 let capacity = self.admission_capacity(parallel);
                 let reason = admission::probe(SlotKind::Claim, capacity).filter(|reason| {
                     !(*reason == Blocked::WorkerSlot
-                        && landing_uses_no_worker
-                        && self.claim.slots.projected_landing_room(parallel))
+                        && landings_leaving_queue > 0
+                        && self
+                            .claim
+                            .slots
+                            .projected_landing_room(parallel, landings_leaving_queue))
                 });
                 let mut pass = ClaimPass {
                     spaced_since,

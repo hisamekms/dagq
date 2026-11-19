@@ -1878,7 +1878,7 @@ enum Phase {
     E2e(e2e::E2eWatch),
     /// The run lands off the loop, like validation; the landing releases
     /// the lease itself.
-    Landing(Option<thread::JoinHandle<Result<IntegrationOutcome>>>),
+    Landing(Option<LandingJob>),
     /// The recovery job of a `failed` or `interrupted` run (ADR-0047
     /// decision 39), under a lease of its own.
     Recovery(EndedRecovery),
@@ -1891,6 +1891,13 @@ enum Phase {
     /// run stays `validating` and keeps its lease and slot until the job
     /// ended and its ask opened.
     SatisfiedReview(satisfied_review::ClaimReviewWatch),
+}
+
+struct LandingJob {
+    handle: thread::JoinHandle<Result<IntegrationOutcome>>,
+    /// Only this job manages its followers' leases until it is joined.
+    /// Each member takes the queue's integration slot in turn.
+    followers: Vec<RunId>,
 }
 
 /// Whether a slot's run in `phase` is offered to a cleanup for disk space

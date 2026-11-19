@@ -295,6 +295,9 @@ event_kinds! {
     /// The current entry's wait, identified by `entry_id` and `judgment`.
     /// An awaiting_reapproval wait keeps the entry open and unselectable.
     LandingQueueWaiting => "landing_queue_waiting",
+    /// Snapshot of an active or finished batch on its first selected run.
+    /// See [`crate::domain::landing_batch::Progress`] for its fields.
+    LandingBatchProgress => "landing_batch_progress",
     LandingQueued => "landing_queued",
     LandingReleaseStuck => "landing_release_stuck",
     LandingReleaseWaiting => "landing_release_waiting",
@@ -1960,6 +1963,7 @@ mod tests {
             (EventKind::LandingHeld, "landing_held"),
             (EventKind::LandingQueueEntered, "landing_queue_entered"),
             (EventKind::LandingQueueLeft, "landing_queue_left"),
+            (EventKind::LandingBatchProgress, "landing_batch_progress"),
             (EventKind::LandingQueueWaiting, "landing_queue_waiting"),
             (EventKind::LandingQueued, "landing_queued"),
             (EventKind::LandingReleaseStuck, "landing_release_stuck"),

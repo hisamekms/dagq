@@ -1,0 +1,4 @@
+[[test]]
+name = "runtime_integrate::a_batch_that_fails_only_when_stacked_lands_the_first_run_and_sends_back_the_one_that_breaks_it"
+reason = "B 境界（守る境界）: Gitで未着地の2本を重ね、実コマンドの失敗から原因だけを差し戻して先行runのsquashを確かめる"
+task = 5286

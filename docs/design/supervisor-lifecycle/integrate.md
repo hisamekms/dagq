@@ -41,7 +41,7 @@ related:
 
 ## 目的
 
-検証済みのrunを、今の`main`へrebaseし、検証のコマンドを1回流して、1つのsquash commitで着地させてpushする（[ADR-0008](../../adr/0008-merge-queue-squash-landing.md)）。
+着地の列から選んだrunを今の`main`へ順に重ねて検証し、通った変更をrunごとのsquash commitで着地させてpushする。
 supervisorはreviewがpassしたrunと、上限の後の差し戻しを収束と判定したrunを着地させる（[Review](review.md#review-supervisor)）。
 人やinboxが`dagq integrate`を打つのは、reviewが失敗したrunと、review以前のsupervisorが残した着地待ちのrunと、着地が控えたrunである。
 
@@ -50,23 +50,23 @@ supervisorはreviewがpassしたrunと、上限の後の差し戻しを収束と
 ```text
 supervisor: 着地を許す判断 → 共通の着地の列が候補を選ぶ → Admissionが開始を判断
             ├─ e2eが要るrunは着地の前のe2e → 同じ列
-            └─ 着地slot
+            └─ 着地slot → 選んだrunを重ねて一度検証 → 通れば順にsquash、落ちれば二分して原因のrunを差し戻す
 承認: 束縛の確認 → runの選択 → leaseと空き容量の確認 → 着地の承認の記録 → 共通の列で順番を確認 → slotを取る
-着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → 判断との照合 → reviewのプログラム → 検証のコマンド
+単独の着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → 判断との照合 → reviewのプログラム → 検証のコマンド
       └─ 通れば squash commit → mainを進める → 完了 → 後始末 → push → follow_upsの登録
       └─ 通らなければ needs_session / held（hostの失敗） / failed（receiptが失敗を報告）
       └─ 照合が違えば slotを返し、元のentryで判断の経路の再承認を待つ（changed）
-mainが動く → landing recheck → 着地しなくなった待ちのrunをresumeへ
+着地が終わるか外からmainが動く → landing recheck → 着地しなくなった待ちのrunをresumeへ
 ```
 
 ## 責務と境界
 
 - ユースケースの本体は`src/application/integrate.rs`で、module docが範囲を持つ（ADR-0013の方針1と8）。
 - 着地とpushは`Integrator`だけが行い、依頼者は`IntegrationRequest`を渡す（[ADR-t728-2](../../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)、[Authorization](../authorization.md#着地とpushintegrator)）。
-- 承認の段は`Integrator::approve`（本体は`begin`）、着地の段は`Integrator::land`（本体は`land_integrating`と`land`）で、どちらもportの束`Integration`だけを受ける。
+- 承認の入口は`Integrator::approve`で、着地は単独なら`Integrator::land`、バッチなら[`Integrator::land_batch`](../../../src/application/integrate/batch.rs)から始める。
 - 人とinboxの`integrate`の入口は`compose::ControlQueues::integrate`（DBの経路は`compose::OneShot::integrate`）、supervisorの着地は`src/application/supervise/execution/landing.rs`である。
 - supervisorの着地の記録は、supervisorのqueue（`SupervisorQueue`）からqueue serviceのユースケースになる（[`supervise`](supervise.md#queue-serviceの経路)）。
-  slotを取るユースケースがそのrunとslotのleaseを対象にするintegratorのprincipal（`Principal::integrator`）のtokenを発行し、`Integrator::land`の間の記録はそのtokenで通り、着地が終わるとsupervisorが失効させる（ADR-t3102-1決定2）。
+  slotを取るユースケースがそのrunとslotのleaseを対象にするintegratorのprincipal（`Principal::integrator`）のtokenを発行し、runの着地の記録はそのtokenで通り、着地が終わるとsupervisorが失効させる（ADR-t3102-1決定2）。
   着地の終わり（`finish_integration`）はそのtokenでだけ受け、supervisorのtokenとleaseでは拒む（[Security](../security.md#reviewのpassとintegrator)）。
   約束: slotはtokenを発行した同じtransactionでだけcommitし、発行できなければ取られない（`begin_landing`、ADR-t3102-3決定3）。
   tokenはその着地の`integration_started`を名指し、serviceはqueueがそのeventを持つときだけintegratorの書き込みを受けるので、commitに至らずに残ったtokenは何も書けず、片付けで失効する（着地が`integrating`を出た後の記録は受ける）。
@@ -81,7 +81,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 - queueで同時に`integrating`のrunは1件だけで、slotを持つ間は`main`が動かない（`begin_integration`）。
 - 同じrunを二重に着地させない: 前の着地が`main`を進めてから記録の前に止まったときは、そのcommitを着地として記録する（`landed_before`）。
-- 検証のコマンドはcommitごとにここで1回だけ流れ、validatingは流さない（ADR-0049の決定1）。
+- 着地の検証は、列の先頭から上限までを順に重ねた木で一回行う。
+  この検証は着地の段に限り、落ちても原因のrun以外は列に残る。
 - squashして載せる差分（main..rebase後のhead）がtaskの`paths`に収まらなければ着地しない（ADR-0029の決定4）。
 - 着地するrun自身の変更が、最後の着地を許した判断に結ばれた変更と同じだと確かめてから着地する（下の「判断との照合」）。
 
@@ -91,7 +92,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 着地を許した全てのrunは一本の列に入り、効く優先度が高い順、同じ優先度なら列に入った時刻の順で着地を始める。
 reviewのpassもleaseを返して同じ列を待ち、workerのslotから直接着地を始めない。
 人が直接着地を始めるときも同じ列で選び、先に進めるrunがあれば後続のrunは承認を記録して順番を待つ。
-列はentryごとに今着地できるかと控えの理由を副作用なく判定し、順番どおりに進める最初のentryを候補にする（`LandingQueue::select`）。
+列はentryごとに今着地できるかと控えの理由を副作用なく判定する。
+バッチの判定の入口は [`domain::landing_batch`](../../../src/domain/landing_batch.rs) にある。
 答え待ちのask、そのrunのディスク不足、e2eに要るworker枠の不足、掃除の予約など、先頭だけに効く控えで後続が独立に進める場合に限り、先頭は順番を保って後続に先を譲る。
 控えが解ければ元の順番で選ぶ。
 候補の順番と先を譲る条件は列に集め、Admissionは渡された候補をclaimや資源に照らして、この回に着地を始めるかとclaimとの兼ね合いだけを決める（[ADR-t5292-1](../../adr/2026-11-18-t5292-1-admission-unifies-starts-resources-and-reasons.md)決定1）。
@@ -107,6 +109,7 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 その後に着地を許されるrunは、その時に開いたentryの時刻で並ぶ。
 復旧・drain・引き継ぎも同じ列を使い、drainを延ばさない開始条件とleaseの所有を保つ（[ADR-t5283-1](../../adr/2026-11-18-t5283-1-one-landing-queue.md)）。
 引き継ぎでは、既にleaseを返したrunはそのまま列に残り、検証のやり直しの前で区切った着地は所有者が引き継ぐ。
+バッチの次の着地slotが引き継ぎの要求で拒まれたら、着地済みの結果を確定し、まだ始めていないrunのleaseを返して列に残す。
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
 - 人とinboxが直接打つ`dagq integrate`は、今の差分に結んで承認を記録する（`integrate::approvable`）。
@@ -124,6 +127,7 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 ## migrationの番号の振り直し
 
 - rebaseの後にrunが足したmigrationの番号が`main`のものと重なれば、機械で直せる1件だけを振り直し、他は`needs_session`にする（`plan_renumber`・`renumber_migration`、[ADR-0067](../../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3）。
+- バッチでは番号が重なったrunの手前を先に検証し、着地先に重複が残るrunは単独でこの処理を通す。
 - 振り直しはqueueのrepositoryがdagqのソースのときだけ動く（[Source repository](source-repository.md)）。
 
 ## 判断との照合
@@ -156,7 +160,7 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 
 ## 検証のコマンド
 
-- 1つの試行の流れは`land`の検証のloopと`VerifyStep::run`が持つ。
+- 単独の着地とバッチの各段の検証は`verify_landing`から`VerifyStep::run`を呼ぶ。
 - コマンドの起動と止め方は`infrastructure::adapters::run_shell_to_log`、環境は`verification_command`が持つ（[Run environment](run-environment.md#run-environment)）。
 - 1本のコマンドの時間の上限は`dagq.toml`の`[verification] command_timeout_secs`（秒）で、宣言が無ければ60分で、置き換えたコマンドにもlanding recheckにも同じく掛かる（[Run environment](run-environment.md#run-environment)）。
   上限で止めたコマンドは`timeout`の失敗で、下のhostの失敗のやり直しに入り、死んだ着地の解放の猶予も同じ上限に従う。
@@ -220,7 +224,8 @@ CIの見張りで読む手段の確認を待つか不足している間、実行
 
 taskがholdされているrunは再確認から除き、解除後のpassから再び対象にする。
 
-- `main`が最後のrecheckから動けば（dagqの外のpushも）、次のpassで着地待ちのrunを先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、ADR-t1310-1）。
+- バッチの途中ではrecheckを始めず、着地が終わった最新の`main`に対してバッチ外に残る待ちのrunを一度確かめる。
+  直接の着地、再起動の間、dagqの外で`main`が動いた場合も拾う（ADR-t1310-1）。
 - 確かめ方、着地しなくなったrunのresumeとpark、結果の記録（ADR-t1311-1）、hostの分類の失敗とcontainerが無いときに判定しないこと（ADR-t639-1、ADR-t2424-1）、build outputの書き込みの確認（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9）は、`application::supervise::execution::recheck`のmodule docと`domain::recheck::TargetCheck`が持つ。
 - コードの分類で落ちたrunは、mainの木だけでも落ちればresumeせず着地を待ち続け、inboxに1回だけ知らせる（[ADR-t2141-1](../../adr/2026-10-20-t2141-1-recheck-checks-main-alone-before-resuming-runs-whose-command-failed.md)、`domain::recheck::MainCheck`・`kept_by_main`）。
 - recheckのerrorはwarnだけで着地を止めず（`recheck_pass`）、mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
