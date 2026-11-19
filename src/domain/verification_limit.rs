@@ -49,6 +49,16 @@ pub struct VerificationConfig {
     pub command_timeout_secs: Option<u64>,
     /// `landing_batch_size` caps the immediately available landing
     /// prefix. The default of one preserves per-run verification.
+    /// A declaration must be a positive integer. Zero, negative values,
+    /// and non-integers are errors in `dagq.toml`.
+    ///
+    /// The supervisor rereads the main checkout's `dagq.toml` each time
+    /// it selects candidates from a nonempty landing queue. Changes take
+    /// effect at the next selection without a restart.
+    ///
+    /// Add the key only after the installed dagq binary supports it.
+    /// Older binaries reject the entire `dagq.toml` when they encounter
+    /// this unknown key.
     pub landing_batch_size: NonZeroUsize,
 }
 

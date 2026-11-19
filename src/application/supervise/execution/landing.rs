@@ -3628,6 +3628,9 @@ impl Supervisor<'_> {
             self.queue.begin_integration_over_handoff(id, &token, main)
         }
     }
+
+    /// The `landing-batch` directory beside the queue database. It holds
+    /// the `verification` scratch worktree used for batch verification.
     pub(super) fn landing_batch_dir(&self) -> Result<PathBuf> {
         Ok(self
             .layout

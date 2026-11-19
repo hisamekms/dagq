@@ -1,9 +1,15 @@
-//! The recheck of the runs that wait to land after each landing
-//! (ADR-0068): what it found for one run, how that is written into the
-//! run's events, its asks and its `last_error`, and how the events are
-//! read back, for a run found no longer landing and, since ADR-t1311-1,
-//! for one found still landing. The supervisor runs the checks; this
-//! module is the record.
+//! The record of the landing recheck (ADR-0068): what it found for one
+//! run, how that is written into the run's events, its asks and its
+//! `last_error`, and how the events are read back for runs found no
+//! longer landing or still landing (ADR-t1311-1).
+//!
+//! The supervisor skips rechecks between a batch's squash commits.
+//! Once the batch finishes, it checks the runs still waiting outside
+//! the batch in one pass against the latest main (ADR-t5283-3 decision 6).
+//! It also checks waiting runs when main differs from the main the last
+//! recheck finished against, including after a direct `integrate`, a
+//! landing during a handoff or restart, or a push outside dagq
+//! (ADR-t1310-1).
 
 use crate::domain::EventKind;
 use serde::Deserialize;
