@@ -52,10 +52,10 @@ An ask whose kind, options or effect is unclear: `reference/asks.md`, with the a
 
 ## 4. Report the other attention, act only on the person's word
 
-Report each in a list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing. Each `next` in full: `reference/status.md`.
+List task, status, `next` and the gist of `last_error`. Act on the person's word. `(runtime)` needs nothing. See `reference/status.md`.
 
 - `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`, `plan task <N> with the answer: …`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
-- `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
+- `triage by hand`, `recover by hand`: `dagq-recover` section 4. For recovery, check `reason_category` (`recovery_failed` or absent under `--no-claude`).
 - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
 - `request a plan for …` (the draft, the finding, the waiting tasks, the follow-ups of goal G): a request on the person's word (`reference/status.md`).
 - A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it for a runtime planner (`reference/requests.md`); `report the request's proposal`, `rephrase or drop the request` and a `planner_question` on a request: the same file. More words for an open planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.

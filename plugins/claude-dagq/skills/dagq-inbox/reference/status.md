@@ -36,7 +36,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `stop the dead landing's processes`: a dead landing left processes that hold the integration slot. Show the person the pids (`dagq show TASK --full`); the person stops those pids, never by name or pattern.
 - Recovery:
   - `triage by hand`: the recovery job of an ended run could not start or apply its verdict; the person decides (the `dagq-recover` skill, section 4).
-  - `recover by hand`: a live run's failed recovery job that an older runtime recorded; the same section. A newer one opens a `stalled` ask instead.
+  - `recover by hand`: check the attention's `reason_category`. With `recovery_failed`, use section 4 of `dagq-recover` for a live run's failed recovery job recorded by an older runtime. If the field is absent under `--no-claude`, follow [Explicitly run without Claude](../../dagq-recover/reference/up-down.md#explicitly-run-without-claude) for Claude resumes that are parked or were already started.
   - `recover run`: a run its supervisor gave up; while its processes live, the `dagq-recover` skill. If `watch` reported it but `status` shows the run at rest, `status` wins.
   - `exit the session`: a run given up whose session's exit request could not be written. Tell the person, who ends it in their own terminal (the `dagq-recover` skill, section 2).
   - A turn that ended without a receipt is no attention: the runtime and its recovery job handle it. Do nothing about it until a `stalled` ask comes.
@@ -85,7 +85,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
 
 A run whose session only waits for a person's answer can give up its active slot while it waits. Answer its ask on the person's word. A held task also needs a `release` before its run can return.
 
-A stop drain (`down` or `down --wait`) finishes the runs that can proceed. A slot run stays `running` with its wait record and lease for the next supervisor only if its recorded answer wait is blocked by a hold or its own unanswered ask, or its recorded return wait is blocked by a hold. An open ask alone is insufficient. A run waiting for landing approval after giving up its lease is in `awaiting_integration`, outside this handover.
+A stop drain (`down` or `down --wait`) finishes work that can proceed. It preserves a slot run's current status, wait record and lease only if a task hold or the run's own unanswered ask blocks its recorded answer wait, or a task hold blocks its recorded return wait. This includes session waits in `running`, revise waits in leased `awaiting_integration` and waits in an already started `needs_session` resume. The next supervisor applies normal adoption checks. A run that gave up its lease to wait for landing approval is outside the preserved waits. See [Runs waiting for a person](../../dagq-recover/reference/up-down.md#runs-waiting-for-a-person).
 
 ## asks
 

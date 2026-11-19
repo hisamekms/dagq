@@ -19,7 +19,10 @@ When the person wants an ended run's committed work carried to a new run (a `ret
 
 ## `recover by hand`
 
-Attention `recover by hand`: an older runtime's record of a live run's failed recovery job. Read the run's turns with the person and carry out what they decide (`reference/session.md`). It clears once the session exits.
+Read the attention's `reason_category` in `status` to choose the procedure:
+
+- `recovery_failed`: an older runtime recorded a live run's failed recovery job. Read the run's turns with the person and carry out what they decide using [the live-session steps](session.md#past-asks-and-attentions-of-the-interactive-session). This attention clears when the session exits.
+- Field absent under `--no-claude`: the run is a Claude resume. Follow [Explicitly run without Claude](up-down.md#explicitly-run-without-claude).
 
 ## Broken verification command with committed work
 

@@ -7,7 +7,7 @@ description: Manual dagq recovery on the person's word, from the inbox or their 
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` as in the `dagq` skill; the reference files below sit in `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/`. Never touch the queue database; never work around refusals. Ordinary recovery may be relayed by inbox; weakening operations and protected-path answers require the person's own TTY without `DAGQ_ROLE`, confirming the target. Never unset your role to act as the person (`skills/dagq/reference/authority.md`). Write for the person in the language the `dagq` skill's section 5 names.
 
-Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), the headless recovery job fixes what it can of the rest, and only what neither could, or a person's call (scope, discarding work, login, cost), reaches the person. Every `failed` / `interrupted` run, one whose resumes ran out (`resume_exhausted`) and a live run's alert go to the recovery job (`triaging (runtime)`); its `decide` or `stalled` ask opens only when it escalates, is not sure or used its three tries (a turn that ended without a receipt is nudged, then asked `stalled`; `skills/dagq-inbox/reference/status.md`). The next supervisor pass recovers a run without a lease whose processes are gone, and a `needs_session` run is resumed (`resuming (runtime)`). Do not recover, `ready` or close these runs. `status` beats `watch`.
+Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), the headless recovery job fixes what it can of the rest, and only what neither could, or a person's call (scope, discarding work, login, cost), reaches the person. Every `failed` / `interrupted` run, one whose resumes ran out (`resume_exhausted`) and a live run's alert go to the recovery job (`triaging (runtime)`); its `decide` or `stalled` ask opens only when it escalates, is not sure or used its three tries (a turn that ended without a receipt is nudged, then asked `stalled`; `skills/dagq-inbox/reference/status.md`). The next supervisor pass recovers a run without a lease whose processes are gone, and a `needs_session` run is resumed (`resuming (runtime)`). Do not recover, `ready` or close these runs. `status` beats `watch`. Under `--no-claude`, [Claude resumes](reference/up-down.md#explicitly-run-without-claude) can show `recover by hand`.
 
 ## 1. Diagnose without changing state
 
@@ -37,7 +37,7 @@ What it leaves: `reference/doctor.md`; the next supervisor's recovery job takes 
 
 ## 4. Triage by hand, and recover by hand
 
-Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again (a `triage_failed` with `provider_unusable` is not this attention: its next round starts on the other provider, or, with `[provider_fallback] jobs = false`, on the same provider once its hold ends). `recover by hand` (`recovery_failed`): an older runtime's record. Before bringing either to the person, read `reference/triage-by-hand.md` (also a broken verify's work: `edit`, then `retry_inherit`; and carrying an ended run's committed work over by hand: `ready ID --inherit`).
+Follow `reference/triage-by-hand.md` when `triage by hand` appears. A `triage_failed` with `provider_unusable` waits for another round. For `recover by hand`, check the attention's `reason_category`: `recovery_failed` routes to the older live-session failure procedure in that reference. If the field is absent under `--no-claude`, follow [Explicitly run without Claude](reference/up-down.md#explicitly-run-without-claude). The triage reference also covers broken verification and carrying committed work over with `ready ID --inherit`.
 
 ## 5. Start, stop and update the runtime
 
@@ -50,9 +50,9 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 
 For `restart supervisor`, run `up`. See `reference/up-down.md` for flags, duplicate or retired supervisors, and `inbox_guardrail` false.
 
-`down` and `down --wait` finish runs that can proceed. The next supervisor takes over the wait record and lease only for slot runs left `running` in a recorded answer wait blocked by a hold or that run's unanswered ask, or a recorded return wait blocked by a hold. An open ask alone is insufficient.
+`down` and `down --wait` finish work that can proceed. They preserve a slot run's status, wait record and lease across a stop only for a recorded answer wait blocked by a task hold or that run's unanswered ask, or a recorded return wait blocked by a task hold. See [Runs waiting for a person](reference/up-down.md#runs-waiting-for-a-person) for the phases and handover.
 
-After draining, `install --allow-breaking` checks queue use. The `approve_update` ask's `install` answer uses that same command. Any `claimed`, `starting`, `running`, `validating` or `integrating` run, regardless of lease, or any live wrapper or supervisor prevents a migration attempt. This includes the preserved waits. A lease-free `awaiting_integration` run pending landing approval is outside the handover and does not block migration by itself, even with an open ask.
+After draining, `install --allow-breaking` checks queue use. The `approve_update` ask's `install` answer uses that command. Any `claimed`, `starting`, `running`, `validating` or `integrating` run, regardless of lease, or any live wrapper or supervisor prevents migration. A lease-free `awaiting_integration` run pending landing approval is outside the handover and does not block migration by itself, even with an open ask.
 
 On refusal, install reuses an answering old service or tries to start it with the old binary. If the service is available and there is a drained supervisor registration, it tries to restart that supervisor with the same arguments. A failed service recovery skips the restart. The error gives the original reason and both recovery results.
 

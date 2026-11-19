@@ -34,4 +34,4 @@ The retired interactive session's asks are history; nothing is carried out for t
 - **`answer_prompt`**: an answered one still open is closed with `"$DAGQ" ask close <id>`.
 - **`stuck_exit`**: `reference/stuck-exit.md`.
 - **`stalled` with `reason: idle_without_receipt` or `send_unconfirmed`**: a record only (`reference/stalled.md`).
-- **`recover by hand`**: show the person the run's error (`show ID --full`), the job's files in the run directory and the run's turns (`run log RUN`), and do what they say. It clears once the session exits.
+- **`recover by hand` with `reason_category: recovery_failed`**: show the person the run's error (`show ID --full`), the job's files in the run directory and the run's turns (`run log RUN`), and do what they say. It clears once the session exits.
