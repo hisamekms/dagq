@@ -17,7 +17,8 @@ use serde_json::{Map, json};
 use crate::application::SearchIndex;
 use crate::domain::{TaskId, related::RelatedPage};
 
-use super::sqlite::{SqliteQueue, optional_enum_col};
+use super::sql_exec::sqlite::with_row;
+use super::sqlite::SqliteQueue;
 use crate::domain::search::{
     SearchHit, SearchKind, SearchPage, SearchQuery, SearchRef, excerpt, field_name, first_line,
     parse_terms,
@@ -246,8 +247,12 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
     let worker = match kind {
         SearchKind::Task => Some(
             Worker::resolve(
-                optional_enum_col(row, "worker_provider")?,
-                optional_enum_col(row, "worker_mode")?,
+                with_row(row, |row| {
+                    super::store_rows::optional_enum_col(row, "worker_provider")
+                })?,
+                with_row(row, |row| {
+                    super::store_rows::optional_enum_col(row, "worker_mode")
+                })?,
             )
             .unwrap_or(Worker::DEFAULT),
         ),

@@ -9,6 +9,15 @@ use crate::infrastructure::sqlite::{MigrationReport, ReadOnlyQueue, SchemaState,
 /// the local service keeps SQLite's connection lending and migration policy.
 pub trait QueueStorage: Clone + Send + Sync + 'static {
     type Entries: TransactionEntries + 'static;
+    fn refuse_service_migrate(&self) -> Result<()> {
+        Ok(())
+    }
+    fn local(&self) -> bool {
+        true
+    }
+    fn write_line(&self, db: &Path) -> Result<ServiceWriteLine> {
+        ServiceWriteLine::waiting(db)
+    }
     fn open(&self, db: &Path) -> Result<StoreQueue<Self::Entries>>;
     fn write_queue(
         &self,
@@ -131,4 +140,22 @@ impl SqliteStorage {
     pub(super) fn write_connection(&self, db: &Path) -> WriteConnection {
         SqliteQueue::write_connection(db)
     }
+}
+
+/// Opening a deployment queue only reads its version and leader identity.
+/// The separate deployment migrate command owns applying the series.
+#[cfg(any(test, feature = "postgres"))]
+pub(super) fn postgres_queue<S: crate::infrastructure::postgres::PostgresSession>(
+    session: S,
+    db: &Path,
+) -> Result<crate::infrastructure::postgres::PostgresQueue<S>> {
+    crate::infrastructure::postgres::PostgresQueue::open(session, queue_dir_of(db).join("runs"))
+}
+
+/// Reject before consulting any local binary record or opening a connection.
+#[cfg(any(test, feature = "postgres"))]
+pub(super) fn refuse_postgres_service_migrate<T>() -> Result<T> {
+    bail!(
+        "Postgres schema changes must run through the deployment's separate migrate command; the queue service does not apply migrations"
+    )
 }

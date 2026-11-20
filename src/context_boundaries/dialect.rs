@@ -262,7 +262,7 @@ mod fixtures {
     fn what_calls_no_dialects_function_passes() {
         let found = errors(&[(
             "src/infrastructure/store.rs",
-            "/// Reads `json_extract(payload,'$.kind')`.\nfn f(conn: &Connection) {\n    // strftime('%s', x)\n    conn.query_row(&format!(\"SELECT {} FROM t\", json_field(\"payload\", \"$.kind\", JsonType::Text)), [], f);\n    conn.execute(\"SELECT my_json(payload), json, unixepoch, 'json(x)', 'datetime(x)', created_at FROM t -- julianday(x)\", []);\n    let message = \"the strftime of a time\";\n}",
+            "/// Reads `json_extract(payload,'$.kind')`.\nfn f(conn: &Connection) {\n    // strftime('%s', x)\n    conn.query_row(&format!(\"SELECT {} FROM t\", crate::infrastructure::sql_dialect::SqlDialect::Sqlite.json_field(\"payload\", \"$.kind\", JsonType::Text)), [], f);\n    conn.execute(\"SELECT my_json(payload), json, unixepoch, 'json(x)', 'datetime(x)', created_at FROM t -- julianday(x)\", []);\n    let message = \"the strftime of a time\";\n}",
         )]);
         assert!(found.is_empty(), "{found:?}");
     }

@@ -7,8 +7,9 @@ use dagq::application::supervise::{Heartbeat, HeartbeatPolicy};
 use dagq::application::{NodeSampleStore, Queue, QueueOpener};
 use dagq::domain::host_metrics::{HOST_NODE, HostSample};
 use dagq::domain::{EventKind, LeaseToken};
+use dagq::infrastructure::sql_exec::SqlRead;
 use dagq::infrastructure::sqlite::{SqliteQueue, WRITE_HOLD_WARN, WriteTx};
-use rusqlite::{Connection, Transaction};
+use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -393,7 +394,7 @@ fn an_import_that_waited_for_the_lock_past_the_threshold_is_not_named() {
 /// none is named once it held the write lock, whatever wrote: an immediate
 /// one from its `BEGIN`, one that only read included, and a deferred one
 /// once a write statement took the lock, through [`WriteTx::execute`] or
-/// only through the transaction it derefs to, one that changed no row
+/// through a native savepoint, one that changed no row
 /// included, committed or rolled back. A deferred one that only read is
 /// not.
 #[test]
@@ -407,14 +408,15 @@ fn a_write_tx_is_named_once_it_held_the_lock_and_not_when_it_only_read() {
         .unwrap();
     let read = |tx: &WriteTx<'_>| {
         let _: i64 = tx
-            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM t", &[], |r| r.get(0))
             .unwrap();
     };
-    // A write through the transaction the WriteTx derefs to, as
-    // `write_ledger_row_over` writes: it reports nothing to the WriteTx.
-    let deref_write = |tx: &WriteTx<'_>, sql: &str| {
-        let tx: &Transaction<'_> = tx;
-        tx.execute(sql, []).unwrap()
+    // A native savepoint writes without incrementing the entry row counter.
+    let uncounted_write = |tx: &mut WriteTx<'_>, sql: &str| {
+        let savepoint = tx.savepoint().unwrap();
+        let rows = savepoint.execute(sql, []).unwrap();
+        savepoint.commit().unwrap();
+        rows
     };
     let begin_read = |name| WriteTx::read(&conn, name, Duration::ZERO).unwrap();
     let identity = write_identity(&conn);
@@ -434,16 +436,19 @@ fn a_write_tx_is_named_once_it_held_the_lock_and_not_when_it_only_read() {
     assert_eq!(tx.execute("INSERT INTO t VALUES (1),(2)", []).unwrap(), 2);
     tx.execute("INSERT INTO t VALUES (3)", []).unwrap();
     tx.commit().unwrap();
-    let tx = begin_read("deferred_update_none");
+    let mut tx = begin_read("deferred_update_none");
     read(&tx);
-    assert_eq!(deref_write(&tx, "UPDATE t SET x = 10 WHERE x = 9"), 0);
-    tx.commit().unwrap();
-    let tx = begin_read("deferred_delete_none");
-    assert_eq!(deref_write(&tx, "DELETE FROM t WHERE x = 9"), 0);
-    drop(tx);
-    let tx = begin_read("deferred_insert_nothing");
     assert_eq!(
-        deref_write(&tx, "INSERT INTO t VALUES (0) ON CONFLICT DO NOTHING"),
+        uncounted_write(&mut tx, "UPDATE t SET x = 10 WHERE x = 9"),
+        0
+    );
+    tx.commit().unwrap();
+    let mut tx = begin_read("deferred_delete_none");
+    assert_eq!(uncounted_write(&mut tx, "DELETE FROM t WHERE x = 9"), 0);
+    drop(tx);
+    let mut tx = begin_read("deferred_insert_nothing");
+    assert_eq!(
+        uncounted_write(&mut tx, "INSERT INTO t VALUES (0) ON CONFLICT DO NOTHING"),
         0
     );
     tx.commit().unwrap();
@@ -464,36 +469,29 @@ fn a_write_tx_is_named_once_it_held_the_lock_and_not_when_it_only_read() {
         .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 4);
-}
 
-/// A deferred transaction whose lock a write through the transaction it
-/// derefs to took (one that changed no row) and that held it past a
-/// threshold before a write through [`WriteTx::execute`] is named, ended by
-/// its commit or by a drop: the later write does not move its lock time
-/// past the hold.
-#[test]
-fn a_deferred_hold_taken_through_the_deref_is_named_after_a_later_counted_write() {
-    let _test = common::test();
-    let holds = LongHolds::default();
-    let _subscriber =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
+    // A later counted write must retain the lock taken by an uncounted
+    // savepoint write, including one that changed no row. Measure a hold
+    // before that counted write so resetting its lock time would lose it.
     let threshold = Duration::from_millis(100);
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch("CREATE TABLE t(x)").unwrap();
-    let hold = |name| {
-        let tx = WriteTx::read(&conn, name, threshold).unwrap();
-        let deref: &Transaction<'_> = &tx;
+    let counted_after_hold = |name| {
+        let mut tx = WriteTx::read(&conn, name, threshold).unwrap();
         assert_eq!(
-            deref.execute("UPDATE t SET x = 1 WHERE x = 9", []).unwrap(),
+            uncounted_write(&mut tx, "UPDATE t SET x = 10 WHERE x = 9"),
             0
         );
         thread::sleep(threshold * 3);
         assert_eq!(tx.execute("DELETE FROM t WHERE x = 9", []).unwrap(), 0);
         tx
     };
-    hold("committed").commit().unwrap();
-    drop(hold("dropped"));
-    for name in ["committed", "dropped"] {
+    counted_after_hold("savepoint_then_counted_committed")
+        .commit()
+        .unwrap();
+    drop(counted_after_hold("savepoint_then_counted_dropped"));
+    for name in [
+        "savepoint_then_counted_committed",
+        "savepoint_then_counted_dropped",
+    ] {
         let held = holds.named(name);
         assert_eq!(held.len(), 1, "{name}: {:?}", holds.0);
         assert!(
@@ -517,7 +515,7 @@ fn held_long(db: &Path) -> Vec<serde_json::Value> {
 }
 
 /// A deferred transaction of a queue that changed no row through the
-/// transaction it derefs to, past the threshold, is recorded as
+/// native savepoint, past the threshold, is recorded as
 /// `queue_write_held_long` with its name, hold, role and pid after its
 /// commit and after its rollback; one that only read, and one within the
 /// threshold, are not.
@@ -528,28 +526,33 @@ fn a_queue_s_deferred_hold_with_no_row_changed_is_recorded_as_an_event() {
     let queue = SqliteQueue::open(&db)
         .unwrap()
         .with_write_hold_warn(Duration::ZERO);
-    let deref_write = |tx: &WriteTx<'_>, sql: &str| {
-        let tx: &Transaction<'_> = tx;
-        tx.execute(sql, []).unwrap()
+    let uncounted_write = |tx: &mut WriteTx<'_>, sql: &str| {
+        let savepoint = tx.savepoint().unwrap();
+        let rows = savepoint.execute(sql, []).unwrap();
+        savepoint.commit().unwrap();
+        rows
     };
-    let tx = queue.read_tx("update_none").unwrap();
+    let mut tx = queue.read_tx("update_none").unwrap();
     assert_eq!(
-        deref_write(&tx, "UPDATE tasks SET title = title WHERE id = -1"),
+        uncounted_write(&mut tx, "UPDATE tasks SET title = title WHERE id = -1"),
         0
     );
     tx.commit().unwrap();
-    let tx = queue.read_tx("delete_none").unwrap();
-    assert_eq!(deref_write(&tx, "DELETE FROM tasks WHERE id = -1"), 0);
+    let mut tx = queue.read_tx("delete_none").unwrap();
+    assert_eq!(
+        uncounted_write(&mut tx, "DELETE FROM tasks WHERE id = -1"),
+        0
+    );
     drop(tx);
     let tx = queue.read_tx("read_only").unwrap();
     let _: i64 = tx
-        .query_row("SELECT count(*) FROM tasks", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM tasks", &[], |r| r.get(0))
         .unwrap();
     tx.commit().unwrap();
     // The same write within the default threshold.
     let quiet = SqliteQueue::open(&db).unwrap();
-    let tx = quiet.read_tx("within").unwrap();
-    deref_write(&tx, "DELETE FROM tasks WHERE id = -1");
+    let mut tx = quiet.read_tx("within").unwrap();
+    uncounted_write(&mut tx, "DELETE FROM tasks WHERE id = -1");
     tx.commit().unwrap();
 
     let recorded = held_long(&db);
@@ -694,10 +697,8 @@ fn a_finished_write_tx_rolls_back_and_its_long_hold_is_recorded() {
     };
     let before = floor();
     let tx = queue.read_tx("finished").unwrap();
-    let deref: &Transaction<'_> = &tx;
     assert_eq!(
-        deref
-            .execute("UPDATE schema_floor SET floor = floor + 1", [])
+        tx.execute("UPDATE schema_floor SET floor = floor + 1", [])
             .unwrap(),
         1
     );

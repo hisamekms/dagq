@@ -3077,7 +3077,6 @@ mod tests {
     use super::*;
     use crate::domain::ledger::{self, LEDGER_V};
     use crate::domain::{EventId, RunEvent, RunId};
-    use crate::infrastructure::sqlite::event_row;
 
     const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -3869,7 +3868,7 @@ mod tests {
             let mut statement = queue.conn.prepare(ONE_STATEMENT).unwrap();
             let rows = statement
                 .query_map(params![LedgerKind::Run.as_str(), after, limit], |row| {
-                    with_row(row, ledger_row)
+                    crate::infrastructure::sql_exec::sqlite::with_row(row, ledger_row)
                 })
                 .unwrap();
             rows.map(|row| row.unwrap().unwrap()).collect()
@@ -3941,7 +3940,12 @@ mod tests {
             .conn
             .prepare("SELECT * FROM run_events ORDER BY id")
             .unwrap()
-            .query_map([], event_row)
+            .query_map([], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::store_rows::event_row,
+                )
+            })
             .unwrap()
             .map(Result::unwrap)
             .collect();

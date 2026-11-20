@@ -16,6 +16,9 @@ fn main() -> Result<()> {
         let connection = ConnectionString::new(url);
         client::migrate(&connection)?;
         store_contract::run(&|| client::connect(&connection))?;
+        let files = tempfile::tempdir()?;
+        let mut queue = client::open_queue(&connection, files.path().join("runs"))?;
+        store_contract::queue_ports(&mut queue, files.path())?;
         store_contract::postgres_search_writes(&|| client::connect(&connection))?;
         let store = client::connect(&connection)?;
         let generation = store

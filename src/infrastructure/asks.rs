@@ -1594,7 +1594,7 @@ mod tests {
     use crate::domain::AttentionNext;
     use crate::domain::LeaseToken;
     use crate::infrastructure::adapters::SystemProcesses;
-    use crate::infrastructure::sql_exec::sqlite::port_tx;
+
     use crate::infrastructure::sqlite::SqliteQueue;
     use rusqlite::params;
 
@@ -1959,7 +1959,7 @@ mod tests {
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let run = RunId::new("run-1").unwrap();
         let error = ask_event(
-            &port_tx(&queue.conn),
+            &*queue.conn,
             None,
             Some(&run),
             EventKind::AskOpened,
@@ -2016,8 +2016,8 @@ mod tests {
                 params![run, pid, now - age],
             )
             .unwrap();
-        super::super::sqlite::event(
-            &queue.conn,
+        super::super::store_writes::event(
+            &*queue.conn,
             task_id,
             Some(&run),
             EventKind::ReviseRequested,

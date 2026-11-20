@@ -144,7 +144,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 
 ## Runtime ownership
 
-書き込みの係のlifecycleの入口は`infrastructure::queue_service::serve`と`ServiceWriteLine`。
+書き込みの係のlifecycleの入口は`compose::serve_queue_service`と`ServiceWriteLine`。
 serviceは起動で係を引き継ぎ、予定した停止で列を空にしてから手放し、`not_leader`を受けた係は終わり、lockのfileを証にできるローカルのSQLiteは期限を待たない。
 
 runの所有・supervisorの登録・runのfileの約束（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)、[ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)）。
@@ -170,7 +170,7 @@ runの所有・supervisorの登録・runのfileの約束（[ADR-0007](../adr/000
 
 ### queue service
 
-queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[その例外](queue-service.md#dbを開く経路)だけで、SQLiteのtransactionとleaseの規則で並ぶ。
+queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[その例外](queue-service.md#dbを開く経路)だけで、選んだstoreのtransactionとleaseの規則で並ぶ。
 送り直される結果の記録のeventは最初の送信の識別子と`event_records`で結んで同じtransactionで書き、識別子ごとに1つのeventにする（ADR-t3102-3決定5）。
 
 ## session steps
@@ -187,7 +187,7 @@ queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[�
 
 ## follow-upの所属の判断
 
-follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`BEGIN IMMEDIATE`のtransactionで行う。
+follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ書き込みのtransactionで行う。
 行・遷移・必須の情報・旧schemaの読み方は[所属の判断](follow-up-membership.md)、入口は`src/infrastructure/follow_up_membership.rs`。
 
 ## Transactions and constraints
@@ -199,7 +199,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 - ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
 
-queue DBのtransactionの入口は`infrastructure::sqlite::WriteTx`（境界の検査は`src/context_boundaries/write_tx.rs`）。
+queue DBのtransactionの入口は`infrastructure::sql_exec::TransactionEntries`（境界の検査は`src/context_boundaries/write_tx.rs`）。
 
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのtransactionにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのtransactionで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのtransactionでholdを読むので、先に確定した側だけが効く。
@@ -241,8 +241,8 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 - queueのdirectoryは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
 - `logs/`の書式と消す時期は`infrastructure::telemetry`、`planners/`・`plan-reviews/`・`observer/`・`backups/`は`[retention]`（ADR-t697-1）。
 - storeの選択の入口は`compose::refuse_unusable_store`で、どのコマンドもqueueを開く前に通る。
-- storeの種類・接続先は配置設定が持つ。
-- 既定はSQLite、使えないstoreなら代用せず止まる。
+- storeの組み立ての入口は`compose::serve_queue_service`で、種類・接続先は配置設定が持つ。
+- 既定はSQLite、postgresを選ぶとPostgresのstoreでqueue serviceが動く（featureの無いbuildは代用せず止まる）。
 - Postgres接続は明示の平文指定が無ければTLSでサーバの証明書を確かめ、平文に落ちない。
 
 ## Database setup and migrations

@@ -427,7 +427,12 @@ fn the_conditions_select_what_the_domain_reads() {
         .conn
         .prepare("SELECT * FROM run_events ORDER BY id")
         .unwrap()
-        .query_map([], crate::infrastructure::sqlite::event_row)
+        .query_map([], |row| {
+            crate::infrastructure::sql_exec::sqlite::with_row(
+                row,
+                crate::infrastructure::store_rows::event_row,
+            )
+        })
         .unwrap()
         .map(Result::unwrap)
         .collect();

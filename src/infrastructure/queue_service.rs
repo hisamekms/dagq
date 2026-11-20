@@ -3801,15 +3801,14 @@ pub type ServiceDoctor<Q = SqliteQueue> = Arc<
 >;
 
 /// How `dagq service serve` runs.
-#[derive(Clone)]
-pub struct ServeOptions {
+pub struct ServeOptions<E: TransactionEntries = super::sqlite::SqliteEntries> {
     pub db: PathBuf,
     pub generators: Generators,
-    pub reads: ServiceReads,
-    pub writes: ServiceWrites,
+    pub reads: ServiceReads<StoreQueue<E>>,
+    pub writes: ServiceWrites<StoreQueue<E>>,
     pub detail: ServiceDetail,
-    pub commands: ServiceCommands,
-    pub doctor: ServiceDoctor,
+    pub commands: ServiceCommands<StoreQueue<E>>,
+    pub doctor: ServiceDoctor<StoreQueue<E>>,
     /// Set by SIGINT or SIGTERM: the service stops accepting and exits.
     pub stop: Arc<AtomicBool>,
     /// How often the loop looks for a connection or a stop.
@@ -3832,6 +3831,27 @@ pub struct ServeOptions {
     /// bound to another repository is refused before the service takes
     /// over or applies anything, leaving the running service as it was.
     pub binding: Option<String>,
+}
+
+impl<E: TransactionEntries> Clone for ServeOptions<E> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            generators: self.generators.clone(),
+            reads: self.reads.clone(),
+            writes: self.writes.clone(),
+            commands: self.commands.clone(),
+            doctor: self.doctor.clone(),
+            stop: self.stop.clone(),
+            start: self.start,
+            report: self.report.clone(),
+            executable: self.executable.clone(),
+            binding: self.binding.clone(),
+            detail: self.detail,
+            poll: self.poll,
+            owner: self.owner,
+        }
+    }
 }
 
 /// How the start of a replacement's service goes, as it tells its starter
@@ -4063,6 +4083,38 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 pub fn serve(options: &ServeOptions) -> Result<Value> {
     let config = super::deployment_config::DeploymentConfig::from_process()?;
     config.store.check_usable(cfg!(feature = "postgres"))?;
+    config.store.check_sqlite()?;
+    serve_configured(options, config, SqliteStorage)
+}
+
+/// The composition root supplies the Postgres callbacks and deployment
+/// connection as one backend; startup reads its schema and never migrates it.
+#[cfg(feature = "postgres")]
+pub fn serve_postgres(
+    options: &ServeOptions<
+        crate::infrastructure::postgres::PostgresStore<postgres_storage::ServiceSession>,
+    >,
+    connection: crate::domain::store_setting::ConnectionString,
+) -> Result<Value> {
+    let config = super::deployment_config::DeploymentConfig::from_process()?;
+    serve_configured(
+        options,
+        config,
+        postgres_storage::PostgresStorage::new(connection),
+    )
+}
+
+fn serve_configured<B: QueueStorage>(
+    options: &ServeOptions<B::Entries>,
+    config: super::deployment_config::DeploymentConfig,
+    storage: B,
+) -> Result<Value>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let oidc = deployment_verifier(
         config.value("DAGQ_OIDC_ISSUER"),
         config.value("DAGQ_OIDC_AUDIENCE"),
@@ -4092,18 +4144,13 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         super::github_refs::GithubRefs::from_deployment(&config, options.generators.clock.clone())?
             .map(Arc::new);
     let http = config.http.map(HttpStart::Deployment);
-    serve_on(
-        options,
-        http,
-        oidc,
-        Exchanges {
-            actions,
-            images,
-            rulesets,
-            refs,
-        },
-        oidc_configured,
-    )
+    let exchanges = Exchanges {
+        actions,
+        images,
+        rulesets,
+        refs,
+    };
+    serve_on_store(options, http, oidc, exchanges, oidc_configured, storage)
 }
 
 /// Whether the production entry [`serve`] opens the human exchange to a
@@ -4227,11 +4274,16 @@ const RULESET_WATCH_EVERY: Duration = Duration::from_secs(5);
 /// Start the service's ruleset watch: until `stop`, each step refreshes the
 /// gate when due (GitHub's reads, off the write line) and records its hold
 /// on the line while this service leads the writes.
-fn watch_rulesets(
+fn watch_rulesets<B: QueueStorage>(
     gate: Arc<crate::application::queue_service::RulesetGate>,
-    backend: Arc<SqliteServiceBackend>,
+    backend: Arc<SqliteServiceBackend<B>>,
     stop: Arc<AtomicBool>,
-) {
+) where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let watch = move || {
         while !stop.load(Ordering::SeqCst) {
             let step = crate::application::queue_service::watch_rulesets(&gate, |now| {
@@ -4260,11 +4312,16 @@ fn watch_rulesets(
 /// Retention and hand-over retry independently of runner polls: a finished
 /// run still gets cleaned when no runner asks for more work. Each pass uses
 /// fenced queue entries; local deployments never start this watch.
-fn watch_runner_refs(
+fn watch_runner_refs<B: QueueStorage>(
     refs: Arc<super::github_refs::GithubRefs>,
-    backend: Arc<SqliteServiceBackend>,
+    backend: Arc<SqliteServiceBackend<B>>,
     stop: Arc<AtomicBool>,
-) {
+) where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let watch = move || {
         let mut cleanup = crate::application::supervise::RunnerRefCleanup::default();
         while !stop.load(Ordering::SeqCst) {
@@ -4298,8 +4355,34 @@ fn serve_on(
     exchanges: Exchanges,
     oidc_configured: bool,
 ) -> Result<Value> {
+    serve_on_store(
+        options,
+        http,
+        oidc,
+        exchanges,
+        oidc_configured,
+        SqliteStorage,
+    )
+}
+
+fn serve_on_store<B: QueueStorage>(
+    options: &ServeOptions<B::Entries>,
+    http: Option<HttpStart>,
+    oidc: Option<Arc<dyn HumanVerifier>>,
+    exchanges: Exchanges,
+    oidc_configured: bool,
+    storage: B,
+) -> Result<Value>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let queue_dir = queue_dir_of(&options.db);
-    ensure!(options.db.is_file(), "no queue at {}", options.db.display());
+    if storage.local() {
+        ensure!(options.db.is_file(), "no queue at {}", options.db.display());
+    }
     let dir = service_dir(&queue_dir);
     private_dir(&dir)?;
     let socket = socket_path(&queue_dir);
@@ -4324,19 +4407,23 @@ fn serve_on(
     // accepts; what refuses them leaves the running service as it was.
     let taken = (|| {
         if let Some(binding) = &options.binding
-            && let Some(bound) = SqliteStorage.binding_at(&options.db)?
+            && let Some(bound) = storage.binding_at(&options.db)?
         {
             ensure!(
                 bound == *binding,
                 "queue is bound to another Git repository: {bound} (this repository is {binding})"
             );
         }
-        judge_start(
-            &options.db,
-            &options.executable,
-            migrations,
-            migrations != StartMigrations::None && lock_held(&queue_dir),
-        )?;
+        if storage.local() {
+            judge_start(
+                &options.db,
+                &options.executable,
+                migrations,
+                migrations != StartMigrations::None && lock_held(&queue_dir),
+            )?;
+        } else {
+            storage.open(&options.db)?;
+        }
         let wait = if migrations == StartMigrations::None {
             Duration::from_secs(2)
         } else {
@@ -4361,13 +4448,16 @@ fn serve_on(
             .transpose()?;
         // A queue that names no binary is named this one's now that it
         // holds the queue, so a start that fails names nothing.
-        queue_binary::check(
-            &options.db,
-            &options.executable,
-            &crate::infrastructure::adapters::process_alive,
-        )?;
-        let migrated =
-            apply_start_migrations(&options.db, migrations, options.generators.clock.now())?;
+        let migrated = if storage.local() {
+            queue_binary::check(
+                &options.db,
+                &options.executable,
+                &crate::infrastructure::adapters::process_alive,
+            )?;
+            apply_start_migrations(&options.db, migrations, options.generators.clock.now())?
+        } else {
+            None
+        };
         if let Some(migrated) = &migrated {
             // Said in the line's text: the service's log has the message
             // only.
@@ -4392,7 +4482,7 @@ accepts: schema {} to {}",
         }
     };
     // What a later replacement reads: a queue its build would migrate.
-    let pending = SqliteStorage
+    let pending = storage
         .schema(&options.db)
         .is_ok_and(|state| !state.pending.is_empty());
     match fs::remove_file(&socket) {
@@ -4427,10 +4517,10 @@ accepts: schema {} to {}",
         Box::new(super::startup_reads::OwnMemory),
     ));
     let holder = uuid::Uuid::new_v4().to_string();
-    let write_line = Arc::new(ServiceWriteLine::waiting(&options.db)?);
+    let write_line = Arc::new(storage.write_line(&options.db)?);
     // This lock was taken above for queue_dir_of(db); no other local
     // service can still own this SQLite file. Never infer proof from a pid.
-    let local_proof = local_lock_proof(&options.db, &queue_dir);
+    let local_proof = storage.local() && local_lock_proof(&options.db, &queue_dir);
     write_line.bootstrap.store(pending, Ordering::SeqCst);
     if local_proof {
         write_line.take(&options.db, &holder, true)?;
@@ -4438,7 +4528,7 @@ accepts: schema {} to {}",
     let mut takeover =
         TakeoverWorker::start(write_line.clone(), options.db.clone(), holder, local_proof)?;
     let backend = Arc::new(SqliteServiceBackend {
-        storage: SqliteStorage,
+        storage,
         oidc_configured,
         heavy_reads: Some(crate::application::heavy_reads::HeavyReads::of_service(
             options.generators.clock.clone(),
@@ -4507,7 +4597,7 @@ accepts: schema {} to {}",
         reads.tick();
         if checked.elapsed() >= QUEUE_CHECK {
             checked = Instant::now();
-            if !options.db.is_file() {
+            if backend.storage.local() && !options.db.is_file() {
                 break "queue_gone";
             }
             if owner_gone(options.owner) {
@@ -4614,10 +4704,16 @@ impl StartSweep {
     /// Put the sweep with `backend` on its write line when the sweep is
     /// still due and the line leads: where its answer comes, `None` when
     /// nothing was put.
-    fn once_leading(
+    fn once_leading<B: QueueStorage>(
         &mut self,
-        backend: &Arc<SqliteServiceBackend>,
-    ) -> Option<std::sync::mpsc::Receiver<LineAnswer>> {
+        backend: &Arc<SqliteServiceBackend<B>>,
+    ) -> Option<std::sync::mpsc::Receiver<LineAnswer>>
+    where
+        StoreQueue<B::Entries>: crate::application::SearchIndex
+            + crate::application::RunnerStore
+            + crate::application::ImageStore
+            + crate::application::queue_service::MemberStore,
+    {
         let line = backend
             .write_line
             .as_ref()
@@ -4628,7 +4724,7 @@ impl StartSweep {
             let swept = (|| {
                 // The identity the line keeps is the one of the service's start.
                 if let Some(line) = &starting.write_line {
-                    let _ = line.queue();
+                    let _ = starting.storage.write_queue(Some(line), &starting.db);
                 }
                 let revoked = crate::application::queue_service::revoke_ended_sign_ins(&*starting)?;
                 if !revoked.is_empty() {
@@ -4768,12 +4864,18 @@ pub(super) fn wait_for_connection(listener: &impl AsRawFd, poll: Duration) {
 
 /// Read one request from `stream`, answer it, and close; in the
 /// service's first minutes, record what it read in `reads`.
-fn answer(
+fn answer<B: QueueStorage>(
     stream: UnixStream,
-    backend: &Arc<SqliteServiceBackend>,
+    backend: &Arc<SqliteServiceBackend<B>>,
     pid: u32,
     reads: &super::startup_reads::StartupReads,
-) -> Result<()> {
+) -> Result<()>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -4795,13 +4897,19 @@ fn answer(
 /// The answer's line to the request's `line` from `peer`, by the service of
 /// `backend`; recorded in `reads` while its window is open. The record never
 /// changes the answer.
-fn answer_request(
+fn answer_request<B: QueueStorage>(
     line: &[u8],
-    backend: &Arc<SqliteServiceBackend>,
+    backend: &Arc<SqliteServiceBackend<B>>,
     pid: u32,
     (peer, process): (Peer, Option<u32>),
     reads: &super::startup_reads::StartupReads,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let read = if line.len() > MAX_REQUEST_BYTES {
         Err(ServiceResponse::failure(
             ServiceErrorCode::BadRequest,
@@ -4832,15 +4940,21 @@ fn exchange_identity(
 
 /// How the HTTP entrance has its requests answered: with no peer, by the
 /// service of `backend`.
-fn http_answerer(
-    backend: Arc<SqliteServiceBackend>,
+fn http_answerer<B: QueueStorage>(
+    backend: Arc<SqliteServiceBackend<B>>,
     pid: u32,
     reads: Arc<super::startup_reads::StartupReads>,
     oidc: Option<Arc<dyn HumanVerifier>>,
     Exchanges {
         actions, images, ..
     }: Exchanges,
-) -> HttpAnswerer {
+) -> HttpAnswerer
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     Arc::new(move |request| {
         if request.use_case == UseCase::ImagePublisherExchange {
             let verified = exchange_identity(
@@ -4981,13 +5095,19 @@ fn http_answerer(
 /// The answer to a request as its transport read it (`Err`: the refusal of
 /// one that does not read) from `peer`; aggregated in `reads` throughout
 /// the service's lifetime. The record never changes the answer.
-fn answer_read(
+fn answer_read<B: QueueStorage>(
     read: Result<ServiceRequest, ServiceResponse>,
-    backend: &Arc<SqliteServiceBackend>,
+    backend: &Arc<SqliteServiceBackend<B>>,
     pid: u32,
     (peer, process): (Peer, Option<u32>),
     reads: &super::startup_reads::StartupReads,
-) -> Result<Answered> {
+) -> Result<Answered>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let began = reads.begin();
     let mut use_case = None;
     let mut op = None;
@@ -5045,18 +5165,24 @@ fn answered_of(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<
 /// An error when the line gave no answer (it stopped, or the work panicked):
 /// the connection closes unanswered, which a caller reads as maybe done and
 /// sends again, where an answer of `failed` would be final.
-fn handled(
-    backend: &Arc<SqliteServiceBackend>,
+fn handled<B: QueueStorage>(
+    backend: &Arc<SqliteServiceBackend<B>>,
     pid: u32,
     request: ServiceRequest,
     peer: Peer,
     process: Option<u32>,
-) -> Result<LineAnswer> {
+) -> Result<LineAnswer>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     let waiting = backend
         .write_line
         .as_ref()
         .is_some_and(|line| !line.leading() && !line.bootstrap.load(Ordering::SeqCst));
-    let handle = move |backend: &SqliteServiceBackend, request: &ServiceRequest| {
+    let handle = move |backend: &SqliteServiceBackend<B>, request: &ServiceRequest| {
         let mut notes = RequestNotes::default();
         let service = QueueService {
             backend,
@@ -5211,6 +5337,21 @@ fn refused_as_not_leader(answer: &LineAnswer) -> bool {
         .is_some_and(|error| error.code == ServiceErrorCode::NotLeader)
 }
 
+/// The leadership operations used by the service without selecting a driver.
+trait LeaderQueue: WriteLeaderStore {
+    fn fence(&self) -> Result<()>;
+}
+impl<E: TransactionEntries> LeaderQueue for StoreQueue<E>
+where
+    Self: WriteLeaderStore,
+{
+    fn fence(&self) -> Result<()> {
+        crate::infrastructure::sql_exec::CommitTransaction::commit(
+            self.write_entry("renew_service_leader")?,
+        )
+    }
+}
+
 /// The service's writes in one line ([`WriteLine`]) on one connection
 /// ([`WriteConnection`], ADR-t3986-1 decision 1). Which requests go on it is
 /// [`on_write_line`]; the records a request of another thread makes (the
@@ -5223,6 +5364,10 @@ fn refused_as_not_leader(answer: &LineAnswer) -> bool {
 pub struct ServiceWriteLine {
     line: WriteLine<LineAnswer>,
     connection: WriteConnection,
+    #[cfg(feature = "postgres")]
+    postgres: Option<postgres_storage::PostgresStorage>,
+    #[cfg(feature = "postgres")]
+    db: PathBuf,
     /// [`LINE_RECORD_WAIT`], unless a test lowers it.
     record_wait: Duration,
     identity: Mutex<Option<super::write_leader::WriteIdentity>>,
@@ -5253,12 +5398,32 @@ impl ServiceWriteLine {
         Ok(Self {
             line: WriteLine::start(refused_as_not_leader)?,
             connection: SqliteStorage.write_connection(db),
+            #[cfg(feature = "postgres")]
+            postgres: None,
+            #[cfg(feature = "postgres")]
+            db: db.to_owned(),
             record_wait: LINE_RECORD_WAIT,
             identity: Mutex::new(None),
             acquiring: Mutex::new(()),
             renewal_checked: Mutex::new(Instant::now()),
             bootstrap: AtomicBool::new(false),
         })
+    }
+
+    fn leader_queue(&self, db: &Path) -> Result<Box<dyn LeaderQueue>> {
+        #[cfg(feature = "postgres")]
+        if let Some(storage) = &self.postgres {
+            return Ok(Box::new(storage.open(db)?));
+        }
+        Ok(Box::new(SqliteStorage.open(db)?))
+    }
+
+    fn renewal_queue(self: &Arc<Self>) -> Result<Box<dyn LeaderQueue>> {
+        #[cfg(feature = "postgres")]
+        if let Some(storage) = &self.postgres {
+            return Ok(Box::new(storage.write_queue(Some(self), &self.db)?));
+        }
+        Ok(Box::new(self.queue()?))
     }
 
     /// The queue on the line's connection, for the line's thread alone: no
@@ -5291,13 +5456,28 @@ impl ServiceWriteLine {
         if self.identity.lock().unwrap().is_some() {
             return Ok(true);
         }
-        let schema = SqliteStorage.schema(db)?;
-        if schema.schema_version < schema.binary_schema_version {
+        let local = {
+            #[cfg(feature = "postgres")]
+            {
+                self.postgres.is_none()
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                true
+            }
+        };
+        let schema = if local {
+            Some(SqliteStorage.schema(db)?)
+        } else {
+            None
+        };
+        if schema.is_some_and(|schema| schema.schema_version < schema.binary_schema_version) {
             self.bootstrap.store(true, Ordering::SeqCst);
             return Ok(false);
         }
         self.bootstrap.store(false, Ordering::SeqCst);
-        let queue = SqliteStorage.open(db)?;
+        let queue = self.leader_queue(db)?;
+        let local_proof = local && local_proof;
         let (row, now) = queue.write_leader()?;
         if takeover(&row, now, local_proof) != Takeover::Take {
             return Ok(false);
@@ -5330,8 +5510,7 @@ impl ServiceWriteLine {
             && let Some(identity) = self.identity.lock().unwrap().take()
             && let Some(holder) = identity.holder
         {
-            SqliteStorage
-                .open(db)?
+            self.leader_queue(db)?
                 .release_write_leader(&holder, identity.generation)?;
         }
         Ok(())
@@ -5352,7 +5531,7 @@ impl ServiceWriteLine {
             let on = self.clone();
             self.line.enqueue(move || LineAnswer {
                 response: crate::application::queue_service::respond((|| {
-                    let queue = on.queue()?;
+                    let queue = on.renewal_queue()?;
                     let (row, now) = queue.write_leader()?;
                     let identity = on
                         .identity
@@ -5364,7 +5543,7 @@ impl ServiceWriteLine {
                         return Err(crate::application::NotLeader.into());
                     }
                     if crate::domain::write_leader::lease_renewal_due(row.lease_until_ms, now) {
-                        queue.write_tx("renew_service_leader")?.commit()?;
+                        queue.fence()?;
                     }
                     Ok(Value::Null)
                 })()),
@@ -5828,6 +6007,7 @@ where
                 Ok(json!({"schema_version": state.schema_version, "floor": state.floor}))
             }
             Admin::Migrate => {
+                self.storage.refuse_service_migrate()?;
                 // Only the queue's binary changes its schema, which a
                 // service an `install` grants or one of another build
                 // started before the queue named it may not be.
@@ -7945,6 +8125,10 @@ again once it ends"
     }
 }
 
+#[cfg(feature = "postgres")]
+mod postgres_storage;
+#[cfg(feature = "postgres")]
+pub use postgres_storage::ServiceSession;
 mod runner_refs;
 mod storage;
 mod write_line;

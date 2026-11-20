@@ -1,5 +1,6 @@
 //! Shared registry SQL. No JWT or token value is stored here. Registry
 //! writes are ports only; authorization and commands belong to their callers.
+use super::sql_exec::CommitTransaction as _;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, TransactionEntries, sql_params};
 use crate::application::queue_service::MemberStore;
 use crate::domain::{
@@ -165,5 +166,5 @@ macro_rules! member_store {
         }
     };
 }
-member_store!(super::sqlite::SqliteQueue);
+member_store!(super::store_queue::StoreQueue<E>, E: crate::infrastructure::sql_exec::TransactionEntries);
 member_store!(super::postgres::PostgresStore<S>, S: super::postgres::PostgresSession);

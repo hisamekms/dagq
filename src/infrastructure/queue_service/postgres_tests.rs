@@ -116,3 +116,57 @@ fn postgres_issuing_reads_inside_one_committed_transaction() {
     assert!(statements.iter().any(|s| s.contains("FROM supervisors")));
     assert!(statements.iter().any(|s| s.contains("FROM plan_reviews")));
 }
+
+#[test]
+fn postgres_startup_reads_without_running_the_migration_series() {
+    let session = Session::default();
+    let _queue = storage::postgres_queue(session.clone(), Path::new("queue/data.db")).unwrap();
+    let statements = session.0.statements.borrow();
+    assert_eq!(statements.len(), 4, "{statements:?}");
+    assert_eq!(statements[0], "SET TIME ZONE 'UTC'");
+    assert!(statements[1].starts_with("SELECT count(*) FROM pg_catalog.pg_class"));
+    assert_eq!(statements[2], "SELECT version, floor FROM dagq_schema");
+    assert_eq!(
+        statements[3],
+        "SELECT holder, generation FROM write_leader WHERE singleton = 1"
+    );
+    assert!(!session.0.transaction.get());
+}
+
+#[test]
+fn postgres_service_migration_is_refused_before_any_store_is_opened() {
+    let error = storage::refuse_postgres_service_migrate::<()>().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deployment's separate migrate command")
+    );
+}
+
+#[test]
+fn a_composed_postgres_queue_writes_through_the_postgres_execution_port() {
+    use crate::infrastructure::sql_exec::{
+        CommitTransaction, SqlWrite, TransactionEntries, sql_params,
+    };
+    let session = Session::default();
+    let queue = storage::postgres_queue(session.clone(), Path::new("queue/data.db")).unwrap();
+    session.0.statements.borrow_mut().clear();
+    let tx = queue.write_entry("composed_write").unwrap();
+    assert_eq!(
+        tx.execute(
+            "UPDATE tasks SET title=?1 WHERE id=?2",
+            sql_params!["title", 7_i64]
+        )
+        .unwrap(),
+        1
+    );
+    CommitTransaction::commit(tx).unwrap();
+    let statements = session.0.statements.borrow();
+    assert_eq!(statements[0], "BEGIN ISOLATION LEVEL READ COMMITTED");
+    assert!(
+        statements
+            .iter()
+            .any(|s| s == "UPDATE tasks SET title=$1 WHERE id=$2")
+    );
+    assert_eq!(statements.last().unwrap(), "COMMIT");
+}

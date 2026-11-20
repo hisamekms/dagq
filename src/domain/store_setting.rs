@@ -9,9 +9,8 @@
 //!
 //! A setting that cannot be used refuses ([`StoreRefusal`]) and never falls
 //! back to SQLite, so a deployment that meant its shared store does not
-//! start on an empty local queue. `postgres` refuses in every build until
-//! the store's ports run on Postgres: choosing a backend that is not there
-//! would look like it worked.
+//! start on an empty local queue. Postgres requires its driver feature and
+//! an explicit connection string.
 
 use std::{ffi::OsString, fmt};
 
@@ -78,9 +77,8 @@ pub enum StoreRefusal {
     NoPostgresFeature,
     /// `postgres`, without a connection string.
     NoConnection,
-    /// `postgres`, in a build with the feature, while the store's ports do
-    /// not run on Postgres.
-    PostgresNotUsableYet,
+    /// A local-only operation cannot open the configured shared queue.
+    LocalOnly,
 }
 
 impl fmt::Display for StoreRefusal {
@@ -99,14 +97,13 @@ impl fmt::Display for StoreRefusal {
                 "{STORE_KIND_ENV} is `postgres` but this build has no Postgres store: \
                  it is built without the cargo feature `postgres`"
             ),
+            Self::LocalOnly => write!(
+                f,
+                "this operation opens SQLite but the deployment selected Postgres; use the Postgres queue service or deployment administration command"
+            ),
             Self::NoConnection => write!(
                 f,
                 "{STORE_KIND_ENV} is `postgres` but {STORE_CONNECTION_ENV} is not set"
-            ),
-            Self::PostgresNotUsableYet => write!(
-                f,
-                "{STORE_KIND_ENV} is `postgres` but the Postgres store cannot be used yet: \
-                 the store's ports do not run on it"
             ),
         }?;
         f.write_str("; no queue was opened")
@@ -135,6 +132,14 @@ impl StoreSetting {
         }
     }
 
+    /// Administrative exceptions may open a local file only for SQLite.
+    pub fn check_sqlite(&self) -> Result<(), StoreRefusal> {
+        match self {
+            Self::Sqlite => Ok(()),
+            Self::Postgres { .. } => Err(StoreRefusal::LocalOnly),
+        }
+    }
+
     /// Whether a build with (`postgres_built`) or without the feature can
     /// run on this setting.
     pub fn check_usable(&self, postgres_built: bool) -> Result<(), StoreRefusal> {
@@ -144,7 +149,7 @@ impl StoreSetting {
             Self::Postgres { connection: None } => Err(StoreRefusal::NoConnection),
             Self::Postgres {
                 connection: Some(_),
-            } => Err(StoreRefusal::PostgresNotUsableYet),
+            } => Ok(()),
         }
     }
 }
@@ -176,7 +181,7 @@ mod tests {
 
     /// The reason names what would let it through, by build.
     #[test]
-    fn postgres_refuses_in_every_build_with_the_reason_of_that_build() {
+    fn postgres_requires_its_feature_and_connection() {
         let chosen = setting(Some("postgres"), Some(URL)).unwrap();
         assert_eq!(
             chosen,
@@ -187,9 +192,7 @@ mod tests {
         let without = chosen.check_usable(false).unwrap_err();
         assert_eq!(without, StoreRefusal::NoPostgresFeature);
         assert!(without.to_string().contains("cargo feature `postgres`"));
-        let with = chosen.check_usable(true).unwrap_err();
-        assert_eq!(with, StoreRefusal::PostgresNotUsableYet);
-        assert!(with.to_string().contains("cannot be used yet"));
+        assert_eq!(chosen.check_usable(true), Ok(()));
         let no_url = setting(Some("postgres"), None).unwrap();
         assert_eq!(
             no_url.check_usable(false),
@@ -228,7 +231,9 @@ mod tests {
         let chosen = setting(Some("postgres"), Some(URL)).unwrap();
         assert!(!format!("{chosen:?}").contains("hunter2"));
         for built in [false, true] {
-            let refusal = chosen.check_usable(built).unwrap_err();
+            let Some(refusal) = chosen.check_usable(built).err() else {
+                continue;
+            };
             assert!(!refusal.to_string().contains("hunter2"));
             assert!(refusal.to_string().ends_with("no queue was opened"));
         }
@@ -237,5 +242,17 @@ mod tests {
         let in_the_wrong_variable = setting(Some(URL), None).unwrap_err();
         assert!(!format!("{in_the_wrong_variable:?}").contains("hunter2"));
         assert!(!in_the_wrong_variable.to_string().contains("hunter2"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn local_file_operations_refuse_every_postgres_setting() {
+    assert!(StoreSetting::Sqlite.check_sqlite().is_ok());
+    for connection in [None, Some(ConnectionString::new("postgres://db/queue"))] {
+        assert_eq!(
+            StoreSetting::Postgres { connection }.check_sqlite(),
+            Err(StoreRefusal::LocalOnly)
+        );
     }
 }

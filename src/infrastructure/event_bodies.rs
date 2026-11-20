@@ -153,9 +153,14 @@ mod tests {
             .unwrap();
         assert!(bodies.0.lock().unwrap().is_empty());
         let tx = queue.write_tx("event_body_rollback_test").unwrap();
-        super::super::sqlite::record_queue_event_in(&tx, EventKind::BackendCallFailed, &payload)
-            .unwrap();
+        super::super::store_writes::record_queue_event_in(
+            &tx,
+            EventKind::BackendCallFailed,
+            &payload,
+        )
+        .unwrap();
         let row: String = tx
+            .inner()
             .query_row(
                 "SELECT payload FROM run_events ORDER BY id DESC LIMIT 1",
                 [],

@@ -2144,7 +2144,7 @@ mod tests {
             "integration_started",
         );
         run_event(
-            &crate::infrastructure::sql_exec::sqlite::port_tx(&queue.conn),
+            &*queue.conn,
             &run,
             EventKind::RunPhaseChanged,
             landing.payload(),

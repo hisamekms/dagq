@@ -328,7 +328,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        tx.execute_batch("CREATE TABLE compatible_under_holder(value INTEGER)")
+        tx.inner()
+            .execute_batch("CREATE TABLE compatible_under_holder(value INTEGER)")
             .unwrap();
         tx.commit().unwrap();
         assert_eq!(queue.write_leader().unwrap().0, before);
@@ -344,7 +345,8 @@ mod tests {
         assert!(lock_migration(&tx, &identity).unwrap());
         let (holder, taken) = take_for_migration(&tx, true, true, true).unwrap().unwrap();
         assert_eq!(taken, generation + 1);
-        tx.execute_batch("CREATE TABLE migrated_under_leader(value INTEGER)")
+        tx.inner()
+            .execute_batch("CREATE TABLE migrated_under_leader(value INTEGER)")
             .unwrap();
         assert!(release(&tx, &holder, taken).unwrap());
         tx.commit().unwrap();

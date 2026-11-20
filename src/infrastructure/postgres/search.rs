@@ -475,7 +475,8 @@ mod tests {
             params: &[SqlValue],
             visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
         ) -> SqlResult<()> {
-            crate::infrastructure::sql_exec::sqlite::port_tx(&self.0).visit_rows(
+            SqlRead::visit_rows(
+                &self.0,
                 &sql.replace("search_index", "pg_index"),
                 params,
                 visit,

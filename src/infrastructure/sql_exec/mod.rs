@@ -20,10 +20,6 @@
 //! it means another connection held the lock. Its text is the text of the
 //! rusqlite error it stands for, so a moved module's messages do not change.
 //!
-//! While modules move one by one, [`sqlite`] keeps them working together:
-//! the transaction of an entry still derefs to rusqlite's, and
-//! [`sqlite::port_tx`] hands a `Connection` an unmoved module holds to what
-//! has moved.
 
 pub(crate) mod commit_actions;
 #[cfg(test)]

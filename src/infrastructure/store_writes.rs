@@ -1,7 +1,6 @@
 //! The writes the store's modules share, on the execution port
 //! ([`super::sql_exec`]): a task's and the queue's events and a new task with
-//! its dependencies. The functions of the same name in [`super::sqlite`] hand
-//! a rusqlite connection to these for a module that has not moved.
+//! its dependencies. Both adapters call these on their named entries.
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -403,8 +402,8 @@ pub(super) fn event_id(
 
 #[cfg(test)]
 mod tests {
-    use super::super::sql_exec::sqlite::port_tx;
-    use super::super::sqlite::{self, SqliteQueue};
+
+    use super::super::sqlite::SqliteQueue;
     use super::*;
 
     fn queue() -> SqliteQueue {
@@ -485,7 +484,7 @@ mod tests {
         .unwrap();
         assert_eq!(opened(&tx), 1);
         event(
-            &port_tx(&tx),
+            &tx,
             task.id(),
             None,
             EventKind::PlanReviewStarted,
@@ -493,7 +492,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(opened(&tx), 2);
-        sqlite::event(
+        event(
             &tx,
             task.id(),
             None,

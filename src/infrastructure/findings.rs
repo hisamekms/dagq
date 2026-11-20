@@ -497,7 +497,7 @@ pub(super) fn finding_row(row: &SqlRow<'_>) -> SqlResult<Finding> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::sql_exec::sqlite::port_tx;
+
     use super::*;
     use crate::application::TaskStore;
     use crate::domain::{NewGoal, NewTask, Priority};
@@ -567,10 +567,6 @@ mod tests {
         ];
         for (target, resolved) in &cases {
             assert_eq!(&resolve_target(&*queue.conn, target).unwrap(), resolved);
-            assert_eq!(
-                &resolve_target(&port_tx(&queue.conn), target).unwrap(),
-                resolved
-            );
         }
         let tx = queue.read_tx("resolve_target_test").unwrap();
         for (target, resolved) in &cases {

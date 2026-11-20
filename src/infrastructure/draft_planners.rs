@@ -2291,7 +2291,7 @@ mod tests {
             (proposal.as_i64(), "it must use the new API"),
         ] {
             event(
-                &super::super::sql_exec::sqlite::port_tx(&queue.conn),
+                &*queue.conn,
                 reopened,
                 None,
                 EventKind::TaskReopened,

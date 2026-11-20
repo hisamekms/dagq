@@ -399,13 +399,13 @@ mod tests {
         // The first post-migration grants preserve the known current holders,
         // including a lease whose generation has no record yet.
         let tx = conn.transaction().unwrap();
-        let port = super::super::sql_exec::sqlite::port_tx(&tx);
+        let port = &*tx;
         assert!(matches!(
-            grant_lease(&port, "r", "c", 100).unwrap(),
+            grant_lease(port, "r", "c", 100).unwrap(),
             Grant::Grant { generation: 3, .. }
         ));
         assert!(matches!(
-            grant_lease(&port, "unreported", "b", 100).unwrap(),
+            grant_lease(port, "unreported", "b", 100).unwrap(),
             Grant::Grant { generation: 2, .. }
         ));
         tx.commit().unwrap();

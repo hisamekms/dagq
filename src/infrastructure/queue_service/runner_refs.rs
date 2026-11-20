@@ -5,11 +5,11 @@ use super::*;
 use crate::application::{RunnerLeaseStore, RunnerTakeoverStore};
 use crate::domain::{run_refs::End, runner_lease::*, runner_takeover::Takeover};
 
-pub(super) struct RefQueue(pub Arc<SqliteServiceBackend>);
-impl RefQueue {
+pub(super) struct RefQueue<B: QueueStorage>(pub Arc<SqliteServiceBackend<B>>);
+impl<B: QueueStorage> RefQueue<B> {
     fn call<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&mut SqliteQueue) -> Result<T> + Send + 'static,
+        f: impl FnOnce(&mut StoreQueue<B::Entries>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let on = self.0.clone();
         let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -26,7 +26,7 @@ impl RefQueue {
         receive.recv().context("runner ref queue reply missing")?
     }
 }
-impl RunnerLeaseStore for RefQueue {
+impl<B: QueueStorage> RunnerLeaseStore for RefQueue<B> {
     fn grant_runner_lease(&self, run: &str, runner: &str, now: i64) -> Result<Grant> {
         let (run, runner) = (run.to_owned(), runner.to_owned());
         self.call(move |q| q.grant_runner_lease(&run, &runner, now))
@@ -94,7 +94,7 @@ impl RunnerLeaseStore for RefQueue {
         self.call(move |q| q.verified_ref(&run))
     }
 }
-impl RunnerTakeoverStore for RefQueue {
+impl<B: QueueStorage> RunnerTakeoverStore for RefQueue<B> {
     fn runner_ref_ends(&self) -> Result<Vec<End>> {
         self.call(|q| q.runner_ref_ends())
     }

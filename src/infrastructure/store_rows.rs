@@ -440,7 +440,7 @@ fn completed_before(tx: &impl SqlRead, task_id: TaskId, event_id: i64) -> Result
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+
     use serde_json::json;
 
     use super::*;
@@ -448,8 +448,9 @@ mod tests {
     use crate::domain::cancel_reason::NewCancel;
     use crate::domain::event_kind::EventKind;
     use crate::domain::{NewGoal, NewTask, TaskStatus};
-    use crate::infrastructure::sql_exec::sqlite::{port_tx, with_row};
-    use crate::infrastructure::sqlite::{self, SqliteQueue};
+    use crate::infrastructure::sql_exec::TransactionEntries;
+
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     fn queue(name: &str) -> SqliteQueue {
         let uri = format!("file:/store-rows-{name}-{}?vfs=memdb", uuid::Uuid::new_v4());
@@ -490,62 +491,44 @@ mod tests {
         }
     }
 
-    /// A moved reader returns on an entry's transaction, on the read
-    /// connection and through its wrapper what the others do.
+    /// Named read entries restore tasks and goals and report missing rows.
     #[test]
-    fn the_readers_return_the_same_through_the_port_and_the_wrappers() {
+    fn the_readers_return_the_same_from_the_port() {
         let mut queue = queue("readers");
         let goal = queue.add_goal(new_goal()).unwrap();
         let task = queue.add(new_task(goal.id())).unwrap();
         let tx = queue.read_tx("store_rows_test").unwrap();
-        let on_conn: &Connection = &tx;
 
         let through_entry = read_task(&tx, task.id()).unwrap();
         assert_eq!(through_entry.title(), "task");
         assert_eq!(through_entry.goal_id(), Some(goal.id()));
-        let expected = format!("{through_entry:?}");
-        let wrapper = sqlite::read_task(&tx, task.id()).unwrap();
-        assert_eq!(format!("{wrapper:?}"), expected);
-        let read = read_task(on_conn, task.id()).unwrap();
-        assert_eq!(format!("{read:?}"), expected);
-
         let through_entry = read_goal(&tx, goal.id()).unwrap();
         assert_eq!(through_entry.title(), "goal");
-        let wrapper = sqlite::read_goal(&tx, goal.id()).unwrap();
-        assert_eq!(format!("{wrapper:?}"), format!("{through_entry:?}"));
 
         let missing = TaskId::new(99);
-        for error in [
-            read_task(&tx, missing).unwrap_err(),
-            sqlite::read_task(&tx, missing).unwrap_err(),
-        ] {
-            assert_eq!(error.to_string(), "task 99 does not exist");
-        }
-        for error in [
-            read_goal(&tx, GoalId::new(99)).unwrap_err(),
-            sqlite::read_goal(&tx, GoalId::new(99)).unwrap_err(),
-        ] {
-            assert_eq!(error.to_string(), "goal 99 does not exist");
-        }
+        assert_eq!(
+            read_task(&tx, missing).unwrap_err().to_string(),
+            "task 99 does not exist"
+        );
+        assert_eq!(
+            read_goal(&tx, GoalId::new(99)).unwrap_err().to_string(),
+            "goal 99 does not exist"
+        );
         assert!(held_claims(&tx).unwrap().is_empty());
-        assert!(sqlite::held_claims(&tx).unwrap().is_empty());
     }
 
-    /// An event row reads the same both ways, its actor included, and a
-    /// query that does not select the actor's columns has none.
+    /// An event restores its actor; unselected actor columns mean no actor.
     #[test]
-    fn an_event_row_reads_the_same_through_the_port_and_the_wrapper() {
+    fn an_event_row_reads_the_same_from_the_port() {
         let queue = queue("events");
         queue
             .record_queue_event(EventKind::ObserveStarted, json!({"n": 1}))
             .unwrap();
         let sql = "SELECT * FROM run_events ORDER BY id DESC LIMIT 1";
-        let tx = port_tx(&queue.conn);
+        let tx = queue.read_entry("rows").unwrap();
         let through_port = tx.query_row(sql, &[], event_row).unwrap();
         let actor = through_port.actor.clone().unwrap();
         assert_eq!((actor.role.as_str(), actor.id.as_str()), ("user", "user"));
-        let through_wrapper = queue.conn.query_row(sql, [], sqlite::event_row).unwrap();
-        assert_eq!(format!("{through_port:?}"), format!("{through_wrapper:?}"));
         let no_actor = tx
             .query_row(
                 "SELECT id, task_id, goal_id, run_id, kind, payload, created_at FROM run_events",
@@ -556,10 +539,9 @@ mod tests {
         assert!(no_actor.actor.is_none());
     }
 
-    /// A run reads the same both ways, with its paths under `runs_dir` from
-    /// `run_row`; the row comes from the query alone.
+    /// Run rows preserve IDs and relocate file paths under the supplied root.
     #[test]
-    fn a_run_row_reads_the_same_through_the_port_and_the_wrapper() {
+    fn a_run_row_reads_the_same_from_the_port() {
         let queue = queue("runs");
         let sql = "SELECT 'r1' AS id, 4 AS task_id, 'running' AS status,
                 'claude' AS requested_provider, 'claude' AS actual_provider,
@@ -569,38 +551,23 @@ mod tests {
                 NULL AS receipt_path, NULL AS log_path, NULL AS result_commit,
                 NULL AS repo_path, 'old/r1' AS run_dir, NULL AS last_error,
                 NULL AS workspace_closed_at, 'now' AS created_at";
-        let tx = port_tx(&queue.conn);
+        let tx = queue.read_entry("rows").unwrap();
         let stored = tx.query_row(sql, &[], stored_run_row).unwrap();
-        let wrapper = queue
-            .conn
-            .query_row(sql, [], sqlite::stored_run_row)
-            .unwrap();
-        assert_eq!(format!("{stored:?}"), format!("{wrapper:?}"));
+        assert_eq!(stored.id().as_str(), "r1");
         let runs_dir = Path::new("/runs");
         let relocated = tx.query_row(sql, &[], run_row(runs_dir)).unwrap();
-        let wrapper = queue
-            .conn
-            .query_row(sql, [], sqlite::run_row(runs_dir))
-            .unwrap();
-        assert_eq!(format!("{relocated:?}"), format!("{wrapper:?}"));
+        assert_eq!(relocated.run_dir(), Some("/runs/r1"));
     }
 
-    /// A value the domain does not know is an error of the column, never a
-    /// default, with the same text and cause both ways; `NULL` is `None`.
+    /// Invalid values retain their column errors; NULL is None.
     #[test]
-    fn a_column_helper_reads_and_refuses_the_same_through_the_port_and_the_wrapper() {
+    fn a_column_helper_reads_and_refuses_the_same_from_the_port() {
         let queue = queue("columns");
-        let conn = &queue.conn;
-        let tx = port_tx(conn);
+        let tx = queue.read_entry("columns").unwrap();
         let sql = "SELECT 'ready' AS status, 'nope' AS bad, NULL AS absent,
                 '[1,2]' AS list, 'not json' AS broken, 3 AS priority, 9 AS bad_priority";
         let both = |read: &dyn Fn(&SqlRow<'_>) -> SqlResult<String>| {
-            let port = tx.query_row(sql, &[], read).map_err(|e| e.to_string());
-            let wrapper = conn
-                .query_row(sql, [], |row| with_row(row, read))
-                .map_err(|e| e.to_string());
-            assert_eq!(port, wrapper);
-            port
+            tx.query_row(sql, &[], read).map_err(|e| e.to_string())
         };
         let status = |name: &'static str| {
             both(&move |row| Ok(format!("{:?}", optional_enum_col::<TaskStatus>(row, name)?)))
@@ -613,14 +580,6 @@ mod tests {
             bad.starts_with("Conversion error from type Text at index: 1, "),
             "{bad}"
         );
-        let wrapper = conn
-            .query_row(sql, [], |row| sqlite::enum_col::<TaskStatus>(row, "bad"))
-            .unwrap_err();
-        assert_eq!(wrapper.to_string(), bad);
-        assert!(matches!(
-            wrapper,
-            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, _)
-        ));
         let list = |name: &'static str| {
             both(&move |row| Ok(format!("{:?}", json_col::<Vec<i64>>(row, name)?)))
         };
@@ -633,10 +592,7 @@ mod tests {
         let priority = |name: &'static str| {
             both(&move |row| Ok(format!("{:?}", optional_priority_col(row, name)?)))
         };
-        assert_eq!(
-            priority("priority").unwrap(),
-            format!("{:?}", Some(Priority::from_i64(3).unwrap()))
-        );
+        assert_eq!(priority("priority").unwrap(), "Some(Urgent)");
         let refused = priority("bad_priority").unwrap_err();
         assert!(
             refused.starts_with("Conversion error from type Null at index: 0, "),
@@ -644,39 +600,35 @@ mod tests {
         );
     }
 
-    /// What a task's cancel recorded reads the same both ways.
+    /// Cancel rows restore their reason and duplicate target.
     #[test]
-    fn a_cancel_reads_the_same_through_the_port_and_the_wrapper() {
+    fn a_cancel_reads_the_same_from_the_port() {
         let mut queue = queue("cancels");
         let goal = queue.add_goal(new_goal()).unwrap();
         let open = queue.add(new_task(goal.id())).unwrap();
         let canceled = queue.add(new_task(goal.id())).unwrap();
         let cancel = NewCancel::by_hand(Some("not needed".to_owned()), None, None);
         queue.cancel(canceled.id(), cancel).unwrap();
-        let tx = port_tx(&queue.conn);
+        let tx = queue.read_entry("rows").unwrap();
         assert!(cancel_of(&tx, open.id()).unwrap().is_none());
-        assert!(sqlite::cancel_of(&queue.conn, open.id()).unwrap().is_none());
         let port = cancel_of(&tx, canceled.id()).unwrap().unwrap();
-        let wrapper = sqlite::cancel_of(&queue.conn, canceled.id())
-            .unwrap()
-            .unwrap();
         assert_eq!(port.reason.as_deref(), Some("not needed"));
-        assert_eq!(port.reason, wrapper.reason);
-        assert_eq!(port.duplicate_of, wrapper.duplicate_of);
+        assert!(port.duplicate_of.is_none());
     }
 
-    /// A driver's failure in a moved reader comes back to an unmoved caller
-    /// as rusqlite's own error.
+    /// A driver failure retains its table name through the execution port.
     #[test]
-    fn a_reader_s_failure_is_rusqlite_s_through_the_wrapper() {
+    fn a_reader_s_failure_is_rusqlite_s_through_the_port() {
         let queue = queue("failure");
         queue
             .conn
             .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE task_holds;")
             .unwrap();
-        let error = sqlite::held_claims(&queue.conn).unwrap_err();
+        let error = held_claims(&*queue.conn).unwrap_err();
         assert!(
-            error.downcast_ref::<rusqlite::Error>().is_some(),
+            error
+                .downcast_ref::<crate::infrastructure::sql_exec::SqlError>()
+                .is_some(),
             "{error:#}"
         );
         assert!(error.to_string().contains("task_holds"), "{error:#}");

@@ -13,8 +13,7 @@
 
 use super::source;
 
-/// The files that may name rusqlite. The rows but the SQLite adapter's own
-/// are store modules that have not moved to the port yet.
+/// Only SQLite connection/entry/migration and FTS adapters name rusqlite.
 #[rustfmt::skip]
 const MAY_NAME_RUSQLITE: &[&str] = &[
     "src/infrastructure/related.rs",

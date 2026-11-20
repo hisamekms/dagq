@@ -324,7 +324,6 @@ mod tests {
     use super::*;
     use rusqlite::{Connection, params};
 
-    use crate::infrastructure::sql_dialect::json_field;
     use crate::{
         domain::{
             RunEvent,
@@ -334,7 +333,7 @@ mod tests {
         },
         infrastructure::{
             sessions::{open_hook_spans, record_hook, tests::READS},
-            sqlite::{SqliteQueue, event_row},
+            sqlite::SqliteQueue,
             transcripts::ClaudeTranscripts,
         },
     };
@@ -390,7 +389,12 @@ mod tests {
     fn cuts(conn: &Connection) -> Vec<RunEvent> {
         conn.prepare("SELECT * FROM run_events WHERE kind=?1 ORDER BY id")
             .unwrap()
-            .query_map([SESSION_TOKENS], event_row)
+            .query_map([SESSION_TOKENS], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::store_rows::event_row,
+                )
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
@@ -515,10 +519,19 @@ mod tests {
         conn.prepare(&format!(
             "SELECT * FROM run_events WHERE kind='session_turns'
                AND {}=1 ORDER BY id",
-            json_field("payload", "$.final", JsonType::Boolean),
+            crate::infrastructure::sql_dialect::SqlDialect::Sqlite.json_field(
+                "payload",
+                "$.final",
+                JsonType::Boolean
+            ),
         ))
         .unwrap()
-        .query_map([], event_row)
+        .query_map([], |row| {
+            crate::infrastructure::sql_exec::sqlite::with_row(
+                row,
+                crate::infrastructure::store_rows::event_row,
+            )
+        })
         .unwrap()
         .map(|event| io(&event.unwrap().payload))
         .collect()

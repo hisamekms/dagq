@@ -849,7 +849,7 @@ fn takeover_health_and_drain_use_the_services_identity() {
         .enqueue(move || {
             let queue = on.queue().unwrap();
             let tx = queue.write_tx("drained_write").unwrap();
-            tx.execute_batch(
+            tx.inner().execute_batch(
                 "CREATE TABLE drained_write(value INTEGER); INSERT INTO drained_write VALUES (1)",
             )
             .unwrap();

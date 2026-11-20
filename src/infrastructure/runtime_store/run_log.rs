@@ -2179,7 +2179,6 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
-    use crate::infrastructure::sql_dialect::json_field_spaced;
 
     /// A queue at a fixed time: the hold's records read the queue's clock.
     fn rulesets_queue(name: &str) -> SqliteQueue {
@@ -3080,8 +3079,16 @@ mod tests {
                 "SELECT MAX(id) FROM run_events WHERE kind IN (?1, ?2)
                AND {} IN (?3)
              GROUP BY {}",
-                json_field_spaced("payload", "$.supervisor", JsonType::Text),
-                json_field_spaced("payload", "$.supervisor", JsonType::Text),
+                crate::infrastructure::sql_dialect::SqlDialect::Sqlite.json_field_spaced(
+                    "payload",
+                    "$.supervisor",
+                    JsonType::Text
+                ),
+                crate::infrastructure::sql_dialect::SqlDialect::Sqlite.json_field_spaced(
+                    "payload",
+                    "$.supervisor",
+                    JsonType::Text
+                ),
             ),
         );
         assert!(

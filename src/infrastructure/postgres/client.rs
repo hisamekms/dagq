@@ -22,10 +22,29 @@ use std::rc::Rc;
 /// One connection, which the entries' transactions share one at a time.
 pub struct PostgresClient(RefCell<Client>);
 
+impl PostgresClient {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.borrow().is_closed()
+    }
+}
+
 /// Connect to the store at `connection`. The errors do not print it.
 pub fn connect(connection: &ConnectionString) -> Result<PostgresStore<PostgresClient>> {
     let client = open_client(connection)?;
     PostgresStore::open(PostgresClient(RefCell::new(client)))
+}
+
+/// Connect without applying schema changes.
+pub(crate) fn session(connection: &ConnectionString) -> Result<PostgresClient> {
+    Ok(PostgresClient(RefCell::new(open_client(connection)?)))
+}
+
+/// Open the queue ports on the deployed schema, applying no migrations.
+pub fn open_queue(
+    connection: &ConnectionString,
+    runs_dir: std::path::PathBuf,
+) -> Result<super::PostgresQueue<PostgresClient>> {
+    super::PostgresQueue::open(session(connection)?, runs_dir)
 }
 
 /// Bring the database at `connection` to this binary's schema from what it

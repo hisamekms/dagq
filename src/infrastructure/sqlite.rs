@@ -19,10 +19,8 @@
 //! refuse without writing when it changed. Writers that are not authorized
 //! per command (the supervisor's landing, draft planners) skip the check.
 //!
-//! The row helpers other store modules share live in [`super::store_rows`]
-//! on the execution port; those of the same name here take rusqlite's types
-//! for a module that has not moved to it, and only hand on to them, as do
-//! those here of [`super::store_writes`], the writes they share.
+//! Shared row helpers and writes live in [`super::store_rows`] and
+//! [`super::store_writes`] on the execution port.
 //!
 //! Only init creates a DB (and binds `queue_repository` for a cwd queue);
 //! init on an existing queue goes through the queue service. Ordinary
@@ -37,11 +35,10 @@
 //! application share one transaction ([`SqliteQueue::migrate`]).
 
 use super::sql_exec::sqlite::{
-    attach_event_actors, attach_event_bodies, is_contention, native_error, port_tx, with_row,
+    attach_event_actors, attach_event_bodies, is_contention, native_error,
 };
 use super::sql_exec::{CommitTransaction as _, TransactionEntries};
 use super::store_queue::StoreQueue;
-use super::store_rows;
 use super::store_writes;
 #[cfg(test)]
 use crate::domain::actor::ActorContext;
@@ -49,27 +46,24 @@ use crate::domain::event_kind::EventKind;
 use crate::domain::queue_use::{QueueUse, RUNS_IN_USE, queue_users};
 use std::{
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 #[cfg(test)]
-use crate::domain::{ActorRole, RequestId, plan_request::PriorityBy, task};
+use crate::domain::{ActorRole, RequestId, plan_request::PriorityBy};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior};
-use serde::de::DeserializeOwned;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::json;
 
 use crate::{
-    application::{GraphInput, IdGenerator, TaskPage, TaskQuery, TaskReads, TaskStore},
+    application::{GraphInput, TaskPage, TaskQuery, TaskReads, TaskStore},
     domain::{
-        ChangeSet, ClaimOutcome, CommitSha, DomainError, Goal, GoalDetail, GoalEdit, GoalId,
-        GoalPredecessor, GoalSummary, GoalVerdict, LintInput, NewGoal, NewNote, NewTask, NotePage,
-        NoteQuery, Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, Submission,
-        TagSet, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId, TaskRun,
-        TaskStatus, TitlePrefixes, cancel_reason::NewCancel, provider_switch::WorkerRoute,
-        scope::validate_path_globs, worker_model::WorkerTrial,
+        ChangeSet, ClaimOutcome, CommitSha, Goal, GoalDetail, GoalEdit, GoalId, GoalPredecessor,
+        GoalSummary, GoalVerdict, LintInput, NewGoal, NewNote, NewTask, NotePage, NoteQuery,
+        Predecessor, Priority, Proposal, ProposalId, RunEvent, Submission, TagSet, Task,
+        TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId, TaskStatus, TitlePrefixes,
+        cancel_reason::NewCancel, scope::validate_path_globs,
     },
     infrastructure::{
         clock,
@@ -79,6 +73,9 @@ use crate::{
         schema::{self, BINARY_SCHEMA, MIGRATIONS},
     },
 };
+
+#[cfg(test)]
+use crate::domain::DomainError;
 
 pub(super) use super::store_rows::replan_guarding;
 pub use super::write_leader::WriteIdentity;
@@ -105,9 +102,8 @@ pub struct WriteTxTimes {
     /// lock and may wait in it for another writer, so its end is the first
     /// time known to have the lock without that wait; the hold drops the
     /// statement's own run. A deferred one whose lock a write through the
-    /// transaction it derefs to took has no such time: one whose first
-    /// write was that, or was reported with [`WriteTx::wrote`] (which comes
-    /// after the statement ran), is held from its `BEGIN` (`Some` of
+    /// native savepoint took has no such time: one whose first
+    /// write was that is held from its `BEGIN` (`Some` of
     /// zero), and one seen to have had the lock only by the state of its
     /// transaction (`sqlite3_txn_state` of `main` is `Write`) just before
     /// its commit or rollback is `None`, held from its `BEGIN` too. Either
@@ -122,9 +118,9 @@ pub struct WriteTxTimes {
     pub wrote: bool,
     /// When its commit or rollback returned.
     pub ended: Duration,
-    /// Business rows (excluding the leader fence) its write statements through [`WriteTx::execute`] and
-    /// [`WriteTx::wrote`] changed; those through the transaction it derefs
-    /// to are not counted.
+    /// Business rows (excluding the leader fence) changed through
+    /// [`WriteTx::execute`]; native savepoints and migration statements
+    /// are not counted.
     pub rows: usize,
 }
 
@@ -267,9 +263,8 @@ pub fn held_long_payload(
 /// its callers (`context_boundaries::write_tx`). A write one holds the lock
 /// from its `BEGIN`. A read one has it once a write statement took it: the first through
 /// [`WriteTx::execute`] tells when, when no write before it took the lock;
-/// one through the transaction it derefs to, reported with
-/// [`WriteTx::wrote`] or not (then seen by the state of its transaction
-/// just before it ends), is held from its `BEGIN`
+/// a native savepoint is seen by the transaction state just before it ends
+/// and is held from its `BEGIN`
 /// ([`WriteTxTimes::locked`]).
 pub struct WriteTx<'c> {
     // The entry's mode, independent of SQLite's autocommit state: a read
@@ -377,7 +372,7 @@ impl<'c> WriteTx<'c> {
     /// Run the write statement `sql` and count what it changed. In a
     /// deferred transaction that had no lock before it, the lock is known
     /// from its end; one that already had it (a write through the
-    /// transaction it derefs to took it) had it from a time not known.
+    /// native savepoint took it) had it from a time not known.
     pub fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.written(|tx| {
             tx.prepare_cached(sql)?
@@ -419,14 +414,6 @@ impl<'c> WriteTx<'c> {
         }
         self.counted(rows);
         Ok(result)
-    }
-
-    /// A write statement run on the transaction this derefs to returned,
-    /// changing `rows`. Whether a write before it had taken the lock is not
-    /// known once it ran, so a deferred transaction whose first reported
-    /// write this is is held from its `BEGIN`.
-    pub fn wrote(&self, rows: usize) {
-        self.counted(rows);
     }
 
     /// Count `rows` of a write statement that returned; a lock time still
@@ -477,7 +464,7 @@ impl<'c> WriteTx<'c> {
     }
 
     /// Whether a deferred transaction that reported no write holds the
-    /// write lock now (a write through the transaction it derefs to took
+    /// write lock now (a write through a native savepoint took
     /// it), read just before it ends.
     fn read_lock_state(&self) {
         if !self.wrote.get() && self.holds_write_lock() {
@@ -503,7 +490,7 @@ impl<'c> WriteTx<'c> {
         self.rows.get()
     }
 
-    fn inner(&self) -> &rusqlite::Transaction<'c> {
+    pub(super) fn inner(&self) -> &rusqlite::Transaction<'c> {
         self.tx
             .as_ref()
             .expect("a write transaction is open until it ends")
@@ -539,13 +526,6 @@ pub(super) fn insert_counted<P: rusqlite::Params>(
 ) -> rusqlite::Result<(usize, i64)> {
     let rows = conn.prepare_cached(sql)?.execute(params)?;
     Ok((rows, conn.last_insert_rowid()))
-}
-
-impl<'c> std::ops::Deref for WriteTx<'c> {
-    type Target = rusqlite::Transaction<'c>;
-    fn deref(&self) -> &Self::Target {
-        self.inner()
-    }
 }
 
 impl Drop for WriteTx<'_> {
@@ -586,7 +566,7 @@ impl Drop for WriteTx<'_> {
                 .as_ref()
                 .context("read transaction has no writer identity")?;
             let tx = WriteTx::write(self.conn, "queue_write_held_long", Duration::MAX, identity)?;
-            record_queue_event_in(&tx, EventKind::QueueWriteHeldLong, &payload)?;
+            store_writes::record_queue_event_in(&tx, EventKind::QueueWriteHeldLong, &payload)?;
             tx.commit()?;
             Ok(())
         };
@@ -725,6 +705,7 @@ impl WriteConnection {
                 let conn = SqliteQueue::open_connection(
                     &self.db,
                     OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    &configured_store()?,
                 )?;
                 conn.pragma_update(None, "journal_size_limit", WRITE_WAL_LIMIT)?;
                 conn
@@ -860,7 +841,16 @@ impl SqliteQueue {
     /// created for this process alone, so one that is there, or comes
     /// between, is refused and left as it is, to the queue's service.
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::create_in_store(path.as_ref(), &configured_store()?)
+    }
+
+    /// The file-creating entry after deployment resolution. Keep its guard
+    /// before OpenOptions as well as the connection entry's SQLite guard.
+    fn create_in_store(
+        path: &Path,
+        store: &crate::domain::store_setting::StoreSetting,
+    ) -> Result<Self> {
+        store.check_sqlite()?;
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1177,7 +1167,7 @@ impl SqliteQueue {
     fn connect_with(path: &Path, flags: OpenFlags) -> Result<Self> {
         Self::on(
             QueueConnection {
-                conn: Some(Self::open_connection(path, flags)?),
+                conn: Some(Self::open_connection(path, flags, &configured_store()?)?),
                 lent_by: None,
             },
             path,
@@ -1185,7 +1175,12 @@ impl SqliteQueue {
     }
 
     /// A connection to the queue at `path`, set up as every queue's is.
-    fn open_connection(path: &Path, flags: OpenFlags) -> Result<Connection> {
+    fn open_connection(
+        path: &Path,
+        flags: OpenFlags,
+        store: &crate::domain::store_setting::StoreSetting,
+    ) -> Result<Connection> {
+        store.check_sqlite()?;
         ensure_not_refused(path)?;
         let conn = Connection::open_with_flags(path, flags)
             .with_context(|| format!("open queue at {} (use init to create it)", path.display()))?;
@@ -1312,7 +1307,9 @@ impl SqliteQueue {
         // written at the schema this transaction changes, which a rolled
         // back or an empty queue does not have.
         let tx = self.migration_tx(|| Ok(()))?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let version: i64 = tx
+            .inner()
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
         if from == 0 && version != 0 {
             // Another `init` created the queue first; the caller checks it.
             return Ok((None, version));
@@ -1328,7 +1325,7 @@ impl SqliteQueue {
         let mut backup = None;
         if let Some(guard) = guard.filter(|_| pending.iter().any(|m| !m.compatible)) {
             if let Some(alive) = guard.alive {
-                refuse_in_use(&queue_use(&tx)?, alive, &pending)?;
+                refuse_in_use(&queue_use(tx.inner())?, alive, &pending)?;
             }
             backup = Some(back_up(guard.db, version, guard.now)?);
         }
@@ -1338,30 +1335,34 @@ impl SqliteQueue {
         let leadership = super::write_leader::take_for_migration(
             &tx,
             guard.is_some() && pending.iter().any(|m| !m.compatible),
-            has_table(&tx, "write_leader")?,
+            has_table(tx.inner(), "write_leader")?,
             guard.is_some_and(|guard| guard.local_proof),
         )?;
         for (index, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            tx.execute_batch(migration)
+            tx.inner()
+                .execute_batch(migration)
                 .with_context(|| format!("apply queue migration {}", index + 1))?;
-            tx.pragma_update(None, "user_version", (index + 1) as i64)?;
+            tx.inner()
+                .pragma_update(None, "user_version", (index + 1) as i64)?;
         }
         tx.execute(
             "INSERT INTO schema_floor(singleton, floor) VALUES (1, ?1)
              ON CONFLICT(singleton) DO UPDATE SET floor = excluded.floor",
             [schema::recorded_floor(BINARY_SCHEMA)?],
         )?;
-        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+        tx.inner()
+            .pragma_update(None, "application_id", APPLICATION_ID)?;
         // A migration of a queue (not its creation) is the audit's record,
         // committed with it, once the audit's table is there.
-        if version > 0 && has_table(&tx, "audit_records")? {
+        if version > 0 && has_table(tx.inner(), "audit_records")? {
             let applied: Vec<i64> = ((version + 1)..=BINARY_SCHEMA).collect();
             super::audit::migrated(&tx, version, BINARY_SCHEMA, &applied)?;
         }
         let violations: i64 =
-            tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
-                r.get(0)
-            })?;
+            tx.inner()
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })?;
         ensure!(
             violations == 0,
             "queue migration would break {violations} foreign key references"
@@ -1461,6 +1462,12 @@ impl QueueSchema {
             opens: self.check_opens().is_ok(),
         }
     }
+}
+
+/// Resolve the deployment before the guarded file-creating and connection
+/// entries. Administrative exceptions cannot silently select SQLite.
+fn configured_store() -> Result<crate::domain::store_setting::StoreSetting> {
+    Ok(super::deployment_config::DeploymentConfig::from_process()?.store)
 }
 
 /// An inspected queue, readable as it is or retained only for its binding.
@@ -2123,230 +2130,73 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-// The row-mapping tests compare the port with this SQLite compatibility path.
 #[cfg(test)]
-pub(super) fn read_goal(conn: &Connection, goal_id: GoalId) -> Result<Goal> {
-    store_rows::read_goal(&port_tx(conn), goal_id).map_err(native_error)
-}
+mod deployment_tests {
+    use super::*;
+    use crate::domain::store_setting::{StoreRefusal, StoreSetting};
 
-// Kept for store modules that have not moved; the moves land in any order
-// (ADR-t3982-1).
-#[allow(dead_code)]
-pub(super) fn goal_event(
-    conn: &Connection,
-    goal_id: GoalId,
-    kind: EventKind,
-    payload: serde_json::Value,
-) -> Result<()> {
-    super::task_store::goal_event(&port_tx(conn), goal_id, kind, payload).map_err(native_error)
-}
+    /// Call the same file entries as create, init, lending and doctor's
+    /// inspection, after resolving the deployment setting as a value.
+    #[test]
+    fn postgres_file_entries_refuse_before_touching_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let existing = dir.path().join("existing.db");
+        let sentinel = b"the local queue must not be opened";
+        std::fs::write(&existing, sentinel).unwrap();
+        let store = StoreSetting::from_env(|name| match name {
+            "DAGQ_STORE" => Some("postgres".into()),
+            "DAGQ_DATABASE_URL" => Some("postgres://db/queue".into()),
+            _ => None,
+        })
+        .unwrap();
+        for path in [&missing, &existing] {
+            let mut attempts = vec![(
+                "create",
+                SqliteQueue::create_in_store(path, &store).map(|_| ()),
+            )];
+            for (entry, flags) in [
+                (
+                    "init",
+                    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+                ),
+                ("open/lend", OpenFlags::SQLITE_OPEN_READ_WRITE),
+                ("doctor/watch", OpenFlags::SQLITE_OPEN_READ_ONLY),
+            ] {
+                attempts.push((
+                    entry,
+                    SqliteQueue::open_connection(path, flags, &store).map(|_| ()),
+                ));
+            }
+            for (entry, result) in attempts {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.downcast_ref::<StoreRefusal>(),
+                    Some(&StoreRefusal::LocalOnly),
+                    "{entry}: {error:#}"
+                );
+                assert!(error.to_string().contains("deployment selected Postgres"));
+            }
+        }
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read(&existing).unwrap(), sentinel);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no WAL/SHM or DB was created"
+        );
 
-// No caller here any more, kept for a store module on another branch that
-// has not moved (ADR-t3982-1: the moves land in any order).
-#[allow(dead_code)]
-pub(super) fn held_claims(conn: &Connection) -> Result<Vec<crate::domain::task_hold::HoldGuard>> {
-    store_rows::held_claims(&port_tx(conn)).map_err(native_error)
-}
-
-/// Reserve a dependency-ready task inside the caller's write transaction:
-/// the first task of `order` that is still a candidate, or the first
-/// candidate in claim order when none of them is (an empty `order` means
-/// claim order). There
-/// is no queue-wide execution slot; `one_unfinished_run_per_task` is the
-/// only limit, so concurrent claims take different tasks. The run is
-/// created at `at` with an ID from `ids`. `attributes` (an object: what a
-/// supervisor measured at the claim, task 197) go into `run_claimed`
-/// beside its transition, and so does the worker session `trial` chooses
-/// for the task (ADR-0079 decisions 3 and 4): chosen here, in the claim's
-/// transaction, so two claims never take the same turn of the trial. A
-/// task whose worker has none of `routes` is not claimed (ADR-t813-2):
-/// the run requests the provider of its task's worker and runs on its
-/// route's, recorded as `provider_switched` (phase `start`) when they
-/// differ.
-#[allow(clippy::too_many_arguments)]
-// No caller here any more, kept for a store module on another branch that
-// has not moved (ADR-t3982-1: the moves land in any order).
-#[allow(dead_code)]
-pub(super) fn claim_task(
-    tx: &Connection,
-    runs_dir: &Path,
-    ids: &dyn IdGenerator,
-    at: SystemTime,
-    base_commit: &CommitSha,
-    order: &[TaskId],
-    held: &crate::domain::claim_order::ClaimHolds,
-    attributes: Option<&serde_json::Value>,
-    trial: &WorkerTrial,
-    routes: &[WorkerRoute],
-) -> Result<ClaimOutcome> {
-    super::task_store::claim_task(
-        &port_tx(tx),
-        runs_dir,
-        ids,
-        at,
-        base_commit,
-        order,
-        held,
-        attributes,
-        trial,
-        routes,
-    )
-    .map_err(native_error)
-}
-
-/// Executing, awaiting or undergoing integration, or waiting for a session;
-/// the same set as `one_unfinished_run_per_task`.
-/// Apply `action` to the task inside the caller's transaction, recording
-/// `task_status_changed`: what `transition` does, and what the triage does
-/// to the task of the run it triaged.
-// Kept for store modules migrating independently; current callers use the port.
-#[allow(dead_code)]
-pub(super) fn transition_task(
-    conn: &Connection,
-    task_id: TaskId,
-    action: TaskAction,
-    now: &str,
-) -> Result<Task> {
-    super::task_store::transition_task(&port_tx(conn), task_id, action, now).map_err(native_error)
-}
-
-/// Complete the task of `run` inside the caller's transaction:
-/// `in_progress` → `completed`, recorded as `task_status_changed` on the
-/// run, with a completed Spike's replanning request (`now_secs`). The
-/// planning side's write of the task, which the run's end calls rather
-/// than writing `tasks` itself: its landing (T2 of
-/// `src/context_boundaries/ownership.rs`) or the close of a verified
-/// `already_satisfied` claim without one (T12, ADR-t1818-1 decision 5).
-// No caller here any more, kept for a store module on another branch that
-// has not moved (ADR-t3982-1: the moves land in any order).
-#[allow(dead_code)]
-pub(super) fn complete_task(
-    conn: &Connection,
-    task_id: TaskId,
-    run: &RunId,
-    now: &str,
-    now_secs: i64,
-) -> Result<Task> {
-    super::task_store::complete_task(&port_tx(conn), task_id, run, now, now_secs)
-        .map_err(native_error)
-}
-
-/// Cancel `task_id` inside the caller's transaction with the reason the
-/// domain decides of `cancel` (ADR-t947-4), recorded in the payload of its
-/// `task_status_changed`: what `cancel` does, plan review's
-/// `cancel_duplicate` and the `cancel` answers of the asks the runtime
-/// applies. A task named as the one that holds the content is checked by
-/// [`super::task_store::check_duplicate`] and gives the reason of a `--duplicate-of` alone.
-// Kept for store modules migrating independently; current callers use the port.
-#[allow(dead_code)]
-pub(super) fn cancel_task(
-    conn: &Connection,
-    task_id: TaskId,
-    cancel: &NewCancel,
-    now: &str,
-) -> Result<Task> {
-    super::task_store::cancel_task(&port_tx(conn), task_id, cancel, now).map_err(native_error)
-}
-
-#[cfg(test)]
-pub(super) fn cancel_of(
-    conn: &Connection,
-    task_id: TaskId,
-) -> Result<Option<store_rows::RecordedCancel>> {
-    store_rows::cancel_of(&port_tx(conn), task_id).map_err(native_error)
-}
-
-// Kept for store modules migrating independently; current callers use the port.
-#[allow(dead_code)]
-pub(super) fn read_task(conn: &Connection, task_id: TaskId) -> Result<Task> {
-    store_rows::read_task(&port_tx(conn), task_id).map_err(native_error)
-}
-
-/// [`store_writes::record_queue_event_in`] on a rusqlite connection.
-pub(super) fn record_queue_event_in(
-    conn: &Connection,
-    kind: EventKind,
-    payload: &serde_json::Value,
-) -> Result<()> {
-    store_writes::record_queue_event_in(&port_tx(conn), kind, payload).map_err(native_error)
-}
-
-/// [`store_writes::event`] on a rusqlite connection.
-// Kept for store modules that have not moved; the moves land in any order
-// (ADR-t3982-1).
-#[allow(dead_code)]
-pub(super) fn event(
-    conn: &Connection,
-    task_id: TaskId,
-    run_id: Option<&RunId>,
-    kind: EventKind,
-    payload: serde_json::Value,
-) -> Result<()> {
-    store_writes::event(&port_tx(conn), task_id, run_id, kind, payload).map_err(native_error)
-}
-
-// Kept for store modules that have not moved; the moves land in any order
-// (ADR-t3982-1).
-#[allow(dead_code)]
-pub(super) fn enum_col<T: FromStr<Err = DomainError>>(
-    row: &Row<'_>,
-    name: &str,
-) -> rusqlite::Result<T> {
-    with_row(row, |row| store_rows::enum_col(row, name))
-}
-
-// SQLite compatibility entry for store modules migrating independently.
-#[allow(dead_code)]
-pub(super) fn json_col<T: DeserializeOwned>(row: &Row<'_>, name: &str) -> rusqlite::Result<T> {
-    with_row(row, |row| store_rows::json_col(row, name))
-}
-
-pub(super) fn optional_enum_col<T: std::str::FromStr<Err = DomainError>>(
-    row: &Row<'_>,
-    name: &str,
-) -> rusqlite::Result<Option<T>> {
-    with_row(row, |row| store_rows::optional_enum_col(row, name))
-}
-
-// Kept for a store module on another branch that has not moved
-// (ADR-t3982-1: the moves land in any order).
-#[allow(dead_code)]
-pub(super) fn run_row(runs_dir: &Path) -> impl Fn(&Row<'_>) -> rusqlite::Result<TaskRun> + '_ {
-    let read = store_rows::run_row(runs_dir);
-    move |row| with_row(row, &read)
-}
-
-// No caller here any more, kept for a store module on another branch that
-// has not moved (ADR-t3982-1: the moves land in any order).
-#[allow(dead_code)]
-pub(super) fn stored_run_row(row: &Row<'_>) -> rusqlite::Result<TaskRun> {
-    with_row(row, store_rows::stored_run_row)
-}
-
-// SQLite compatibility entry for store modules migrating independently.
-#[allow(dead_code)]
-pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
-    with_row(row, store_rows::event_row)
-}
-
-/// Move the task to `goal_id`, or out of any goal, as `by` moves it
-/// ([`task::set_goal`]): a person's priority it took from its old goal and
-/// an AI's move would carry off is kept as its own, recorded as
-/// `task_priority_changed` with `kept_on_move` before the move's
-/// `task_goal_changed` (ADR-t1975-1 decision 4). A person's priority it
-/// took from its old goal that the AI's `out_of_scope` judgement lets go
-/// of is recorded the same way with `dropped_on_move`, the value it had
-/// and `from_by: human` (ADR-t2373-1 decision 4).
-#[cfg(test)]
-pub(super) fn set_goal_in(
-    conn: &Connection,
-    task_id: TaskId,
-    goal_id: Option<GoalId>,
-    timestamp: &str,
-    by: task::MovedBy,
-) -> Result<Task> {
-    super::task_store::set_goal_in(&port_tx(conn), task_id, goal_id, timestamp, by)
-        .map_err(native_error)
+        // A supported setting reaches the actual file open through the same
+        // entry, so this is not only a test of the selection predicate.
+        let connection = SqliteQueue::open_connection(
+            &missing,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            &StoreSetting::Sqlite,
+        )
+        .unwrap();
+        assert!(missing.is_file());
+        assert!(connection.is_autocommit());
+    }
 }
 
 #[cfg(test)]
@@ -2397,10 +2247,12 @@ mod schema_state_tests {
             .unwrap();
         assert_eq!(reads, 2);
         let generation: i64 = tx
+            .inner()
             .query_row("SELECT generation FROM write_leader", [], |r| r.get(0))
             .unwrap();
         assert_eq!(generation, 1);
-        tx.execute_batch("CREATE TABLE migration_probe (id INTEGER PRIMARY KEY)")
+        tx.inner()
+            .execute_batch("CREATE TABLE migration_probe (id INTEGER PRIMARY KEY)")
             .unwrap();
         tx.commit().unwrap();
         let before = queue.conn.total_changes();
@@ -2883,7 +2735,14 @@ mod persons_priority_tests {
         // A person's move, as a follow_up's judge or a correct_goal answer
         // passes it, takes the goal's.
         let tx = queue.conn.transaction().unwrap();
-        let moved = set_goal_in(&tx, other, Some(ais.id()), "now", MovedBy::Person).unwrap();
+        let moved = crate::infrastructure::task_store::set_goal_in(
+            &*tx,
+            other,
+            Some(ais.id()),
+            "now",
+            MovedBy::Person,
+        )
+        .unwrap();
         assert_eq!(
             (moved.priority(), moved.own_priority(), moved.priority_by()),
             (Priority::Low, None, PriorityBy::Ai)
@@ -2942,7 +2801,7 @@ mod write_hold_tests {
     }
 
     /// A transaction that held the lock with no time known for it (a
-    /// deferred one that wrote only through the transaction it derefs to)
+    /// deferred one that wrote only through a native savepoint)
     /// is held from its `BEGIN`, whatever rows it counted.
     #[test]
     fn a_hold_with_no_lock_time_is_held_from_the_begin() {
@@ -3034,7 +2893,7 @@ mod inserted_id_tests {
     fn an_insert_that_inserts_no_row_has_no_id() {
         let conn = table();
         let sql = "INSERT INTO t(v) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM t WHERE v=?1)";
-        let tx = port_tx(&conn);
+        let tx = conn;
         let insert = |value: &str| {
             crate::infrastructure::sql_exec::SqlWrite::insert_id_if_inserted(
                 &tx,
@@ -3057,7 +2916,7 @@ mod inserted_id_tests {
         let conn = table();
         let tx = WriteTx::read(&conn, "insert_id_test", Duration::from_secs(60)).unwrap();
         let id = tx.insert_id("INSERT INTO t(v) VALUES (?1)", ["a"]).unwrap();
-        assert_eq!(id, tx.last_insert_rowid());
+        assert_eq!(id, conn.last_insert_rowid());
         assert!(tx.wrote.get());
         assert_eq!(tx.rows.get(), 1);
         assert!(tx.locked.get().is_some());
@@ -3104,6 +2963,14 @@ mod store_contract_tests {
         fn commit(tx: WriteTx<'_>) -> Result<()> {
             Ok(tx.commit()?)
         }
+    }
+
+    #[test]
+    fn representative_queue_ports_and_committed_worktime() {
+        let uri = format!("file:/queue-ports-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let mut queue = SqliteQueue::init(uri).unwrap();
+        let files = tempfile::tempdir().unwrap();
+        store_contract::queue_ports(&mut queue, files.path()).unwrap();
     }
 
     // Keep the named memdb alive across the connections opened by a case.
@@ -3743,21 +3610,24 @@ mod store_contract_tests {
             let before = content(&uri).unwrap();
             let queue = SqliteQueue::open(&uri).unwrap();
             let tx = queue.write_entry("contract_content").unwrap();
-            tx.execute_batch(
-                "CREATE TABLE content_probe (id INTEGER PRIMARY KEY);
+            tx.inner()
+                .execute_batch(
+                    "CREATE TABLE content_probe (id INTEGER PRIMARY KEY);
                  INSERT INTO content_probe VALUES (1);",
-            )
-            .unwrap();
+                )
+                .unwrap();
             drop(tx);
             assert_eq!(content(&uri).unwrap(), before);
             let tx = queue.write_entry("contract_content").unwrap();
-            tx.execute_batch("CREATE TABLE content_probe (id INTEGER PRIMARY KEY)")
+            tx.inner()
+                .execute_batch("CREATE TABLE content_probe (id INTEGER PRIMARY KEY)")
                 .unwrap();
             SqliteQueue::commit(tx).unwrap();
             let schema = content(&uri).unwrap();
             assert_ne!(schema, before);
             let tx = queue.write_entry("contract_content").unwrap();
-            tx.execute_batch("INSERT INTO content_probe VALUES (1)")
+            tx.inner()
+                .execute_batch("INSERT INTO content_probe VALUES (1)")
                 .unwrap();
             SqliteQueue::commit(tx).unwrap();
             assert_ne!(content(&uri).unwrap(), schema);

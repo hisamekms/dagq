@@ -970,15 +970,7 @@ mod tests {
     fn a_blank_outcome_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let error = finish_row(
-            &super::super::sql_exec::sqlite::port_tx(&queue.conn),
-            1,
-            0,
-            " ",
-            None,
-            None,
-        )
-        .unwrap_err();
+        let error = finish_row(&*queue.conn, 1, 0, " ", None, None).unwrap_err();
         assert_eq!(error.to_string(), "goal review outcome must not be blank");
     }
 

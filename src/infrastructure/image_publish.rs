@@ -2,9 +2,9 @@
 //! (`domain::image_publish`). The rows are written by [`token_rows`] and
 //! [`publish_rows`], which both adapters run (the store contract); the
 //! [`ImageStore`] entries add each write's queue event in the same fenced
-//! transaction, so a row is never kept without its event. The event's
-//! insert is the SQLite adapter's today: on Postgres it fails and the
-//! transaction writes nothing until the Postgres event functions land.
+//! transaction, so a row is never kept without its event. The entry supplies
+//! the adapter's actor and event-body functions.
+use super::sql_exec::CommitTransaction as _;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, TransactionEntries, sql_params};
 use crate::application::ImageStore;
 use crate::domain::{
@@ -192,7 +192,7 @@ macro_rules! image_store {
         }
     };
 }
-image_store!(super::sqlite::SqliteQueue);
+image_store!(super::store_queue::StoreQueue<E>, E: crate::infrastructure::sql_exec::TransactionEntries);
 image_store!(super::postgres::PostgresStore<S>, S: super::postgres::PostgresSession);
 
 #[cfg(test)]

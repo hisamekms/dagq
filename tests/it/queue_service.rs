@@ -435,7 +435,8 @@ fn serve_drain_probe(dir: &Path) {
     let command_dir = dir.to_owned();
     let commands: service::ServiceCommands = std::sync::Arc::new(move |queue, _, _| {
         let tx = queue.write_tx("drained_process_write")?;
-        tx.execute_batch("CREATE TABLE drained_before_release(value INTEGER); INSERT INTO drained_before_release VALUES (1)")?;
+        tx.execute("CREATE TABLE drained_before_release(value INTEGER)", [])?;
+        tx.execute("INSERT INTO drained_before_release VALUES (1)", [])?;
         fs::write(command_dir.join("write-began"), "")?;
         wait_for_file_or_service(&command_dir, Some("finish-write"));
         tx.commit()?;

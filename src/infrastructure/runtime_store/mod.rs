@@ -100,8 +100,6 @@ use self::{
     save_run as save_run_port, stored_run as stored_run_port,
     supervisor_row as supervisor_row_port,
 };
-#[allow(unused_imports)]
-use super::sql_exec::sqlite::{native_error, port_tx, with_row};
 
 /// The run as stored (its paths not relocated), for a command to start from.
 pub(super) fn stored_run(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<Option<TaskRun>> {

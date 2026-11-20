@@ -1,20 +1,9 @@
 //! The execution port on rusqlite: the SQLite adapter's side of
 //! [`super::SqlRead`] and [`super::SqlWrite`], the mapping of values and
-//! errors to and from rusqlite's, and what keeps a module that has not moved
-//! to the port working with what has.
+//! errors to and from rusqlite's, and commit notifications.
 //!
-//! A [`WriteTx`], what the named entries hand out, runs the port's statements
-//! as its own: a write is counted and held as one through its `execute`. It
-//! still derefs to rusqlite's `Transaction` and so to its `Connection`, so a
-//! module that has not moved builds as it is. Such a module holds a
-//! `Connection` (or a `Transaction`, which derefs to one) and hands it to a
-//! moved function with [`port_tx`], and reads a rusqlite `Row` with a moved
-//! row helper through [`with_row`], back to rusqlite's errors. A `Connection`
-//! is also a [`SqlRead`] as it is: the read connection needs no wrapper.
-//!
-//! The conversions of the domain's IDs to and from rusqlite's values are for
-//! such a module too. Commit notifications and connection hooks remain here,
-//! including the notifications a savepoint discards on rollback.
+//! Named entries expose only the execution port. Savepoints use their native
+//! handles inside this adapter; shared store code cannot dereference them.
 //!
 //! The actor and event body functions are here because registering a function
 //! is the driver's call; the state the actor functions read is
@@ -264,9 +253,8 @@ impl RowValues for RowOf<'_, '_> {
     }
 }
 
-/// What the moved row helper `read` makes of the rusqlite row `row`, with
-/// rusqlite's error: the one thing the helpers' wrappers in
-/// `infrastructure::sqlite` do.
+/// Map a native FTS or fixture row through the shared row representation,
+/// preserving the SQLite driver error at this adapter boundary.
 pub(crate) fn with_row<T>(
     row: &Row<'_>,
     read: impl FnOnce(&SqlRow<'_>) -> SqlResult<T>,
@@ -326,13 +314,13 @@ impl SqlRead for WriteTx<'_> {
         params: &[SqlValue],
         visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
     ) -> SqlResult<()> {
-        visit_rows_on(self, sql, params, visit)
+        visit_rows_on(self.inner(), sql, params, visit)
     }
 }
 
 impl SqlWrite for WriteTx<'_> {
     fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
-        register_commit(self, action)
+        register_commit(self.inner(), action)
     }
 
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
@@ -361,7 +349,7 @@ impl SqlSavepoints for WriteTx<'_> {
     fn savepoint(&mut self) -> anyhow::Result<Self::Savepoint<'_>> {
         // Keep WriteTx's lock-state accounting, including deferred writes
         // made only through this guard, in the existing transaction wrapper.
-        let actions = actions_for(self)?;
+        let actions = actions_for(self.inner())?;
         let checkpoint = actions.checkpoint();
         Ok(SqliteSavepoint {
             inner: Some(WriteTx::savepoint(self)?),
@@ -416,92 +404,51 @@ impl SqlWrite for SqliteSavepoint<'_> {
         Ok(())
     }
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
-        SqlWrite::execute(
-            &port_tx(self.inner.as_ref().expect("open savepoint")),
-            sql,
-            params,
-        )
-    }
-    fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
-        SqlWrite::insert_id(
-            &port_tx(self.inner.as_ref().expect("open savepoint")),
-            sql,
-            params,
-        )
-    }
-    fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
-        SqlWrite::insert_id_if_inserted(
-            &port_tx(self.inner.as_ref().expect("open savepoint")),
-            sql,
-            params,
-        )
-    }
-}
-
-/// A rusqlite `Connection` or `Transaction` an unmoved module holds, as a
-/// transaction of the port ([`port_tx`]). It writes on the transaction the
-/// connection is in, as that module's own statements do.
-pub(crate) struct SqliteTx<'c>(&'c Connection);
-
-impl std::ops::Deref for SqliteTx<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-/// `conn` as a transaction of the port, for an unmoved module to call what
-/// has moved; a `&Transaction` coerces. Its writes are not counted as a
-/// [`WriteTx`]'s, so one who holds a `WriteTx` hands that on as it is. It
-/// begins nothing, and
-/// `SqliteQueue::conn` is not handed to it to write outside a transaction
-/// (`context_boundaries::write_tx`).
-pub(crate) fn port_tx(conn: &Connection) -> SqliteTx<'_> {
-    SqliteTx(conn)
-}
-
-impl SqlRead for SqliteTx<'_> {
-    fn in_write_transaction(&self) -> bool {
-        !self.0.is_autocommit()
-    }
-
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Sqlite
-    }
-
-    fn visit_rows(
-        &self,
-        sql: &str,
-        params: &[SqlValue],
-        visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
-    ) -> SqlResult<()> {
-        visit_rows_on(self.0, sql, params, visit)
-    }
-}
-
-impl SqlWrite for SqliteTx<'_> {
-    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
-        register_commit(self.0, action)
-    }
-
-    fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
         Ok(self
-            .0
+            .inner
+            .as_ref()
+            .expect("open savepoint")
             .prepare_cached(sql)?
             .execute(params_from_iter(params))?)
     }
-
     fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
-        let (_, id) = insert_counted(self.0, sql, params_from_iter(params))?;
-        Ok(id)
+        Ok(insert_counted(
+            self.inner.as_ref().expect("open savepoint"),
+            sql,
+            params_from_iter(params),
+        )?
+        .1)
     }
-
     fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
-        let (rows, id) = insert_counted(self.0, sql, params_from_iter(params))?;
+        let (rows, id) = insert_counted(
+            self.inner.as_ref().expect("open savepoint"),
+            sql,
+            params_from_iter(params),
+        )?;
         Ok((rows > 0).then_some(id))
     }
 }
 
+// Native handles are only a fixture capability. Production writes use the
+// named WriteTx entry, including its fence and row accounting.
+#[cfg(test)]
+impl SqlWrite for Connection {
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+        register_commit(self, action)
+    }
+    fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
+        Ok(self
+            .prepare_cached(sql)?
+            .execute(params_from_iter(params))?)
+    }
+    fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
+        Ok(insert_counted(self, sql, params_from_iter(params))?.1)
+    }
+    fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
+        let (rows, id) = insert_counted(self, sql, params_from_iter(params))?;
+        Ok((rows > 0).then_some(id))
+    }
+}
 /// Register `dagq_actor_role()`, `dagq_actor_id()` and `dagq_requested_by()`
 /// on `conn`, writing as `actor`, and return the state they read.
 pub(in crate::infrastructure) fn attach_event_actors(
@@ -552,7 +499,7 @@ pub(in crate::infrastructure) fn attach_event_bodies(
 mod tests {
     use std::time::Duration;
 
-    use rusqlite::{OpenFlags, params};
+    use rusqlite::OpenFlags;
 
     use super::*;
     use crate::domain::EventKind;
@@ -894,7 +841,9 @@ mod tests {
             // WriteTx reads this state when ending a deferred transaction
             // whose writes went through a guard rather than its execute.
             assert_eq!(
-                tx.transaction_state(Some(rusqlite::MAIN_DB)).unwrap(),
+                tx.inner()
+                    .transaction_state(Some(rusqlite::MAIN_DB))
+                    .unwrap(),
                 rusqlite::TransactionState::Write
             );
             assert_eq!(tx.rows_written(), 0);
@@ -910,7 +859,7 @@ mod tests {
     #[test]
     fn a_bool_is_stored_as_zero_or_one_and_reads_as_a_bool() {
         let conn = table("bool");
-        let tx = port_tx(&conn);
+        let tx = read_tx(&conn);
         for value in [false, true] {
             SqlWrite::execute(&tx, "INSERT INTO t(b) VALUES (?1)", sql_params![value]).unwrap();
         }
@@ -1042,21 +991,6 @@ mod tests {
         );
         assert_eq!(tx.rows_written(), 3);
         tx.commit().unwrap();
-
-        let wrapped = port_tx(&conn);
-        assert_eq!(
-            SqlWrite::insert_id(&wrapped, "INSERT INTO t(v) VALUES (?1)", sql_params!["d"])
-                .unwrap(),
-            44
-        );
-        assert_eq!(
-            SqlWrite::insert_id_if_inserted(&wrapped, if_new, sql_params!["e"]).unwrap(),
-            Some(45)
-        );
-        assert_eq!(
-            SqlWrite::insert_id_if_inserted(&wrapped, if_new, sql_params!["e"]).unwrap(),
-            None
-        );
     }
 
     /// The entries hand a transaction of the port: the write entry's has
@@ -1091,7 +1025,6 @@ mod tests {
         let reader = queue.read_entry("sql_exec_read_entry").unwrap();
         assert_eq!(SqlRead::dialect(&reader), SqlDialect::Sqlite);
         assert!(!SqlRead::in_write_transaction(&reader));
-        assert!(port_tx(&reader).in_write_transaction());
         drop(reader);
         let leader = WriteTx::leader(&queue.conn, "leader_mode", Duration::from_secs(60)).unwrap();
         assert!(SqlRead::in_write_transaction(&leader));
@@ -1108,41 +1041,6 @@ mod tests {
         };
         let queue = queue.with_write_identity(stale);
         assert!(queue.write_tx("sql_exec_stale_entry").is_err());
-    }
-
-    /// What is not moved keeps its rusqlite calls: a `WriteTx` still derefs,
-    /// and what it holds hands itself to moved code with [`port_tx`].
-    #[test]
-    fn an_unmoved_function_and_a_moved_one_share_the_transaction() {
-        fn unmoved(conn: &Connection) -> rusqlite::Result<usize> {
-            conn.execute("INSERT INTO t(v) VALUES (?1)", params!["unmoved"])
-        }
-        fn moved(tx: &impl SqlWrite) -> SqlResult<usize> {
-            tx.execute("INSERT INTO t(v) VALUES (?1)", sql_params!["moved"])
-        }
-        let conn = table("compatibility");
-        let tx = read_tx(&conn);
-        assert_eq!(unmoved(&tx).unwrap(), 1);
-        assert_eq!(moved(&tx).unwrap(), 1);
-        assert!(
-            moved(&port_tx(&tx))
-                .unwrap_err()
-                .to_string()
-                .contains("UNIQUE")
-        );
-        let inner: &rusqlite::Transaction<'_> = &tx;
-        assert_eq!(
-            SqlRead::query_row(&port_tx(inner), "SELECT count(*) FROM t", &[], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-            2
-        );
-        drop(tx);
-        // Rolled back with the transaction: the wrapper began nothing.
-        let left: i64 = conn
-            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(left, 0);
     }
 
     /// Each error of the port says what rusqlite's says, and comes back as
@@ -1201,8 +1099,7 @@ mod tests {
         let other = connect(&uri);
         other.busy_timeout(Duration::ZERO).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let error =
-            SqlWrite::execute(&port_tx(&other), "INSERT INTO t VALUES (1)", &[]).unwrap_err();
+        let error = SqlWrite::execute(&other, "INSERT INTO t VALUES (1)", &[]).unwrap_err();
         assert!(error.is_contention(), "{error}");
         let tagged = crate::infrastructure::sqlite::tag_busy(anyhow::Error::new(error));
         assert!(tagged.is::<crate::application::QueueBusy>());

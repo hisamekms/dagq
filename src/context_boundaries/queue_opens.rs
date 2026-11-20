@@ -115,9 +115,15 @@ pub(super) const OPENERS: &[Opener] = &[
         "SqliteOpener::connect",
         Why::Opener,
     ),
+    row("src/infrastructure/queue_service.rs", "serve", Why::Service),
     row(
         "src/infrastructure/queue_service.rs",
         "serve_on",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service.rs",
+        "serve_on_store",
         Why::Service,
     ),
     row(
@@ -142,7 +148,7 @@ pub(super) const OPENERS: &[Opener] = &[
     ),
     row(
         "src/infrastructure/queue_service.rs",
-        "ServiceWriteLine::stop_within",
+        "ServiceWriteLine::leader_queue",
         Why::Service,
     ),
     row(

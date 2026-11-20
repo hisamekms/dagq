@@ -519,27 +519,6 @@ const RECORD_TIME_GLOB: &str =
 const RECORD_TIME_REGEX: &str =
     "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$";
 
-/// [`SqlDialect::json_field`] in the SQLite kind.
-// SQLite compatibility entry for store modules migrating independently.
-#[allow(dead_code)]
-pub(crate) fn json_field(column: &str, path: &str, ty: JsonType) -> String {
-    SqlDialect::Sqlite.json_field(column, path, ty)
-}
-
-/// [`SqlDialect::json_field_spaced`] in the SQLite kind.
-#[cfg(test)]
-pub(crate) fn json_field_spaced(column: &str, path: &str, ty: JsonType) -> String {
-    SqlDialect::Sqlite.json_field_spaced(column, path, ty)
-}
-
-/// [`SqlDialect::json_field_at`] in the SQLite kind.
-// No caller here any more, kept for a store module on another branch that
-// has not moved (ADR-t3982-1: the moves land in any order).
-#[allow(dead_code)]
-pub(crate) fn json_field_at(column: &str, path: &str, ty: JsonType) -> String {
-    SqlDialect::Sqlite.json_field_at(column, path, ty)
-}
-
 fn path_literal(path: &str) -> String {
     debug_assert!(
         path.starts_with('$') && !path.contains('\''),
@@ -560,43 +539,6 @@ pub(crate) enum TimeForm {
     /// A number that orders and compares the instants; `NULL` when the value
     /// is not a time.
     Ordinal,
-}
-
-/// [`SqlDialect::json_type_of`] in the SQLite kind.
-#[cfg(test)]
-pub(crate) fn json_type_of(column: &str, path: &str) -> String {
-    SqlDialect::Sqlite.json_type_of(column, path)
-}
-
-/// [`SqlDialect::time_value`] in the SQLite kind.
-// SQLite compatibility entry for store modules migrating independently.
-#[allow(dead_code)]
-pub(crate) fn time_value(value: &str, form: TimeForm) -> String {
-    SqlDialect::Sqlite.time_value(value, form)
-}
-
-/// [`SqlDialect::time_value_spaced`] in the SQLite kind.
-#[cfg(test)]
-pub(crate) fn time_value_spaced(value: &str, form: TimeForm) -> String {
-    SqlDialect::Sqlite.time_value_spaced(value, form)
-}
-
-/// The SQL expression that reads, in `form`, the time the SQL expression
-/// `value` gives moved by the SQL expression `shift` (a bound parameter
-/// holding a SQLite modifier such as `-100 seconds`); only the tests move
-/// the times they record.
-#[cfg(test)]
-pub(crate) fn time_value_shifted(value: &str, shift: &str, form: TimeForm) -> String {
-    SqlDialect::Sqlite.time_expression(&format!("{value}{TIGHT}{shift}"), form, TIGHT)
-}
-
-/// The SQL expression of the text the format the SQL expression `format` (a
-/// bound parameter, in SQLite's `strftime` format) makes of the time the SQL
-/// expression `value` gives, its arguments spaced; only a test that stands
-/// in for SQLite's own `strftime` reads it.
-#[cfg(test)]
-pub(crate) fn formatted_time(format: &str, value: &str) -> String {
-    format!("strftime({format}{SPACED}{value})")
 }
 
 #[cfg(test)]
@@ -682,18 +624,6 @@ mod tests {
             kind.json_field_at("payload", "?4", ty),
             "json_extract(payload,?4)"
         );
-        assert_eq!(
-            kind.json_field("o.payload", "$.kind", ty),
-            json_field("o.payload", "$.kind", ty)
-        );
-        assert_eq!(
-            kind.json_field_spaced("p", "$.k", ty),
-            json_field_spaced("p", "$.k", ty)
-        );
-        assert_eq!(
-            kind.json_field_at("p", "?1", ty),
-            json_field_at("p", "?1", ty)
-        );
         for (form, tight, spaced) in [
             (
                 TimeForm::Text,
@@ -714,11 +644,6 @@ mod tests {
         ] {
             assert_eq!(kind.time_value("at", form), tight);
             assert_eq!(kind.time_value_spaced("at", form), spaced);
-            assert_eq!(kind.time_value("at", form), time_value("at", form));
-            assert_eq!(
-                kind.time_value_spaced("at", form),
-                time_value_spaced("at", form)
-            );
         }
     }
 
@@ -864,7 +789,10 @@ mod tests {
             assert_eq!(fragment(SqlDialect::Sqlite), sqlite);
             assert_eq!(fragment(SqlDialect::Postgres), postgres);
         }
-        assert_eq!(json_type_of("p", "$.a"), "json_type(p, '$.a')");
+        assert_eq!(
+            SqlDialect::Sqlite.json_type_of("p", "$.a"),
+            "json_type(p, '$.a')"
+        );
     }
 
     /// What the SQLite text of a table and of the reads of its row gives,
@@ -975,468 +903,505 @@ mod tests {
     fn each_call_returns_the_expression_its_statement_spelled() {
         let cases = [
             (
-                time_value("s.created_at", TimeForm::EpochMillis),
+                SqlDialect::Sqlite.time_value("s.created_at", TimeForm::EpochMillis),
                 r#"CAST((julianday(s.created_at) - 2440587.5) * 86400000 AS INTEGER)"#,
             ),
             (
-                json_field("c.payload", "$.active_unavailable", JsonType::Text),
+                SqlDialect::Sqlite.json_field("c.payload", "$.active_unavailable", JsonType::Text),
                 r#"json_extract(c.payload,'$.active_unavailable')"#,
             ),
             (
-                json_field("c.payload", "$.kind", JsonType::Text),
+                SqlDialect::Sqlite.json_field("c.payload", "$.kind", JsonType::Text),
                 r#"json_extract(c.payload,'$.kind')"#,
             ),
             (
-                json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("c.payload", "$.opened_event_id", JsonType::Integer),
                 r#"json_extract(c.payload,'$.opened_event_id')"#,
             ),
             (
-                json_field("c.payload", "$.reason", JsonType::Text),
+                SqlDialect::Sqlite.json_field("c.payload", "$.reason", JsonType::Text),
                 r#"json_extract(c.payload,'$.reason')"#,
             ),
             (
-                json_field_at("c.payload", "?4", JsonType::Any),
+                SqlDialect::Sqlite.json_field_at("c.payload", "?4", JsonType::Any),
                 r#"json_extract(c.payload,?4)"#,
             ),
             (
-                json_field("e.payload", "$.ask_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("e.payload", "$.ask_id", JsonType::Integer),
                 r#"json_extract(e.payload,'$.ask_id')"#,
             ),
             (
-                json_field("e.payload", "$.planner_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("e.payload", "$.planner_id", JsonType::Integer),
                 r#"json_extract(e.payload,'$.planner_id')"#,
             ),
             (
-                json_field("e.payload", "$.subject", JsonType::Text),
+                SqlDialect::Sqlite.json_field("e.payload", "$.subject", JsonType::Text),
                 r#"json_extract(e.payload,'$.subject')"#,
             ),
             (
-                json_field("e.payload", "$.workspace_id", JsonType::Text),
+                SqlDialect::Sqlite.json_field("e.payload", "$.workspace_id", JsonType::Text),
                 r#"json_extract(e.payload,'$.workspace_id')"#,
             ),
             (
-                json_field_spaced("f.payload", "$.dir", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("f.payload", "$.dir", JsonType::Text),
                 r#"json_extract(f.payload, '$.dir')"#,
             ),
             (
-                json_field("f.payload", "$.eval_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("f.payload", "$.eval_id", JsonType::Integer),
                 r#"json_extract(f.payload,'$.eval_id')"#,
             ),
             (
-                json_field_spaced("inputs_through", "$.events", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "inputs_through",
+                    "$.events",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(inputs_through, '$.events')"#,
             ),
             (
-                json_field_spaced("inputs_through", "$.supervisor", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "inputs_through",
+                    "$.supervisor",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(inputs_through, '$.supervisor')"#,
             ),
             (
-                json_field_spaced("j.value", "$.id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced("j.value", "$.id", JsonType::Integer),
                 r#"json_extract(j.value, '$.id')"#,
             ),
             (
-                json_field_spaced("j.value", "$.kind", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("j.value", "$.kind", JsonType::Text),
                 r#"json_extract(j.value, '$.kind')"#,
             ),
             (
-                json_field("o.payload", "$.goal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.payload", "$.goal_id", JsonType::Integer),
                 r#"json_extract(o.payload,'$.goal_id')"#,
             ),
             (
-                json_field("o.payload", "$.goal_review_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.payload", "$.goal_review_id", JsonType::Integer),
                 r#"json_extract(o.payload,'$.goal_review_id')"#,
             ),
             (
-                json_field("o.payload", "$.kind", JsonType::Text),
+                SqlDialect::Sqlite.json_field("o.payload", "$.kind", JsonType::Text),
                 r#"json_extract(o.payload,'$.kind')"#,
             ),
             (
-                json_field("o.payload", "$.plan_review_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.payload", "$.plan_review_id", JsonType::Integer),
                 r#"json_extract(o.payload,'$.plan_review_id')"#,
             ),
             (
-                json_field("o.payload", "$.planner_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.payload", "$.planner_id", JsonType::Integer),
                 r#"json_extract(o.payload,'$.planner_id')"#,
             ),
             (
-                json_field("o.payload", "$.proposal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.payload", "$.proposal_id", JsonType::Integer),
                 r#"json_extract(o.payload,'$.proposal_id')"#,
             ),
             (
-                json_field("o.payload", "$.route", JsonType::Text),
+                SqlDialect::Sqlite.json_field("o.payload", "$.route", JsonType::Text),
                 r#"json_extract(o.payload,'$.route')"#,
             ),
             (
-                json_field_spaced("payload", "$.mode", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.mode", JsonType::Text),
                 r#"json_extract(payload, '$.mode')"#,
             ),
             (
-                json_field_spaced("payload", "$.period", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.period", JsonType::Text),
                 r#"json_extract(payload, '$.period')"#,
             ),
             (
-                json_field_spaced("payload", "$.pid", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.pid", JsonType::Integer),
                 r#"json_extract(payload, '$.pid')"#,
             ),
             (
-                json_field_spaced("payload", "$.plugin_only", JsonType::Boolean),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.plugin_only", JsonType::Boolean),
                 r#"json_extract(payload, '$.plugin_only')"#,
             ),
             (
-                json_field_spaced("payload", "$.session_id", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.session_id", JsonType::Text),
                 r#"json_extract(payload, '$.session_id')"#,
             ),
             (
-                json_field_spaced("payload", "$.supervisor", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.supervisor", JsonType::Text),
                 r#"json_extract(payload, '$.supervisor')"#,
             ),
             (
-                json_field("payload", "$.absent_since", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.absent_since", JsonType::Integer),
                 r#"json_extract(payload,'$.absent_since')"#,
             ),
             (
-                json_field("payload", "$.asked_by", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.asked_by", JsonType::Text),
                 r#"json_extract(payload,'$.asked_by')"#,
             ),
             (
-                json_field("payload", "$.at", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.at", JsonType::Integer),
                 r#"json_extract(payload,'$.at')"#,
             ),
             (
-                json_field("payload", "$.attempt", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.attempt", JsonType::Integer),
                 r#"json_extract(payload,'$.attempt')"#,
             ),
             (
-                json_field("payload", "$.by", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.by", JsonType::Text),
                 r#"json_extract(payload,'$.by')"#,
             ),
             (
-                json_field("payload", "$.dir", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.dir", JsonType::Text),
                 r#"json_extract(payload,'$.dir')"#,
             ),
             (
-                json_field("payload", "$.eval_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.eval_id", JsonType::Integer),
                 r#"json_extract(payload,'$.eval_id')"#,
             ),
             (
-                json_field("payload", "$.final", JsonType::Boolean),
+                SqlDialect::Sqlite.json_field("payload", "$.final", JsonType::Boolean),
                 r#"json_extract(payload,'$.final')"#,
             ),
             (
-                json_field("payload", "$.finding_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.finding_id", JsonType::Integer),
                 r#"json_extract(payload,'$.finding_id')"#,
             ),
             (
-                json_field("payload", "$.hold_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.hold_id", JsonType::Integer),
                 r#"json_extract(payload,'$.hold_id')"#,
             ),
             (
-                json_field("payload", "$.kept_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.kept_id", JsonType::Integer),
                 r#"json_extract(payload,'$.kept_id')"#,
             ),
             (
-                json_field("payload", "$.kind", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.kind", JsonType::Text),
                 r#"json_extract(payload,'$.kind')"#,
             ),
             (
-                json_field("payload", "$.label", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.label", JsonType::Text),
                 r#"json_extract(payload,'$.label')"#,
             ),
             (
-                json_field("payload", "$.mode", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.mode", JsonType::Text),
                 r#"json_extract(payload,'$.mode')"#,
             ),
             (
-                json_field("payload", "$.opened_event_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.opened_event_id", JsonType::Integer),
                 r#"json_extract(payload,'$.opened_event_id')"#,
             ),
             (
-                json_field("payload", "$.outcome", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.outcome", JsonType::Text),
                 r#"json_extract(payload,'$.outcome')"#,
             ),
             (
-                json_field("payload", "$.period", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.period", JsonType::Text),
                 r#"json_extract(payload,'$.period')"#,
             ),
             (
-                json_field("payload", "$.planner_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.planner_id", JsonType::Integer),
                 r#"json_extract(payload,'$.planner_id')"#,
             ),
             (
-                json_field("payload", "$.proposal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.proposal_id", JsonType::Integer),
                 r#"json_extract(payload,'$.proposal_id')"#,
             ),
             (
-                json_field("payload", "$.reason", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.reason", JsonType::Text),
                 r#"json_extract(payload,'$.reason')"#,
             ),
             (
-                json_field("payload", "$.reviewed_proposal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field(
+                    "payload",
+                    "$.reviewed_proposal_id",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(payload,'$.reviewed_proposal_id')"#,
             ),
             (
-                json_field("payload", "$.session_id", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.session_id", JsonType::Text),
                 r#"json_extract(payload,'$.session_id')"#,
             ),
             (
-                json_field("payload", "$.set_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.set_id", JsonType::Integer),
                 r#"json_extract(payload,'$.set_id')"#,
             ),
             (
-                json_field("payload", "$.source_run_id", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.source_run_id", JsonType::Text),
                 r#"json_extract(payload,'$.source_run_id')"#,
             ),
             (
-                json_field("payload", "$.step", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.step", JsonType::Text),
                 r#"json_extract(payload,'$.step')"#,
             ),
             (
-                json_field("payload", "$.subject", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.subject", JsonType::Text),
                 r#"json_extract(payload,'$.subject')"#,
             ),
             (
-                json_field("payload", "$.supervisor", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.supervisor", JsonType::Text),
                 r#"json_extract(payload,'$.supervisor')"#,
             ),
             (
-                json_field("payload", "$.to", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.to", JsonType::Text),
                 r#"json_extract(payload,'$.to')"#,
             ),
             (
-                json_field("payload", "$.to", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.to", JsonType::Integer),
                 r#"json_extract(payload,'$.to')"#,
             ),
             (
-                json_field("payload", "$.workspace_id", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.workspace_id", JsonType::Text),
                 r#"json_extract(payload,'$.workspace_id')"#,
             ),
             (
-                json_field_spaced("s.payload", "$.dir", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("s.payload", "$.dir", JsonType::Text),
                 r#"json_extract(s.payload, '$.dir')"#,
             ),
             (
-                json_field_spaced("s.payload", "$.pid", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced("s.payload", "$.pid", JsonType::Integer),
                 r#"json_extract(s.payload, '$.pid')"#,
             ),
             (
-                json_field_spaced("s.payload", "$.timeout_secs", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "s.payload",
+                    "$.timeout_secs",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(s.payload, '$.timeout_secs')"#,
             ),
             (
-                json_field("s.payload", "$.eval_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("s.payload", "$.eval_id", JsonType::Integer),
                 r#"json_extract(s.payload,'$.eval_id')"#,
             ),
             (
-                json_field("s.payload", "$.kept_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("s.payload", "$.kept_id", JsonType::Integer),
                 r#"json_extract(s.payload,'$.kept_id')"#,
             ),
             (
-                json_field("t.payload", "$.final", JsonType::Boolean),
+                SqlDialect::Sqlite.json_field("t.payload", "$.final", JsonType::Boolean),
                 r#"json_extract(t.payload,'$.final')"#,
             ),
             (
-                json_field("t.payload", "$.opened_event_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("t.payload", "$.opened_event_id", JsonType::Integer),
                 r#"json_extract(t.payload,'$.opened_event_id')"#,
             ),
             (
-                json_field("d.material", "$.proposal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("d.material", "$.proposal_id", JsonType::Integer),
                 r#"json_extract(d.material,'$.proposal_id')"#,
             ),
             (
-                json_field_spaced("e.payload", "$.ask_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced("e.payload", "$.ask_id", JsonType::Integer),
                 r#"json_extract(e.payload, '$.ask_id')"#,
             ),
             (
-                json_field_spaced("e.payload", "$.duplicate_of", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "e.payload",
+                    "$.duplicate_of",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(e.payload, '$.duplicate_of')"#,
             ),
             (
-                json_field_spaced("e.payload", "$.reason", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("e.payload", "$.reason", JsonType::Text),
                 r#"json_extract(e.payload, '$.reason')"#,
             ),
             (
-                json_field_spaced("e.payload", "$.runtime_delivers", JsonType::Boolean),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "e.payload",
+                    "$.runtime_delivers",
+                    JsonType::Boolean,
+                ),
                 r#"json_extract(e.payload, '$.runtime_delivers')"#,
             ),
             (
-                json_field_spaced("e.payload", "$.to", JsonType::Text),
+                SqlDialect::Sqlite.json_field_spaced("e.payload", "$.to", JsonType::Text),
                 r#"json_extract(e.payload, '$.to')"#,
             ),
             (
-                json_field("e.payload", "$.by", JsonType::Text),
+                SqlDialect::Sqlite.json_field("e.payload", "$.by", JsonType::Text),
                 r#"json_extract(e.payload,'$.by')"#,
             ),
             (
-                json_field("e.payload", "$.duplicate_of", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("e.payload", "$.duplicate_of", JsonType::Integer),
                 r#"json_extract(e.payload,'$.duplicate_of')"#,
             ),
             (
-                json_field("e.payload", "$.finding_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("e.payload", "$.finding_id", JsonType::Integer),
                 r#"json_extract(e.payload,'$.finding_id')"#,
             ),
             (
-                json_field("e.payload", "$.marked_at", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("e.payload", "$.marked_at", JsonType::Integer),
                 r#"json_extract(e.payload,'$.marked_at')"#,
             ),
             (
-                json_field("e.payload", "$.replan_operation_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field(
+                    "e.payload",
+                    "$.replan_operation_id",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(e.payload,'$.replan_operation_id')"#,
             ),
             (
-                json_field("e.payload", "$.request_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("e.payload", "$.request_id", JsonType::Integer),
                 r#"json_extract(e.payload,'$.request_id')"#,
             ),
             (
-                json_field("j.value", "$.id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("j.value", "$.id", JsonType::Integer),
                 r#"json_extract(j.value,'$.id')"#,
             ),
             (
-                json_field("j.value", "$.kind", JsonType::Text),
+                SqlDialect::Sqlite.json_field("j.value", "$.kind", JsonType::Text),
                 r#"json_extract(j.value,'$.kind')"#,
             ),
             (
-                json_field_spaced("material", "$.source_task_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "material",
+                    "$.source_task_id",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(material, '$.source_task_id')"#,
             ),
             (
-                json_field("material", "$.key", JsonType::Text),
+                SqlDialect::Sqlite.json_field("material", "$.key", JsonType::Text),
                 r#"json_extract(material,'$.key')"#,
             ),
             (
-                json_field_spaced("o.material", "$.source_goal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced(
+                    "o.material",
+                    "$.source_goal_id",
+                    JsonType::Integer,
+                ),
                 r#"json_extract(o.material, '$.source_goal_id')"#,
             ),
             (
-                json_field("o.material", "$.index", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.material", "$.index", JsonType::Integer),
                 r#"json_extract(o.material,'$.index')"#,
             ),
             (
-                json_field("o.material", "$.key", JsonType::Text),
+                SqlDialect::Sqlite.json_field("o.material", "$.key", JsonType::Text),
                 r#"json_extract(o.material,'$.key')"#,
             ),
             (
-                json_field("o.material", "$.source_goal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.material", "$.source_goal_id", JsonType::Integer),
                 r#"json_extract(o.material,'$.source_goal_id')"#,
             ),
             (
-                json_field("o.material", "$.source_run_id", JsonType::Text),
+                SqlDialect::Sqlite.json_field("o.material", "$.source_run_id", JsonType::Text),
                 r#"json_extract(o.material,'$.source_run_id')"#,
             ),
             (
-                json_field("o.material", "$.source_task_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("o.material", "$.source_task_id", JsonType::Integer),
                 r#"json_extract(o.material,'$.source_task_id')"#,
             ),
             (
-                json_field_spaced("payload", "$.planner_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.planner_id", JsonType::Integer),
                 r#"json_extract(payload, '$.planner_id')"#,
             ),
             (
-                json_field_spaced("payload", "$.task_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.task_id", JsonType::Integer),
                 r#"json_extract(payload, '$.task_id')"#,
             ),
             (
-                json_field("payload", "$.ask_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.ask_id", JsonType::Integer),
                 r#"json_extract(payload,'$.ask_id')"#,
             ),
             (
-                json_field("payload", "$.claimed_at", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.claimed_at", JsonType::Integer),
                 r#"json_extract(payload,'$.claimed_at')"#,
             ),
             (
-                json_field("payload", "$.continue_run", JsonType::Boolean),
+                SqlDialect::Sqlite.json_field("payload", "$.continue_run", JsonType::Boolean),
                 r#"json_extract(payload,'$.continue_run')"#,
             ),
             (
-                json_field("payload", "$.correction_ask_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.correction_ask_id", JsonType::Integer),
                 r#"json_extract(payload,'$.correction_ask_id')"#,
             ),
             (
-                json_field("payload", "$.from", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.from", JsonType::Integer),
                 r#"json_extract(payload,'$.from')"#,
             ),
             (
-                json_field("payload", "$.goal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.goal_id", JsonType::Integer),
                 r#"json_extract(payload,'$.goal_id')"#,
             ),
             (
-                json_field("payload", "$.id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.id", JsonType::Integer),
                 r#"json_extract(payload,'$.id')"#,
             ),
             (
-                json_field("payload", "$.marked_at", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.marked_at", JsonType::Integer),
                 r#"json_extract(payload,'$.marked_at')"#,
             ),
             (
-                json_field("payload", "$.operation_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.operation_id", JsonType::Integer),
                 r#"json_extract(payload,'$.operation_id')"#,
             ),
             (
-                json_field("payload", "$.origin", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.origin", JsonType::Text),
                 r#"json_extract(payload,'$.origin')"#,
             ),
             (
-                json_field("payload", "$.plan_review_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.plan_review_id", JsonType::Integer),
                 r#"json_extract(payload,'$.plan_review_id')"#,
             ),
             (
-                json_field("payload", "$.predecessor_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.predecessor_id", JsonType::Integer),
                 r#"json_extract(payload,'$.predecessor_id')"#,
             ),
             (
-                json_field("payload", "$.request_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.request_id", JsonType::Integer),
                 r#"json_extract(payload,'$.request_id')"#,
             ),
             (
-                json_field("payload", "$.run_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.run_id", JsonType::Integer),
                 r#"json_extract(payload,'$.run_id')"#,
             ),
             (
-                json_field("payload", "$.source", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.source", JsonType::Text),
                 r#"json_extract(payload,'$.source')"#,
             ),
             (
-                json_field("payload", "$.source_goal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("payload", "$.source_goal_id", JsonType::Integer),
                 r#"json_extract(payload,'$.source_goal_id')"#,
             ),
             (
-                json_field("payload", "$.text", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.text", JsonType::Text),
                 r#"json_extract(payload,'$.text')"#,
             ),
             (
-                json_field("payload", "$.workflow", JsonType::Text),
+                SqlDialect::Sqlite.json_field("payload", "$.workflow", JsonType::Text),
                 r#"json_extract(payload,'$.workflow')"#,
             ),
             (
-                json_field_at("payload", "?3", JsonType::Text),
+                SqlDialect::Sqlite.json_field_at("payload", "?3", JsonType::Text),
                 r#"json_extract(payload,?3)"#,
             ),
             (
-                json_field("r.material", "$.proposal_id", JsonType::Integer),
+                SqlDialect::Sqlite.json_field("r.material", "$.proposal_id", JsonType::Integer),
                 r#"json_extract(r.material,'$.proposal_id')"#,
             ),
-            (time_value("?7", TimeForm::Ordinal), r#"julianday(?7)"#),
-            (time_value("?8", TimeForm::Ordinal), r#"julianday(?8)"#),
             (
-                time_value("created_at", TimeForm::Ordinal),
+                SqlDialect::Sqlite.time_value("?7", TimeForm::Ordinal),
+                r#"julianday(?7)"#,
+            ),
+            (
+                SqlDialect::Sqlite.time_value("?8", TimeForm::Ordinal),
+                r#"julianday(?8)"#,
+            ),
+            (
+                SqlDialect::Sqlite.time_value("created_at", TimeForm::Ordinal),
                 r#"julianday(created_at)"#,
             ),
             (
-                time_value("'now'", TimeForm::Text),
+                SqlDialect::Sqlite.time_value("'now'", TimeForm::Text),
                 r#"strftime('%Y-%m-%dT%H:%M:%fZ','now')"#,
             ),
             (
-                time_value_shifted("'now'", "?1", TimeForm::Text),
-                r#"strftime('%Y-%m-%dT%H:%M:%fZ','now',?1)"#,
-            ),
-            (
-                time_value_spaced("?1", TimeForm::EpochSeconds),
+                SqlDialect::Sqlite.time_value_spaced("?1", TimeForm::EpochSeconds),
                 r#"CAST(strftime('%s', ?1) AS INTEGER)"#,
             ),
             (
-                time_value("created_at", TimeForm::EpochSeconds),
+                SqlDialect::Sqlite.time_value("created_at", TimeForm::EpochSeconds),
                 r#"CAST(strftime('%s',created_at) AS INTEGER)"#,
             ),
-            (formatted_time("?1", "?2"), r#"strftime(?1, ?2)"#),
         ];
         for (returned, spelled) in cases {
             assert_eq!(returned, spelled);
@@ -1452,11 +1417,11 @@ mod tests {
             JsonType::Any,
         ] {
             assert_eq!(
-                json_field("o.payload", "$.kind", ty),
+                SqlDialect::Sqlite.json_field("o.payload", "$.kind", ty),
                 "json_extract(o.payload,'$.kind')"
             );
             assert_eq!(
-                json_field_spaced("payload", "$.kind", ty),
+                SqlDialect::Sqlite.json_field_spaced("payload", "$.kind", ty),
                 "json_extract(payload, '$.kind')"
             );
         }
@@ -1473,12 +1438,12 @@ mod tests {
         .unwrap();
         let sql = format!(
             "SELECT {}, {}, {}, {}, {}, {} FROM t",
-            json_field("payload", "$.kind", JsonType::Text),
-            json_field("payload", "$.id", JsonType::Integer),
-            json_field("payload", "$.final", JsonType::Boolean),
-            time_value("created_at", TimeForm::EpochSeconds),
-            time_value("created_at", TimeForm::EpochMillis),
-            time_value("created_at", TimeForm::Ordinal),
+            SqlDialect::Sqlite.json_field("payload", "$.kind", JsonType::Text),
+            SqlDialect::Sqlite.json_field("payload", "$.id", JsonType::Integer),
+            SqlDialect::Sqlite.json_field("payload", "$.final", JsonType::Boolean),
+            SqlDialect::Sqlite.time_value("created_at", TimeForm::EpochSeconds),
+            SqlDialect::Sqlite.time_value("created_at", TimeForm::EpochMillis),
+            SqlDialect::Sqlite.time_value("created_at", TimeForm::Ordinal),
         );
         let row: (String, i64, i64, i64, i64, f64) = conn
             .query_row(&sql, [], |r| {
@@ -1496,17 +1461,6 @@ mod tests {
         assert_eq!((row.1, row.2), (7, 1));
         assert_eq!((row.3, row.4), (1_793_577_601, 1_793_577_601_250));
         assert!(row.5 > 2_461_000.0);
-        let text: String = conn
-            .query_row(
-                &format!(
-                    "SELECT {}",
-                    time_value_shifted("'2026-11-02T00:00:00.000Z'", "?1", TimeForm::Text)
-                ),
-                ["-1 seconds"],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(text, "2026-11-01T23:59:59.000Z");
     }
 }
 

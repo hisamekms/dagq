@@ -5422,7 +5422,9 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         );
         anyhow::ensure!(
-            status || location.db.is_file(),
+            status
+                || location.db.is_file()
+                || !dagq::compose::sqlite_store_selected(|name| env::var_os(name))?,
             "no queue at {} (use init to create it)",
             location.db.display()
         );
@@ -5934,7 +5936,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 replacement,
                 breaking,
                 binding,
-            } => dagq::infrastructure::queue_service::serve(
+            } => dagq::compose::serve_queue_service(
                 &dagq::infrastructure::queue_service::ServeOptions {
                     db: db.clone(),
                     generators: generators.clone(),
@@ -6601,7 +6603,10 @@ fn run(mut arguments: Vec<OsString>) -> Result<Value> {
 /// Run the command unless the deployment's setting `env` chose a store this
 /// build cannot use.
 fn execute_on_usable_store(cli: Cli, env: impl Fn(&str) -> Option<OsString>) -> Result<Value> {
-    dagq::compose::refuse_unusable_store(env)?;
+    let store = dagq::compose::refuse_unusable_store(env)?;
+    if matches!(cli.command, Command::Init) {
+        store.check_sqlite()?;
+    }
     execute(cli)
 }
 

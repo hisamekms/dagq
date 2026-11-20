@@ -286,11 +286,81 @@ fn process_env(name: &str) -> Option<String> {
 
 /// Stop a process whose deployment chose a store it cannot use, before it
 /// opens anything: a choice never falls back to the SQLite queue.
-pub fn refuse_unusable_store(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<()> {
+pub fn refuse_unusable_store(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<crate::domain::store_setting::StoreSetting> {
     let config = crate::infrastructure::deployment_config::DeploymentConfig::from_env(env)?;
     let setting = config.store;
     setting.check_usable(cfg!(feature = "postgres"))?;
-    Ok(())
+    Ok(setting)
+}
+
+/// Whether local CLI existence checks apply; a deployed queue has no SQLite file.
+pub fn sqlite_store_selected(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<bool> {
+    Ok(matches!(
+        crate::infrastructure::deployment_config::DeploymentConfig::from_env(env)?.store,
+        crate::domain::store_setting::StoreSetting::Sqlite
+    ))
+}
+
+/// Store composition is decided without opening either backend. The service
+/// supplies the chosen adapter's entries and callbacks as one type-correct set.
+#[derive(Debug)]
+pub enum ServiceStore {
+    Sqlite,
+    Postgres(crate::domain::store_setting::ConnectionString),
+}
+
+pub fn service_store(
+    setting: &crate::domain::store_setting::StoreSetting,
+    postgres_built: bool,
+) -> Result<ServiceStore> {
+    use crate::domain::store_setting::StoreSetting;
+    setting.check_usable(postgres_built)?;
+    Ok(match setting {
+        StoreSetting::Sqlite => ServiceStore::Sqlite,
+        StoreSetting::Postgres {
+            connection: Some(connection),
+        } => ServiceStore::Postgres(connection.clone()),
+        StoreSetting::Postgres { connection: None } => unreachable!("validated setting"),
+    })
+}
+
+/// Assemble the service's callbacks and entries together for the selected
+/// deployment. The default retains the caller's SQLite callbacks; Postgres
+/// uses the same application ports with its own entries and search adapter.
+pub fn serve_queue_service(
+    options: &crate::infrastructure::queue_service::ServeOptions,
+) -> Result<Value> {
+    use crate::infrastructure::{deployment_config::DeploymentConfig, queue_service};
+    let config = DeploymentConfig::from_process()?;
+    match service_store(&config.store, cfg!(feature = "postgres"))? {
+        ServiceStore::Sqlite => queue_service::serve(options),
+        #[cfg(feature = "postgres")]
+        ServiceStore::Postgres(connection) => {
+            let pg: queue_service::ServeOptions<
+                crate::infrastructure::postgres::PostgresStore<queue_service::ServiceSession>,
+            > = queue_service::ServeOptions {
+                db: options.db.clone(),
+                generators: options.generators.clone(),
+                reads: service_reads(),
+                writes: service_writes(),
+                commands: service_commands(),
+                doctor: service_doctor(),
+                detail: options.detail,
+                stop: options.stop.clone(),
+                poll: options.poll,
+                owner: options.owner,
+                start: options.start,
+                report: options.report.clone(),
+                executable: options.executable.clone(),
+                binding: options.binding.clone(),
+            };
+            queue_service::serve_postgres(&pg, connection)
+        }
+        #[cfg(not(feature = "postgres"))]
+        ServiceStore::Postgres(_) => unreachable!("selection refuses a build without Postgres"),
+    }
 }
 
 /// `ask`: register an ask (see [`crate::application::ask::ask`]); the
@@ -878,4 +948,47 @@ fn postgres_service_callbacks_do_not_require_sqlite_entries() {
     let _ = service_writes::<PostgresStore<Unopened>>();
     let _ = service_commands::<PostgresStore<Unopened>>();
     let _ = service_doctor::<PostgresStore<Unopened>>();
+}
+
+#[cfg(test)]
+#[test]
+fn deployment_store_selection_never_falls_back_to_sqlite() {
+    use crate::domain::store_setting::{ConnectionString, StoreSetting};
+    for built in [false, true] {
+        assert!(matches!(
+            service_store(&StoreSetting::Sqlite, built).unwrap(),
+            ServiceStore::Sqlite
+        ));
+    }
+    let setting = StoreSetting::Postgres {
+        connection: Some(ConnectionString::new("postgres://db/queue")),
+    };
+    assert!(
+        service_store(&setting, false)
+            .unwrap_err()
+            .to_string()
+            .contains("cargo feature `postgres`")
+    );
+    assert!(
+        matches!(service_store(&setting, true).unwrap(), ServiceStore::Postgres(connection) if connection.expose() == "postgres://db/queue")
+    );
+    assert!(service_store(&StoreSetting::Postgres { connection: None }, true).is_err());
+    let mounted = crate::infrastructure::deployment_config::DeploymentConfig::read(
+        |name| match name {
+            "DAGQ_STORE_FILE" => Some("kind".into()),
+            "DAGQ_DATABASE_URL_FILE" => Some("url".into()),
+            _ => None,
+        },
+        |path| match path.to_str() {
+            Some("kind") => Ok(b"postgres\n".to_vec()),
+            Some("url") => Ok(b"postgres://db/queue\n".to_vec()),
+            _ => Err(()),
+        },
+    )
+    .err()
+    .expect("mounted Postgres requires the deployment's other settings");
+    let reason = mounted.to_string();
+    assert!(reason.contains("DAGQ_OIDC_ISSUER"));
+    assert!(!reason.contains("DAGQ_STORE"));
+    assert!(!reason.contains("DAGQ_DATABASE_URL"));
 }

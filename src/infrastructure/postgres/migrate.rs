@@ -80,6 +80,13 @@ fn read_schema<S: PostgresSession>(session: &S) -> Result<Option<SchemaState>> {
     Ok(Some(SchemaState::of(version, floor)))
 }
 
+/// Read the deployed schema, applying no statement from the migration series.
+#[cfg(feature = "postgres")]
+pub(crate) fn schema<S: PostgresSession>(session: &S) -> Result<SchemaState> {
+    read_schema(session)?
+        .context("Postgres database has no dagq schema; use the deployment migrate command")
+}
+
 /// Refuse the database on `session` unless this binary opens it as it is:
 /// one with no schema, one older than this binary's and one whose floor
 /// refuses this binary.

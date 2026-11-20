@@ -1,5 +1,6 @@
 //! Shared SQL for hashed runner credentials. Every mutation uses the adapter's
 //! fenced write entry, including replay revocation committed before refusing.
+use super::sql_exec::CommitTransaction as _;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, TransactionEntries, sql_params};
 use crate::application::RunnerStore;
 use crate::domain::{oidc::OidcIdentity, runner_registration::*};
@@ -267,5 +268,5 @@ macro_rules! runner_store {
         }
     };
 }
-runner_store!(super::sqlite::SqliteQueue);
+runner_store!(super::store_queue::StoreQueue<E>, E: crate::infrastructure::sql_exec::TransactionEntries);
 runner_store!(super::postgres::PostgresStore<S>, S: super::postgres::PostgresSession);

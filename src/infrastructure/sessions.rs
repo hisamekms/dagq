@@ -2451,13 +2451,13 @@ pub(super) fn insert_at(
 
 #[cfg(test)]
 pub(super) mod tests {
-    use crate::infrastructure::sql_exec::sqlite::port_tx;
+
     use rusqlite::{Connection, params};
     fn close_plan_review(conn: &Connection, plan_review_id: i64, inferred: bool) -> Result<()> {
-        super::close_plan_review(&port_tx(conn), plan_review_id, inferred)
+        super::close_plan_review(conn, plan_review_id, inferred)
     }
     fn close_goal_review(conn: &Connection, goal_review_id: i64, inferred: bool) -> Result<()> {
-        super::close_goal_review(&port_tx(conn), goal_review_id, inferred)
+        super::close_goal_review(conn, goal_review_id, inferred)
     }
     fn insert_at(
         conn: &Connection,
@@ -2467,7 +2467,7 @@ pub(super) mod tests {
         payload: &Value,
         created_at: &str,
     ) -> Result<EventId> {
-        super::insert_at(&port_tx(conn), task_id, run_id, kind, payload, created_at)
+        super::insert_at(conn, task_id, run_id, kind, payload, created_at)
     }
     use super::*;
 
@@ -2492,7 +2492,8 @@ pub(super) mod tests {
     use crate::{
         application::TaskStore,
         domain::{NewTask, RunEvent},
-        infrastructure::sqlite::{SqliteQueue, event, event_row},
+        infrastructure::sqlite::SqliteQueue,
+        infrastructure::store_writes::event,
     };
     use serde_json::json;
 
@@ -2525,7 +2526,7 @@ pub(super) mod tests {
             .conn
             .prepare("SELECT * FROM run_events WHERE kind IN ('session_opened','session_closed') ORDER BY id")
             .unwrap()
-            .query_map([], event_row)
+            .query_map([], |row| crate::infrastructure::sql_exec::sqlite::with_row(row, crate::infrastructure::store_rows::event_row))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
@@ -2843,14 +2844,7 @@ pub(super) mod tests {
     /// time in unix milliseconds.
     fn retime(conn: &Connection, after: i64, secs: i64) -> i64 {
         conn.execute(
-            &format!(
-                "UPDATE run_events SET created_at={} WHERE id>?2",
-                crate::infrastructure::sql_dialect::time_value_shifted(
-                    "'now'",
-                    "?1",
-                    TimeForm::Text
-                )
-            ),
+            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?1) WHERE id>?2",
             params![format!("-{secs} seconds"), after],
         )
         .unwrap();
@@ -2892,7 +2886,12 @@ pub(super) mod tests {
             .conn
             .prepare("SELECT * FROM run_events WHERE kind=?1 ORDER BY id")
             .unwrap()
-            .query_map([kind], event_row)
+            .query_map([kind], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::store_rows::event_row,
+                )
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
@@ -2907,7 +2906,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
         let record = |kind: EventKind, payload: Value| {
-            event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
+            event(&*queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
         let codex = json!({"role": "review", "provider": "codex"});
         record(
@@ -3301,7 +3300,8 @@ pub(super) mod tests {
         .unwrap();
         let reads = READS.with(std::cell::Cell::get);
         let record = |kind: EventKind, payload: Value, millis: i64| {
-            crate::infrastructure::sqlite::record_queue_event_in(conn, kind, &payload).unwrap();
+            crate::infrastructure::store_writes::record_queue_event_in(conn, kind, &payload)
+                .unwrap();
             let id = latest(conn);
             conn.execute(
                 "UPDATE run_events SET created_at=?1 WHERE id>=?2",
@@ -3763,7 +3763,7 @@ pub(super) mod tests {
         transcript(dir.path(), 0, &[(1, 2)], None);
         let main = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
         let record = |queue: &SqliteQueue, kind: EventKind, payload: Value| {
-            event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
+            event(&*queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
         let finished = |queue: &SqliteQueue| {
             of_kind(queue, "resume_finished")
@@ -3870,7 +3870,7 @@ pub(super) mod tests {
         };
         let go = json!({"content": "go"});
         let record = |queue: &SqliteQueue, kind: EventKind, payload: Value| {
-            event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
+            event(&*queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
 
         record(&queue, EventKind::AgentStarted, json!({"session_id": RUN}));
@@ -4088,7 +4088,7 @@ pub(super) mod tests {
             std::fs::write(project.join(format!("{session}.jsonl")), text.join("\n")).unwrap();
         };
         let record = |kind: EventKind, payload: Value| {
-            event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
+            event(&*queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
         let opus = "claude-opus-5-5";
 
@@ -4156,7 +4156,7 @@ pub(super) mod tests {
     #[test]
     fn a_goal_review_span_records_its_launch_and_the_model_of_its_transcript() {
         use crate::application::TaskStore;
-        use crate::infrastructure::sqlite::goal_event;
+        use crate::infrastructure::task_store::goal_event;
         let dir = tempfile::tempdir().unwrap();
         let (mut queue, task_id, _) = run_queue(dir.path());
         let goal = queue
@@ -4421,10 +4421,10 @@ pub(super) mod tests {
             payload["cwd"] = json!("/repo");
             payload["attempt"] = json!(1);
             if kind == EventKind::GoalReviewStarted {
-                crate::infrastructure::sqlite::goal_event(&queue.conn, goal, kind, payload)
+                crate::infrastructure::task_store::goal_event(&*queue.conn, goal, kind, payload)
                     .unwrap();
             } else {
-                event(&queue.conn, task_id, None, kind, payload).unwrap();
+                event(&*queue.conn, task_id, None, kind, payload).unwrap();
             }
         }
         let start = retime(&queue.conn, 0, 100);
@@ -4461,7 +4461,12 @@ pub(super) mod tests {
             .conn
             .prepare("SELECT * FROM run_events ORDER BY id")
             .unwrap()
-            .query_map([], event_row)
+            .query_map([], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::store_rows::event_row,
+                )
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
@@ -4489,7 +4494,7 @@ pub(super) mod tests {
     #[test]
     fn an_inferred_review_close_takes_the_analysis_made_before_its_write_transaction() {
         use crate::application::TaskStore;
-        use crate::infrastructure::sqlite::goal_event;
+        use crate::infrastructure::task_store::goal_event;
         let dir = tempfile::tempdir().unwrap();
         let (mut queue, task_id, _) = run_queue(dir.path());
         let goal = queue
@@ -4701,7 +4706,7 @@ pub(super) mod tests {
         .unwrap();
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
         event(
-            &tx,
+            &*tx,
             task_id,
             Some(&run),
             EventKind::SessionExited,
@@ -4896,7 +4901,12 @@ pub(super) mod tests {
             .conn
             .prepare("SELECT * FROM run_events ORDER BY id")
             .unwrap()
-            .query_map([], event_row)
+            .query_map([], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::store_rows::event_row,
+                )
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
@@ -4970,7 +4980,12 @@ pub(super) mod tests {
         let events: Vec<RunEvent> = conn
             .prepare("SELECT * FROM run_events ORDER BY id")
             .unwrap()
-            .query_map([], event_row)
+            .query_map([], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::store_rows::event_row,
+                )
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
@@ -5269,7 +5284,7 @@ pub(super) mod tests {
                     assert_eq!(record_open_turns(&*other.conn).unwrap(), 1);
                 } else {
                     event(
-                        &other.conn,
+                        &*other.conn,
                         task_id,
                         Some(&run),
                         EventKind::SessionExited,
@@ -5505,14 +5520,9 @@ pub(super) mod tests {
                 if format == "%Y-%m-%dT%H:%M:%fZ" && at == "now" {
                     return Ok(Some(fixed.clone()));
                 }
-                other.query_row(
-                    &format!(
-                        "SELECT {}",
-                        crate::infrastructure::sql_dialect::formatted_time("?1", "?2")
-                    ),
-                    [format, at],
-                    |r| r.get::<_, Option<String>>(0),
-                )
+                other.query_row("SELECT strftime(?1, ?2)", [format, at], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
             },
         )
         .unwrap();
