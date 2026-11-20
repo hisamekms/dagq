@@ -22,7 +22,7 @@ related:
 # コマンドをまたぐ約束
 
 記録から値を導いて返す計測のコマンド（`stats`・`kpi`・`mark` / `marks`・`report`・`timeline`）と、queueの今を見せるコマンド（`status`・`events`・`watch`・`doctor`・`review`）とprocessのlog、`recover`・`rebind`・`graph`の依存図をまたぐ約束と、各コマンドのコードの入口の地図。
-各コマンドの引数と出力の欄は`--help`と定義のそばのdoc comment、記録のモデルと台帳は[計測](../measurement.md)、決めた理由はリンクしたADRが持つ。
+各コマンドの引数と出力の欄は`--help`と定義のそばのdoc comment、記録のモデルは[計測](../measurement.md)、台帳は[計測の台帳](../measurement-ledger.md)、決めた理由はリンクしたADRが持つ。
 
 ## 入口
 
@@ -46,10 +46,10 @@ related:
 ## 計測のコマンドをまたぐ約束
 
 - `stats`・`kpi`・`report`の値は台帳（記録から作り直せるビュー）の窓だけを読むたびに同じ規則で導き、台帳の他に集計やKPIの表を持たない（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定5を[ADR-t1662-2](../../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)がamends、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)）。
-  台帳から作る形は[計測](../measurement.md#共通の読み取り関数)が持つ。
+  台帳から作る形は[計測](../measurement-ledger.md#共通の読み取り関数)が持つ。
 - 規則は1か所に書く。
   `kpi`と`report`は期間ごとの窓で`stats`と同じdomainの関数を呼び、observerの入力も同じ関数を呼ぶ。
-  完了見込み（`forecast`）の標本は台帳のrunの行を共通の読み取り関数で読み、`status`・`timeline`・`forecast`の工程はrunのeventの畳みから読む（[計測](../measurement.md#畳む関数)）。
+  完了見込み（`forecast`）の標本は台帳のrunの行を共通の読み取り関数で読み、`status`・`timeline`・`forecast`の工程はrunのeventの畳みから読む（[計測](../measurement-ledger.md#畳む関数)）。
   plan reviewとclaimの控えの衝突の多いファイルは、`stats`全体を通さずに`stats`の既定の窓の規則（`domain::stats::window`）と同じ数え方（`domain::stats::conflicts::conflict_hotspots_over`）を当てる。
 - 同じ記録・同じ今の時刻・同じ観測からは同じ出力になる。
   着地の後のrevertとCIの失敗は窓の終わりで読むので、過ぎた期間の`kpi`の値も後の読み取りで増える。

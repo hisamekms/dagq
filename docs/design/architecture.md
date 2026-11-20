@@ -103,7 +103,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 ## 観測と分析
 
 起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し・CIの見張り）。
-他のcontextの状態とeventを読むだけで書かず、計測のportと台帳の係は[計測](measurement.md)が持つ（ADR-t1662-2決定6）。
+他のcontextの状態とeventを読むだけで書かず、計測のportは[計測](measurement.md)、台帳の係は[計測の台帳](measurement-ledger.md#台帳を作る係)が持つ（ADR-t1662-2決定6）。
 
 ## host運用
 

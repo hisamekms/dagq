@@ -52,7 +52,7 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 - **保持**: ストアの行は、ファイルと同じ日数と数え方で、行の持つlocalの日が保持の期間より前なら取った時刻によらず消すので、時計の切り替えがあってもファイルと同じ行が残る。
   消すものはlockを取らずに読んでから消し、無ければwrite lockを取らない。
   消す行と取り込みの印は、行を先に、上限の行数ごとに別のtransactionで消し、途中で止まった削除は次の呼び出しが続きを消す。
-  台帳のnodeの行も、台帳を作る係が同じ日数で1日に1度sampleを落とす（[計測](../measurement.md#台帳を作る係)）。
+  台帳のnodeの行も、台帳を作る係が同じ日数で1日に1度sampleを落とす（[計測](../measurement-ledger.md#台帳を作る係)）。
 - **CSVの取り込み**: processの最初のjob（失敗したら次のjobでも）が、そのsampleを書く前に、保持の期間にある`metrics-YYYYMMDD.csv`の行をファイルの読み手と同じ読み方でストアに足す。
   取り込みはファイルの各行を1回だけ足す（間隔によらず全ての行を足し、同じ秒の行があれば足さない）ので、何度走っても行は増えず、取り込み済みのファイルに後から足された行（日をまたいで遅れて終わったjob、前の日に戻った時計、ストアに書けなかったsupervisor）も次のprocessの取り込みで足される。
   1つのファイルの行は上限の行数ごとに別のtransactionで足し、取り込み済みの印は最後の区切りと同じtransactionで書く。
@@ -137,7 +137,7 @@ claimと着地の空き容量の判断が、段階ごとの未使用の予約（
   `host`は参考の値で目標の判定・breach・push・observerのfindingには使わない。
   そこから`cpu_per_landing`と`load_per_core`をKPIにする（[`kpi`](commands.md)）。
 - `stats`・`kpi`・レポートはCSVもNodeSampleStoreも直接読まず、台帳のnodeの行だけを読む。
-  台帳を作る係がNodeSampleStoreのsampleをnodeの行に畳み、共通の読み取り関数がその行のsampleから窓や期間の要約を作る（`domain::ledger::node::host_summary`、[計測](../measurement.md#共通の読み取り関数)）。
+  台帳を作る係がNodeSampleStoreのsampleをnodeの行に畳み、共通の読み取り関数がその行のsampleから窓や期間の要約を作る（`domain::ledger::node::host_summary`、[計測](../measurement-ledger.md#共通の読み取り関数)）。
   要約はCSVの同じsampleの要約（`infrastructure::host_metrics::summary`）と同じ値になる。
 - 人はCSVをそのまま読める。
 

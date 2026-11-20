@@ -14,7 +14,8 @@ tags:
 
 - [Overview](overview.md)
 - [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextの目的、検査できる規則と検査の範囲。ADR-t1545-1）
-- [計測](measurement.md)（計測の作り直し。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、計測の層のストアと共有の記録を足すtaskはそこに区分を書く。区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口。ADR-t1662-1〜3、一部だけ実装済みのdraft）
+- [計測](measurement.md)（計測の作り直し。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、計測の層のストアと共有の記録を足すtaskはそこに区分を書く。区間とタグ・台帳への入口・送る口。ADR-t1662-1〜3、一部だけ実装済みのdraft）
+  台帳の形・畳む関数・台帳を作る係・共通の読み取り関数は[計測の台帳](measurement-ledger.md)が持つ。
   コマンドの形と分類は[計測のコマンドの形と分類](measurement-commands.md)が持つ。
   記録とOpenTelemetryのspan・attribute・resourceの対応は[計測のOpenTelemetryとの対応](measurement-otel.md)が持つ。
   共通の読み取り関数が返す欠測と集約の約束は[計測の欠測と集約の契約](measurement-missing.md)が持つ。

@@ -1,7 +1,7 @@
 ---
 id: design-measurement
 type: design
-title: 計測（SSOTとビュー・区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類）
+title: 計測（SSOTとビュー・区間とタグ・台帳への入口・runの比較の軸・送る口・コマンドの形と分類）
 status: draft
 created: 2026-10-04
 scope: runtime
@@ -22,6 +22,7 @@ related:
   - design-supervisor-lifecycle-commands
   - design-main-history
   - design-supervisor-lifecycle-host-metrics
+  - design-measurement-ledger
   - design-measurement-commands
   - design-measurement-environment
   - design-measurement-otel
@@ -121,54 +122,23 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 ## 台帳の形
 
-台帳は対象（run・task・session・queue・node）ごとに1行（ADR-t1662-1決定10）。
-区切りの値は列、フローで形が変わるものはJSON。
-行の項目と種類ごとの中身は`LedgerRow`と`domain::ledger`の各moduleのdoc comment、作り直しの規則は`ledger::rebuilds`が持つ。
-
-- eventはどれか1つの行の記録になるが、写さないkindのうちqueue行に属し被覆の始まりより後のeventは、省略が有効な間はどの行の記録にもならず窓の端だけに効き、共通の読み取り関数が補う（[ADR-t4644-1](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)）。
-  run・task・sessionに属する同じkindのeventは今どおりその行の記録で、行の持ち主の入口は`domain::ledger::owner`、写さないkindの一覧の入口は`domain::ledger::queue`。
+台帳は対象ごとに1行を持ち、記録の所属と省略の約束は[台帳の形](measurement-ledger.md#台帳の形)が持つ。
 
 ## 畳む関数
 
-区間の列を作る関数は1つで（ADR-t1662-1決定2）、台帳を作る係と、走っているrunを見る読み手（`status`・`timeline`・`forecast`）が共有する（`domain::ledger::fold`）。
-読み手は`run_phase_changed`の名前とタグを出し、記録の無いrunは`legacy`にする（各moduleのdoc comment）。
-入力はEventStoreのeventと、それから作るclaimの前の区間の行・今の時刻だけで、同じ入力からは同じ出力を返す。
-
-- runとtaskの畳み方は`domain::ledger::fold`、runのstepの内側の層は`domain::ledger::steps`のdoc commentが持つ。
-- claimの後の事実は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
+台帳を作る係と走っているrunの読み手は、同じ入力から同じ区間を返す[畳む関数](measurement-ledger.md#畳む関数)を共有する。
 
 ## 台帳を作る係
 
-何を書くかは`domain::ledger::builder`のdocが持つ（[ADR-t4652-1](../adr/2026-11-09-t4652-1-ledger-writes-bounded-by-pass-time-and-r-split-by-kind.md)）。
-
-- 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
-- runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
-- storeの印は、その位置までの全入力が行の記録か写さないqueueのeventの被覆で記録済みである約束で、Wはsession行、Rはqueueの行とrun・task・session・nodeの行で分かれたカーソルごとの位置で、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない。
-- 写さないeventでもRを進め、R・Wと共に被覆の始まりC・到達点Sと(C, S]の要約を保つ。
-  S・要約を下げず、停止中は据え置いて行に写す（[停止の決定](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)）。
-  要約は最初から別に上限つきに作り直し、読みには使わない。
-  更新後のSに全kindが届けば公開し、そのときだけCを最初のeventの前まで下げる。
-- 入力を記録済みなら確定待ちと版の更新はRを押さえず、追いつきの印と確認の順番を起動をまたいで保つ。
-- 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（起動時のpushの要約と写さないqueueのeventの要約の作り直しは除く。`builder`のdoc）。
-- 古い版の作り直しは`builder`のdocが持つ。
-  行の持ち主を変える版上げは直らない。
-- 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。
-- 読みを早めに止めて書く時間を残し、遅れの間はpassを続ける。
-- 1要求の行は1つのtransactionで書かれ、印は覆う最後の組と同じ書き込みに載り、巨大な単独行も飛ばされず原子的に書かれる。
+[台帳を作る係](measurement-ledger.md#台帳を作る係)が、runtimeの制御から独立して入力を行へ畳み、記録済みの位置と確定の順序を保つ。
 
 ## 共通の読み取り関数
 
-stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返す1つの関数（`domain::ledger::window`）だけから作る。
-窓の端と、読み手が窓の問いで宣言する窓の中の境界（kpiの期間と比較の区切り・event idのcursorの時刻・statsの頁の始まり）の補いは(C, S]の写さないqueueのeventを越えず、ほかの値の取り方を変えず、読む量は境界ごとに端の近くに限る（入口は`domain::ledger::window`と`window::bounds`）。
-統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない。
-窓の当て方・絞り込み・旧方式と走っているrunの扱い・欄ごとの元の行は`domain::ledger::window`、今の名前の意味の違いは`ledger::read`のdoc commentが持つ。
-
-- kpiの工程の名前と、hostの設定の目標の読み替えは`domain::kpi::window`のmodule docが持つ（ADR-t1662-1）。
-- 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳とunattributedを出し、`change`と`area`で層に分ける。
+stats・kpi・reportは[共通の読み取り関数](measurement-ledger.md#共通の読み取り関数)が返す台帳の値だけから統計を作る。
 
 ### 欠測と集約の契約
 
-値の無い窓と入力ごとの集約の約束は[欠測と集約の契約](measurement-missing.md)が持つ。
+値の無い窓と入力ごとの集約の約束への入口は、台帳の[欠測と集約の契約](measurement-ledger.md#欠測と集約の契約)が持つ。
 
 ## 並走の比較と照合
 
