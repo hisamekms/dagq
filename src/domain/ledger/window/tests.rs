@@ -1491,6 +1491,70 @@ fn a_chosen_windows_tokens_keep_when_the_records_start() {
     }
 }
 
+#[test]
+fn stats_since_keeps_the_draft_opening_and_switch_before_the_cursor() {
+    use crate::domain::stats::{LiveSnapshot, SlotSnapshot, StatsQuery, stats_answering};
+
+    let mut log = Log::default();
+    let draft = (Some(7), None, false);
+    log.push(
+        0,
+        draft,
+        event_kind::TASK_CREATED,
+        json!({"status": "draft", "title": "draft"}),
+    );
+    log.push(
+        1,
+        draft,
+        event_kind::DRAFT_PLANNER_OPENED,
+        json!({"planner_id": 1}),
+    );
+    let switched = log.queue(
+        2,
+        EventKind::PlannerSwitchCompleted.as_str(),
+        json!({"source": 1, "planner_id": 2}),
+    );
+    log.queue(
+        3,
+        event_kind::TURN_STARTED,
+        json!({"planner_id": 2, "turn": 1}),
+    );
+    log.push(
+        4,
+        draft,
+        event_kind::DRAFT_PLANNER_SETTLED,
+        json!({"planner_id": 2, "outcome": "submitted"}),
+    );
+
+    let now_ms = T0 + 5 * MIN;
+    let since = Some(Cursor::Event(switched));
+    let window = select(
+        build(&log.events, now_ms, BUILT),
+        &WindowQuery {
+            since,
+            now_ms,
+            ..WindowQuery::default()
+        },
+    );
+    assert!(window.events().iter().any(|event| event.id == switched));
+    let stats = stats_answering(
+        window.answers(),
+        window.events(),
+        &HashMap::new(),
+        now_ms / 1000,
+        SlotSnapshot::default(),
+        &StatsQuery {
+            since,
+            ..StatsQuery::default()
+        },
+        &LiveSnapshot::default(),
+    );
+    let health = &stats.planner_routes["headless"];
+    assert!(health.opened.is_empty());
+    let time = &health.draft_settle.summary;
+    assert_eq!((time.count, time.total), (1, 180));
+}
+
 /// `stats` of the events a window of the ledger gives back is `stats` of
 /// every event, as it was read before the ledger: for the sessions and
 /// jobs of no run, the queue's intervals and events (the fields of no run

@@ -33,8 +33,9 @@ pub struct PlannerRouteHealth {
     /// Seconds from each `plan_revise_sent` to the proposal's next
     /// `plan_review_started`, counted when that start is in the window.
     pub revise_to_review: TimeSummary,
-    /// Seconds from a draft planner's opening to each of its drafts'
-    /// `draft_planner_settled`, counted when that is in the window.
+    /// Seconds from each draft's original planner opening to its
+    /// `draft_planner_settled`, counted under the settling planner's route
+    /// when the settlement is in the window, including after a provider switch.
     pub draft_settle: TimeSummary,
     /// Seconds from a finding planner's opening to the finding's next
     /// status change, counted when that is in the window.
@@ -79,6 +80,7 @@ pub fn planner_routes(
     // request's planner.
     let mut revises: HashMap<i64, (i64, Option<i64>)> = HashMap::new();
     let mut drafts: HashMap<(i64, Option<TaskId>), i64> = HashMap::new();
+    let mut draft_sources: HashMap<i64, i64> = HashMap::new();
     let mut findings: HashMap<i64, (i64, Option<i64>)> = HashMap::new();
     let mut requests: HashMap<i64, (i64, Option<i64>)> = HashMap::new();
     let mut opened_drafts: Vec<i64> = Vec::new();
@@ -135,8 +137,19 @@ pub fn planner_routes(
                     }
                 }
             }
+            Some(EventKind::PlannerSwitchCompleted) => {
+                if let (Some(source), Some(recipient)) = (payload["source"].as_i64(), planner) {
+                    // A handoff can retry with another recipient of the same source.
+                    // Keep one opening per draft, shared by those recipients.
+                    let original = draft_sources.get(&source).copied().unwrap_or(source);
+                    draft_sources.insert(recipient, original);
+                }
+            }
             Some(EventKind::DraftPlannerSettled) => {
-                let from = planner.and_then(|planner| drafts.remove(&(planner, event.task_id)));
+                let from = planner.and_then(|planner| {
+                    let original = draft_sources.get(&planner).copied().unwrap_or(planner);
+                    drafts.remove(&(original, event.task_id))
+                });
                 if let Some(from) = from {
                     took("draft_settle", planner, from);
                 }
@@ -468,6 +481,121 @@ mod tests {
         );
         assert_eq!(goal[HEADLESS_ROUTE].turns, 0);
         assert_eq!(goal[HEADLESS_ROUTE].revise_to_review.summary.count, 1);
+    }
+
+    #[test]
+    fn a_switched_draft_settles_from_the_original_opening_under_the_recipients_route() {
+        let mut events = vec![
+            event(
+                1,
+                Some(20),
+                DRAFT_PLANNER_OPENED,
+                json!({"planner_id": 1}),
+                10,
+            ),
+            event(
+                2,
+                None,
+                SESSION_OPENED,
+                json!({"kind": "runtime_planner", "planner_id": 1}),
+                10,
+            ),
+            event(
+                3,
+                None,
+                EventKind::PlannerSwitchReserved.as_str(),
+                json!({"source": 1, "planner_id": 2}),
+                20,
+            ),
+        ];
+        let reserved = planner_routes(&events, EventId::new(0), EventId::new(3), |_| true, None);
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(reserved[INTERACTIVE].opened["draft"], 1);
+        assert_eq!(reserved[INTERACTIVE].draft_settle.summary.count, 0);
+
+        events.extend([
+            event(
+                4,
+                None,
+                EventKind::PlannerSwitchCompleted.as_str(),
+                json!({"source": 1, "planner_id": 2}),
+                25,
+            ),
+            event(
+                5,
+                None,
+                TURN_STARTED,
+                json!({"planner_id": 2, "turn": 1}),
+                30,
+            ),
+            event(
+                6,
+                Some(20),
+                DRAFT_PLANNER_SETTLED,
+                json!({"planner_id": 2}),
+                50,
+            ),
+        ]);
+        let settled = planner_routes(&events, EventId::new(0), EventId::new(6), |_| true, None);
+        assert_eq!(settled[INTERACTIVE].opened["draft"], 1);
+        assert_eq!(settled[INTERACTIVE].draft_settle.summary.count, 0);
+        assert!(settled[HEADLESS_ROUTE].opened.is_empty());
+        let time = &settled[HEADLESS_ROUTE].draft_settle.summary;
+        assert_eq!((time.count, time.total), (1, 40));
+    }
+
+    #[test]
+    fn both_drafts_of_a_bundle_keep_their_openings_when_the_handoff_retries() {
+        let events = [
+            event(
+                1,
+                Some(20),
+                DRAFT_PLANNER_OPENED,
+                json!({"planner_id": 1}),
+                10,
+            ),
+            event(
+                2,
+                Some(21),
+                DRAFT_PLANNER_OPENED,
+                json!({"planner_id": 1}),
+                10,
+            ),
+            event(
+                3,
+                None,
+                EventKind::PlannerSwitchCompleted.as_str(),
+                json!({"source": 1, "planner_id": 2}),
+                20,
+            ),
+            event(
+                4,
+                None,
+                EventKind::PlannerSwitchCompleted.as_str(),
+                json!({"source": 1, "planner_id": 3}),
+                30,
+            ),
+            event(
+                5,
+                Some(20),
+                DRAFT_PLANNER_SETTLED,
+                json!({"planner_id": 3}),
+                40,
+            ),
+            event(
+                6,
+                Some(21),
+                DRAFT_PLANNER_SETTLED,
+                json!({"planner_id": 3}),
+                60,
+            ),
+        ];
+        let routes = planner_routes(&events, EventId::new(0), EventId::new(6), |_| true, None);
+        let health = &routes[UNKNOWN];
+        assert_eq!(health.opened["draft"], 1);
+        assert_eq!(health.draft_settle.summary.count, 2);
+        assert_eq!(health.draft_settle.summary.total, 80);
+        assert_eq!(health.draft_settle.max, Some(50));
     }
 
     #[test]
