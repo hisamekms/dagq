@@ -14,6 +14,7 @@ What each part of the output holds: `"$DAGQ" status --help`. What to do with it:
 - A run's phase: when it shows none, do not guess one. A person is needed only where a run waits for an answer or an attention names it. A run's session is read with `run log` (below).
 - A held task needs nothing until its attention comes; what a hold does and `release`: `dagq-recover`'s `reference/hold.md`.
 - The asks are cut short; read them whole with `asks --open --role inbox`.
+- In `requests`, `waiting_for: no_provider` means no provider can start a runtime planner for the request. `provider_reasons` gives the unavailable providers and their reasons. A request without an active planner that has an unanswered `planner_question` still shows `waiting_for: answer`.
 - A red CI needs nothing from the inbox: a runtime planner registers the fix. The failing tests: `"$DAGQ" ci failures`.
 - Write for people in the language it names (the `dagq` skill's section 5).
 - Act on each attention by the next step it names (below); `--role inbox` keeps all of it.
@@ -43,6 +44,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
 - Planning:
   - `plan review by hand`: the headless plan review failed and holds the proposal (the `dagq-recover` skill, section 8).
   - `check the planner`: a planner did not submit a revise in time, or a turn of a runtime planner hit its time limit; the person looks at it (`"$DAGQ" planner log ID`; section 8).
+  - `check planner providers` (`planner_start_blocked`). The attention shows the unavailable providers and their reasons, the requests waiting for a planner, and the proposals waiting for a planner to take their revise. Tell the person what is waiting and why. Leave `dagq.toml` as it is. The person restores a provider using the [provider checks](../../dagq/reference/provider.md#when-a-provider-cannot-be-used). On the next supervisor pass with a usable provider, the attention clears and the runtime resumes starting planners for those requests and revises as slots allow.
   - `goal review by hand`: a goal's review could not reach a verdict. On the person's word, `goal review ID` reruns it, or the person closes the goal or asks for tasks through a planning request (section 8). On the kind `replacement_unresolved`, a replaced task's record of what replaced it is broken and the goal cannot close as `achieved`; added work does not start its review; the person closes it `abandoned` (section 8).
   - `request a plan for the draft`: no planner adopted, dropped or asked about a draft. Tell the person; on their word, record a planning request naming it (`request add --text '<their words>' --ref task:N`), or give it a revisit time (`"$DAGQ" revisit N --at <RFC 3339 time>`, `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/register.md`, "A draft's revisit time"), or the person decides it in their own terminal.
   - A draft a planner kept has no attention and waits for a request or its revisit time; on the person's word, set, change or clear that time (`revisit --help`).
