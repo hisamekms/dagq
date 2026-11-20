@@ -84,8 +84,9 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
     それ以外でidleになれば終了の依頼を受けてwrapperがsessionを終え、行は閉じられ、まだ動いているbackgroundのwrapperは止められる（`end_runtime_planners`）。
     idleはwrapperがturnの終わりに書くidle markerで判じ、時間は`--planner-timeout`でなくturnの`[stall]`の上限で見る。
     wrapperがturnを`[stall]`の上限で止めたときは、plannerごとに1回`planner_unresponsive`がinboxに届き、止めたturnでsessionが終わるので、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。
-    最後のturnがproviderの壁で終わったplannerは、そのproviderを待って終了の依頼を受けず、決めずに終わったplannerにも数えない（`provider_wall`）。
-    どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。
+    最初のturnがproviderの壁で終わり、再開できるsessionも実行済みのplanner操作も無いplannerは、[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「使えないとき」の条件を満たせば、同じ仕事をもう一方のproviderへ移して閉じる。
+    開始済みのplannerや切り替えの条件に当たらないplannerは、自分のproviderの控えが解けるまで待ち、その間は終了の依頼を受けない（`provider_wall`）。
+    控えを待つplannerも、仕事を移して閉じた元のplannerも、決めずに終わったplannerには数えない。
     未回答の`planner_question`のほかに待つものが無いidleのplannerは、人の答えだけを待つとして終了の依頼を受け、行は`runtime_answer_wait`で閉じ、askは開いたまま残る（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1。[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「人の答えだけを待つplannerの終わり」）。
     findingは2のとおりそのaskが閉じるまで対象にならず、answerで9の新しいplannerが続ける。
 11. **改善の上限**（ADR-0051の決定25）: 動いている改善（`SqliteQueue::improvements`）は、改善のfinding（`finding::counts_as_improvement`）が指す別々のproposalで持ち主がruntimeのplannerのもののうち`finding::improvement_running`のもの（`canceled`でなく、7のtaskの和に終わっていないものがある。和が空なら数えない）と、閉じていないruntimeのplannerのうち改善のfindingが`open`のもの（submitすればfindingが`proposed`になり、そのproposalの方を数える）の合計。
