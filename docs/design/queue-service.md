@@ -34,8 +34,10 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側・APIと認可・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止・tokenの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
 serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
-**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
-session wrapperとhookはwrapperのprincipalでserviceを通り（plannerとinboxのhookは例外、[クライアントモード](#クライアントモード)）、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
+**worker（resumeも）・headlessのjob・observer・Codexのruntimeのplannerのdagqは[クライアントモード](#クライアントモード)で動き、DBのpathを受け取らない。**
+Codexのplannerは自身のtokenとserviceのsocketを使う。
+人・hostのinbox・Claudeのplannerは[hostのCLI](queue-service-host-cli.md)を使う。
+wrapperとhookはwrapperのprincipalでserviceを通る（plannerとinboxのhookは例外、[クライアントモード](#クライアントモード)）。
 supervisorとそれが起動する`observe`・`throughput-review`もserviceを通る（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
@@ -154,7 +156,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取りと、findingの書き込みとそのask |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | 読み取りだけ |
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
-| runtimeが立てるplanner | `RECORD_READING` | 読み取り（[hostのCLI](queue-service-host-cli.md)） |
+| runtimeが立てるplanner | `RECORD_READING` | 読み取り |
 | worker | runtimeのprompt（`WORKER_READING`） | `ask`（書き込み）。`list`・`show`は作業の初めに打たないよう言う（権限の範囲ではない。ADR-t1233-5決定3） |
 | worker（`measure`のtask） | [taskの登録](../development/task-registration.md)の「change」の`measure`、measureのtaskのdescription | 読み取りだけ |
 | worker・job | dagq skillの`SKILL.md`と`reference/` | 読み取りだけ |

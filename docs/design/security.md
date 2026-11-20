@@ -117,14 +117,12 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
   拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、拒否のerrorを返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
 - queue serviceは、[ユースケース](queue-service.md#ユースケース)と読み取りを、principalのactorで`StaticPolicy`に通す（`DAGQ_ROLE`は使わない）。
-  principalはtokenから、tokenもroleも無い要求ではhostのsocketのpeerの資格からuserとして決める（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定1）。
+  principalは[tokenかsocketのpeer](queue-service-host-cli.md#principal)で決める（ADR-t3102-1決定1）。
   拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
   同じ拒否の事実を監査にも送り、記録が書けなくても拒否のerrorは変えず、書けなかった件数を数える。
-  Codexのplannerは[クライアントモード](queue-service.md#クライアントモード)を使う。
-  sandboxではcheckoutは読み取り専用で、DBと他の資格は読めず、接続はserviceのsocketだけに限る。
-  通常のCLIはtokenでplannerとして認可される。
-  同じsocketのtokenもroleも無い要求は[ownerのpeer](queue-service-host-cli.md#principal)ならuserになる。
-  hostのCLIは助言的なまま（ADR-t3102-1決定5）。
+  hostのworker・headlessのjob・ClaudeのplannerはCLIの経路を絞っても同じユーザーならDBとtokenを読める。
+  Codexのplannerは読み取り専用sandbox（隔離に当たらない`confined`）でcheckout・自身の材料・CLIに要るものを読み、DBと他の資格を読めず、serviceのsocketにだけ接続できる。
+  Codexのplannerも同じsocketにtokenもroleも渡さなければownerのpeerとしてuserになれるため、hostの認可は助言的なまま（ADR-t3102-1決定5）。
 - serviceへ送らない状態を変えないコマンド（制御側の診断・fileを書く読み取りと、supervisorなどのもの）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
   拒否は同じerrorを返し、serviceが拒まれたprincipalの`authorization_denied`に記録する（[例外](queue-service-host-cli.md#principal)あり）。
   通った読み取りはqueueに書かない
@@ -162,6 +160,7 @@ Codexの非対話のworkerはworkspace-writeのsandbox（macOSはseatbelt）で�
 sandbox内でのプロセスの読み取りとOSの制約は`infrastructure::process_read`のmodule docを入口にする。
 ADR-t728-1決定6の強制の最初のものだが、隔離ではない: 同じユーザーとして動き、読むことは広く（他のrunのworktreeや人の設定も）でき、networkは開いている。
 そこでenforcementはこれを`advisory`とも隔離の`sandbox`とも別の`confined`とする（決定7）。
+Codexのplannerのsandboxは[判定の場所](#判定の場所)を参照する。
 
 ## reviewのpassとIntegrator
 

@@ -128,9 +128,10 @@ statusの猶予は居ない時間を数えすぎないためのもので、目�
 
 ### sessionの区間hook（ADR-0048）
 
-runtimeがheadlessで起動しないinbox・plannerのClaude sessionの区間は、pluginのhookが記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定6）。
+Claudeのinboxの区間は、pluginのhookが記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定6）。
 区間の書き方・推定の終了・同時sessionの制約は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)、集計は[stats](supervisor-lifecycle/commands.md)。
-runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4）ので、そのturnの`claude -p`がこのhookを走らせても、hookはqueueに書かず報告をwrapperに渡し、hookの開いている区間にheadlessの区間を含めない。
+Claudeのruntimeのplannerのturnがこのhookを走らせても、hookはqueueに書かず報告をwrapperに渡し、hookの開いている区間に非対話のturnの区間を含めない。
+ClaudeとCodexのruntimeのplannerの区間は[plan-planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)の「区間」に従う。
 
 hookの配線は`hooks/hooks.json`、渡す条件と失敗時の扱いは`hooks/session-event.sh`の冒頭のコメントを読む。
 区間のkindと開閉の判断は`domain::sessions::hook_kind`と`hook_changes`、取り込みは`infrastructure::sessions::record_hook`が入口。
@@ -176,10 +177,12 @@ Anthropicのdirectoryと公式marketplaceには出さない。
 ### installしたpluginの確認
 
 [ADR-t617-2](../adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)の決定4。
-`--plugin-dir`を付けない`dagq up`と`dagq inbox`は、inboxとruntimeのplannerが読むinstall済みの`claude-dagq`を、何かを開く前に確かめる（[`up` / `down`](supervisor-lifecycle/up-down.md)のpreflight）。
+Claudeの事前検査では、`--plugin-dir`を付けない`dagq up`と`dagq inbox`が、Claudeで動くinboxやplannerが読むinstall済みの`claude-dagq`を、何かを開く前に確かめる（[`up` / `down`](supervisor-lifecycle/up-down.md)のpreflight）。
 runtimeが打つupは確かめない。
 判定と文言、確かめない経路は`lifecycle::require_installed_plugin`と`UpEnvironment::restart`、引き継ぎの環境変数の互換は`UP_RESTART_ENV`のdoc commentを読む。
 project scopeを数えるcwdと出力の共有は`adapters::ClaudeCode::installed_plugin`、一覧の判定は`adapters::plugin_state`が入口。
+
+Codexのruntimeのplannerの指示元はbinaryに梱包したskillと参照文書である（[`Codex::planner_turn_command`](../../src/infrastructure/codex.rs)）。
 
 ### 読み込みと検証
 

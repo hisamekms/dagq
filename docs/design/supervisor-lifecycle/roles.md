@@ -29,7 +29,8 @@ related:
   proposalごとのオンデマンドのbackgroundのwrapperで、workspaceを持たず、常駐しない（[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定1・6）。
   runtimeが立てる（差し戻し先のplannerが閉じていたproposal・draft・finding・inboxからの計画の依頼。複数同時に開ける）。
   人が開く`dagq plan`は廃止し、案内を付けて拒む（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）。
-  session wrapper `planner-session`がbackgroundのprocessとして動き、turnごとにClaudeを非対話で起動する（最初のturnはそのplannerの初期prompt付き。経路は非対話だけ。ADR-t1433-2決定3。[`plan` / `planners`](plan-planners.md#plan--planners)）。
+  session wrapper `planner-session`がbackgroundのprocessとして動き、`[roles.runtime_planner]`に従って選んだprovider（ClaudeかCodex）をturnごとに非対話で起動する。
+  最初のturnにはそのplannerの初期promptを渡し、起動時のproviderの選び方は[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)が持つ。
   画面を見る人は居ない。
   依頼・draft・findingは自分で決め、決めきれないものだけ`planner_question`でinboxに上げる。
   `up` / `down` / `install`は打たない（CLIは許すが、inboxか人の`DAGQ_ROLE`の無いterminalが打つ）。
