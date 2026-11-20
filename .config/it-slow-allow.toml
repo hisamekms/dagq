@@ -596,18 +596,6 @@ name = "recovery_codex::a_live_codex_recovery_job_that_cannot_log_in_moves_to_cl
 reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session's Codex job fails at its login, Codex is held without an ask, and the alert's next job runs on Claude, whose resume parks the run, which is resumed and lands (the route is a unit test in application::supervise::recovery)"
 task = 1225
 
-# 4.4s to 5.4s in task 1225's stress (5 rounds, host load average 25), added by task 1225
-[[test]]
-name = "recovery_codex::a_timed_out_codex_recovery_job_is_stopped_with_its_command"
-reason = "B 境界（守る境界）: process: a recovery job past its time limit is stopped by pid with the command its stub codex exec ran in a process group of its own, and the round fails in SQLite (the 2s limit itself is most of the time)"
-task = 1225
-
-# 4.5s to 7.2s in task 1225's stress (5 rounds, host load average 25), added by task 1225
-[[test]]
-name = "recovery_codex::a_codex_repair_of_low_confidence_for_a_stalled_run_is_asked"
-reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session is nudged, its recovery job runs as the stub codex exec, and the low-confidence verdict opens the stalled ask, whose stop ends the run (the verdict checks are unit tests in application::supervise::recovery)"
-task = 1225
-
 # 3.9s to 6.5s in task 1225's stress (5 rounds, host load average 25), added by task 1225
 [[test]]
 name = "recovery_codex::a_failed_codex_recovery_job_of_a_stalled_run_asks_a_person"
@@ -1289,12 +1277,6 @@ task = 1881
 [[test]]
 name = "runtime_task_hold_park::a_receipt_a_resumed_turn_rewrote_at_the_hold_is_validated_and_starts_no_review"
 reason = "B 境界（resume の wrapper・validation・supervisor の二度の起動）: 一度 hold で待った run を release で resume し、その resume の turn の途中の hold で、turn が書き直した receipt が resume の判定と validation を通り、review を始めずに再び待ちへ入ることを、実際の wrapper と Git で確かめる。柵の判断は domain::task_replan の unit test"
-task = 1881
-
-# 2.6s to 6.7s (stress 5 under the host's load of other runs, task 1881)
-[[test]]
-name = "runtime_landing_release::a_held_task_whose_landing_ends_settles_at_its_end_and_is_not_leased_to_review"
-reason = "B 境界（SQLite の transaction・CLI）: 着地の途中の hold が、死んだ着地の recover の transaction の中で待ちに入り held の工程を記録し、hold の間は review と e2e の lease を拒むことを、実際の supervisor の着地と recover で確かめる。待ちの判断は domain::task_hold と domain::run_phase の unit test"
 task = 1881
 
 # 12.7s to 14.2s (stress 60s under the host's load of other runs, task 1881)

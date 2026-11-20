@@ -19,12 +19,6 @@ name = "host_control::an_observation_and_a_throughput_review_record_as_their_cal
 reason = "B 境界（守る境界）: 人と inbox が打つ observe と throughput-review が stub の agent の process を起動し、始めと終わりの event と telemetry の token の発行と失効を service の step で呼び出し元として SQLite に残すことを確かめる"
 task = 3386
 
-# 6.2s in a stress: a supervise to a run awaiting integration, a live lease on it, then a refused landing on the DB and one through the service
-[[test]]
-name = "host_control::a_held_run_is_approved_by_no_integrate_and_records_no_approval"
-reason = "B 境界（守る境界）: 生きた lease が持つ run の着地の承認を、DB の経路と service の approve_integration の step がどちらも記録の write transaction の中で断り、integration_approved を残さないことを、実の SQLite の queue で確かめる（承認の判断は application::integrate の unit test）"
-task = 3386
-
 # 7.7s alone: a supervise to a run awaiting integration, the steps of a landing through the service under a dead command's pid, then a supervise that releases and lands it
 [[test]]
 name = "host_control::a_landing_whose_command_died_is_released_by_the_next_pass"
@@ -41,10 +35,4 @@ task = 3386
 [[test]]
 name = "host_control::the_inbox_sets_up_the_review_in_client_mode_as_the_user_does"
 reason = "B 境界（守る境界）: 人の host の dagq と inbox の client mode の dagq が service を通して setup-review の job の process を起動し、生成した設定を DB を開くコマンドと同じに見せ、どれも queue を変えないことを実の SQLite と子 process で確かめる"
-task = 3386
-
-# 7.1s (median of five): a supervise to a run awaiting integration, then a landing's steps of another task refused and its own task's begun, deferred by its integrator and ended through the service
-[[test]]
-name = "host_control::a_landing_of_another_tasks_run_is_neither_begun_nor_ended"
-reason = "B 境界（守る境界）: 人の integrate の承認・着地の開始・終了の step を、別の task を名指すコマンドから service が断り、run の状態・lease・event・integrator の token の file が変わらないことを、実の service の process と SQLite の queue で確かめる（task の照合の判断は application::supervisor_service::control の of_named_task）"
 task = 3386

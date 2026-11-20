@@ -36,6 +36,12 @@ pub const TURN_ENV: [&str; 2] = [
 /// else in the process.
 pub const TEST_REPLACEMENT_WAIT_MS: u64 = 500;
 
+/// The lock-free bulk-write pause inherited by this binary's children
+/// and used by its in-process stores: short because their large payloads
+/// check the socket boundary, not SQLite's busy-wait scheduling. Set as
+/// the `it` binary loads, beside [`TEST_REPLACEMENT_WAIT_MS`].
+pub const TEST_BATCH_PAUSE_MS: u64 = 1;
+
 pub trait WithoutActor {
     /// Drops the [`ACTOR_ENV`] and [`TURN_ENV`] the command would inherit
     /// from the test process. A variable the command sets itself (the worker env of a stub

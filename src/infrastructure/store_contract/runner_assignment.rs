@@ -61,6 +61,7 @@ fn fixture<S: ContractStore>(store: S, name: &str) -> Result<StoreQueue<S>> {
         replacement: None,
         denial_log: None,
         audit_use_case: None,
+        batch_pause: None,
     })
 }
 fn pull<S: ContractStore>(queue: &StoreQueue<S>, token: &str, now: i64) -> Result<Assignment> {

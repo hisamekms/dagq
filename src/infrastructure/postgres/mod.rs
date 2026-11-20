@@ -76,6 +76,7 @@ impl<S: PostgresSession> PostgresQueue<S> {
             replacement: None,
             denial_log: None,
             audit_use_case: None,
+            batch_pause: None,
         })
     }
 

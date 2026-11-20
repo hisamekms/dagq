@@ -304,10 +304,48 @@ pub const ROWS_PER_TRANSACTION: usize = 200;
 /// batch takes it again.
 pub const PAUSE_BETWEEN_TRANSACTIONS: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// `DAGQ_BATCH_PAUSE_MS` shortens the lock-free pause between bulk-write
+/// transactions: whole milliseconds, capped at the production default of
+/// 120 ms ([`PAUSE_BETWEEN_TRANSACTIONS`]). Only test fixtures set it;
+/// absent or invalid values retain that default. Zero skips the pause.
+/// An in-process caller can supply its own value on its connection with
+/// [`super::store_queue::StoreQueue::with_batch_pause_env`].
+pub const BATCH_PAUSE_ENV: &str = "DAGQ_BATCH_PAUSE_MS";
+
+/// The bulk-write pause selected by an optional environment value,
+/// without reading or changing the process environment.
+fn batch_pause_from(value: Option<&str>) -> std::time::Duration {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(PAUSE_BETWEEN_TRANSACTIONS, |millis| {
+            std::time::Duration::from_millis(millis).min(PAUSE_BETWEEN_TRANSACTIONS)
+        })
+}
+
+fn batch_pause() -> std::time::Duration {
+    static PAUSE: std::sync::LazyLock<std::time::Duration> = std::sync::LazyLock::new(|| {
+        batch_pause_from(std::env::var(BATCH_PAUSE_ENV).ok().as_deref())
+    });
+    *PAUSE
+}
+
+impl<E: super::sql_exec::TransactionEntries> super::store_queue::StoreQueue<E> {
+    /// Use this connection's supplied [`BATCH_PAUSE_ENV`] value, instead
+    /// of the process's. `None` selects the production default; a value
+    /// is parsed and capped by the same rule as the process's variable.
+    /// An in-process test of the actual lock-free wait uses this to keep
+    /// the production pause without changing the environment of other
+    /// tests, connections or threads.
+    pub fn with_batch_pause_env(mut self, value: Option<&str>) -> Self {
+        self.batch_pause = Some(batch_pause_from(value));
+        self
+    }
+}
+
 /// Run `write` on each batch of at most [`ROWS_PER_TRANSACTION`] of
 /// `items` in its own immediate transaction named `name`
 /// ([`super::sql_exec::TransactionEntries::write_entry`]), committed before the next starts,
-/// [`PAUSE_BETWEEN_TRANSACTIONS`] apart; `items` empty runs it once on no
+/// the connection's explicit pause or [`batch_pause`] apart; `items` empty runs it once on no
 /// items. `write` is told whether its batch is the last. A failure stops
 /// at its batch: the batches before it stay committed.
 fn in_batches<'q, T, E: super::sql_exec::TransactionEntries>(
@@ -320,7 +358,7 @@ fn in_batches<'q, T, E: super::sql_exec::TransactionEntries>(
     let batches = items.len().div_ceil(ROWS_PER_TRANSACTION).max(1);
     for index in 0..batches {
         if index > 0 {
-            std::thread::sleep(PAUSE_BETWEEN_TRANSACTIONS);
+            std::thread::sleep(queue.batch_pause.unwrap_or_else(batch_pause));
         }
         let start = (index * ROWS_PER_TRANSACTION).min(items.len());
         let end = (start + ROWS_PER_TRANSACTION).min(items.len());
@@ -759,6 +797,36 @@ fn process_row(r: &SqlRow<'_>) -> SqlResult<RunProcess> {
 mod tests {
     use super::*;
     use crate::domain::{LeaseToken, RunId, RunLease};
+
+    #[test]
+    fn an_unset_bulk_write_pause_keeps_the_production_default() {
+        assert_eq!(
+            batch_pause_from(None),
+            std::time::Duration::from_millis(120)
+        );
+    }
+
+    #[test]
+    fn a_bulk_write_pause_uses_its_milliseconds_up_to_the_default() {
+        for (value, millis) in [("1", 1), (" 7 ", 7), ("0", 0), ("120", 120), ("121", 120)] {
+            assert_eq!(
+                batch_pause_from(Some(value)),
+                std::time::Duration::from_millis(millis),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_bulk_write_pause_keeps_the_production_default() {
+        for value in ["", "soon", "-1", "1.5", "18446744073709551616"] {
+            assert_eq!(
+                batch_pause_from(Some(value)),
+                std::time::Duration::from_millis(120),
+                "{value}"
+            );
+        }
+    }
 
     fn lease(pid: u32, heartbeat_at: i64) -> RunLease {
         RunLease {

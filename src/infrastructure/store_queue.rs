@@ -50,6 +50,9 @@ pub struct StoreQueue<E: TransactionEntries> {
     pub(super) denial_log: Option<DenialRecorder>,
     /// The trusted dispatcher's concrete use case for authorization records.
     pub(super) audit_use_case: Option<crate::domain::queue_service::UseCase>,
+    /// A connection's explicit bulk-write pause; none uses the process's
+    /// environment. See `with_batch_pause_env`.
+    pub(super) batch_pause: Option<std::time::Duration>,
 }
 
 /// What records a refusal of the policy, given its event's payload.

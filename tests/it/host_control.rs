@@ -87,15 +87,20 @@ fn claimed_awaiting() -> (Fixture, PathBuf, PathBuf, TaskRun) {
 /// The host's `dagq --db <db> args` of the user, in `cwd`: no service is
 /// started for it.
 fn as_user(db: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_dagq"))
+    user_command(db, cwd, args).bounded_output().unwrap()
+}
+
+/// The same host command before it is run, for a per-call wait override.
+fn user_command(db: &Path, cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
         .without_actor_env()
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"))
         .arg("--db")
         .arg(db)
-        .args(args)
-        .bounded_output()
-        .unwrap()
+        .args(args);
+    command
 }
 
 /// The session of this test's process, as `dagq inbox` binds its token.
@@ -117,18 +122,31 @@ fn in_client_mode(
     role: &str,
     args: &[&str],
 ) -> Output {
+    client_command(db, cwd, principal, role, args)
+        .bounded_output()
+        .unwrap()
+}
+
+/// The same credentialed command before it is run, for a per-call wait override.
+fn client_command(
+    db: &Path,
+    cwd: &Path,
+    principal: &Principal,
+    role: &str,
+    args: &[&str],
+) -> Command {
     let dir = db.parent().unwrap();
     let credential = service::issue(dir, principal, 1).unwrap().file;
-    Command::new(env!("CARGO_BIN_EXE_dagq"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
         .without_actor_env()
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env(SOCKET_ENV, service::socket_path(dir))
         .env(CREDENTIAL_FILE_ENV, credential)
         .env("DAGQ_ROLE", role)
-        .args(args)
-        .bounded_output()
-        .unwrap()
+        .args(args);
+    command
 }
 
 /// What a command that must have succeeded printed.
@@ -459,6 +477,17 @@ fn each_command_is_refused_a_worker_and_the_refusal_is_recorded() {
 /// no DB: the queue's files are as they were.
 #[test]
 fn with_no_service_each_command_says_so_and_opens_no_queue() {
+    // This boundary has no service to start or replace. Shorten only
+    // these commands' refusal grace; other fixtures keep their startup margin.
+    let absent = |mut command: Command| {
+        command
+            .env(
+                dagq::application::queue_service::REPLACEMENT_WAIT_ENV,
+                "100",
+            )
+            .bounded_output()
+            .unwrap()
+    };
     let queue = common::service::queue();
     let task = queue.run.task_id().to_string();
     let cwd = queue.dir().to_owned();
@@ -489,9 +518,9 @@ fn with_no_service_each_command_says_so_and_opens_no_queue() {
         // The host's `dagq` says how to start the service, a client-mode
         // one where to look from the control side.
         for (output, next) in [
-            (as_user(&queue.db, &cwd, &args), "dagq up"),
+            (absent(user_command(&queue.db, &cwd, &args)), "dagq up"),
             (
-                in_client_mode(&queue.db, &cwd, &inbox, "inbox", &args),
+                absent(client_command(&queue.db, &cwd, &inbox, "inbox", &args)),
                 "dagq service status",
             ),
         ] {

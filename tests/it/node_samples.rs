@@ -274,7 +274,13 @@ fn a_heartbeat_writes_while_the_retention_runs() {
     let heart = heart(&db);
     let job = {
         let db = db.clone();
-        std::thread::spawn(move || SqliteQueue::open(&db).unwrap().remove_node_samples(day))
+        // This call checks the production pause's actual lock handoff.
+        std::thread::spawn(move || {
+            SqliteQueue::open(&db)
+                .unwrap()
+                .with_batch_pause_env(Some("120"))
+                .remove_node_samples(day)
+        })
     };
     let samples = "SELECT count(*) FROM node_samples";
     until_committed(&db, samples, Some(total));
@@ -650,14 +656,12 @@ fn a_heartbeat_writes_while_a_file_is_imported() {
     let heart = heart(&db);
     let job = {
         let (db, file) = (db.clone(), file.clone());
+        // This call checks the production pause's actual lock handoff.
         std::thread::spawn(move || {
-            SqliteQueue::open(&db).unwrap().import_node_samples(
-                HOST_NODE,
-                "metrics-x.csv",
-                NOW / DAY,
-                &file,
-                900,
-            )
+            SqliteQueue::open(&db)
+                .unwrap()
+                .with_batch_pause_env(Some("120"))
+                .import_node_samples(HOST_NODE, "metrics-x.csv", NOW / DAY, &file, 900)
         })
     };
     let samples = "SELECT count(*) FROM node_samples";

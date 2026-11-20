@@ -477,7 +477,13 @@ fn a_heartbeat_writes_while_the_node_rows_retention_runs() {
     let heart = heart(&db);
     let job = {
         let db = db.clone();
-        std::thread::spawn(move || SqliteQueue::open(&db).unwrap().remove_node_rows(2))
+        // This call checks the production pause's actual lock handoff.
+        std::thread::spawn(move || {
+            SqliteQueue::open(&db)
+                .unwrap()
+                .with_batch_pause_env(Some("120"))
+                .remove_node_rows(2)
+        })
     };
     until_committed(&db, node_rows, Some(total));
     let (written, took, seen) = beat(&heart, &format!("SELECT ({node_rows})"));
