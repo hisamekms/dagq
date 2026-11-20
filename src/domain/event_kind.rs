@@ -103,6 +103,36 @@ macro_rules! event_kinds {
     };
 }
 
+/// The records that open, replace or close the queue's planner start wait.
+pub const PLANNER_START_KINDS: [&str; 2] = [
+    EventKind::PlannerStartBlocked.as_str(),
+    EventKind::PlannerStartResumed.as_str(),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlannerProviderReason {
+    pub provider: super::Provider,
+    pub reason: super::provider_switch::SwitchReason,
+}
+
+/// The payload of [`EventKind::PlannerStartBlocked`].
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlannerStartBlocked {
+    pub providers: Vec<PlannerProviderReason>,
+    pub requests: std::collections::BTreeSet<super::RequestId>,
+    pub proposals: std::collections::BTreeSet<super::ProposalId>,
+}
+
+impl PlannerStartBlocked {
+    /// Only the latest of [`PLANNER_START_KINDS`] can still be open.
+    pub fn from_latest(event: Option<super::RunEvent>) -> serde_json::Result<Option<Self>> {
+        event
+            .filter(|event| event.kind == EventKind::PlannerStartBlocked)
+            .map(|event| serde_json::from_value(event.payload))
+            .transpose()
+    }
+}
+
 /// A kind as its text ([`EventKind::as_str`]); one this binary does not
 /// know does not read.
 impl serde::Serialize for EventKind {
@@ -367,6 +397,14 @@ event_kinds! {
     PlannerTurnProcessStarted => "planner_turn_process_started",
     PlannerReleased => "planner_released",
     PlannerRequestHanded => "planner_request_handed",
+    /// A queue-wide wait for a new runtime planner. The payload's
+    /// `providers` gives each unavailable `provider` and its `reason`.
+    /// `requests` and `proposals` name the requests and revises waiting
+    /// for those providers. A newer record replaces the standing attention.
+    PlannerStartBlocked => "planner_start_blocked",
+    /// An empty payload closes the standing planner start attention when
+    /// no request or revise is waiting for a provider anymore.
+    PlannerStartResumed => "planner_start_resumed",
     PlannerUnresponsive => "planner_unresponsive",
     PromptCleared => "prompt_cleared",
     PromptWaiting => "prompt_waiting",
@@ -792,6 +830,8 @@ impl EventKind {
                 // planner timeout (task 805); the revise's is on its
                 // proposal's task.
                 | PlannerUnresponsive
+                | PlannerStartBlocked
+                | PlannerStartResumed
                 // The supervisor's nudges of an inbox without a watcher
                 // (ADR-t906-1 decision 1 (3)).
                 | InboxNudged
@@ -2067,6 +2107,8 @@ mod tests {
             ),
             (EventKind::PlannerReleased, "planner_released"),
             (EventKind::PlannerRequestHanded, "planner_request_handed"),
+            (EventKind::PlannerStartBlocked, "planner_start_blocked"),
+            (EventKind::PlannerStartResumed, "planner_start_resumed"),
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),
             (EventKind::PromptCleared, "prompt_cleared"),
             (EventKind::PromptWaiting, "prompt_waiting"),

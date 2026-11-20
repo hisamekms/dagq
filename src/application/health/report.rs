@@ -3,7 +3,10 @@
 
 use super::*;
 use crate::domain::run_progress::{LandingStage, landing_stage};
-use crate::{application::claim_view, domain::EventKind};
+use crate::{
+    application::claim_view,
+    domain::{EventKind, event_kind::PlannerStartBlocked},
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -999,18 +1002,20 @@ const REQUEST_TEXT_CHARS: usize = 120;
 /// `status`'s `requests` for the inbox (ADR-t1394-1): each `open` planning
 /// request, oldest first, as `open` gives them with the planner of the
 /// runtime's open for it and the asks about it, so a person sees the ones
-/// no planner has taken, such as while the supervisor runs `--no-claude`.
+/// no planner has taken.
 /// Its words are cut, not summarized, to [`REQUEST_TEXT_CHARS`]
 /// characters. `planner_questions` are the unanswered `planner_question`s
 /// about it. `waiting_for` is why it is still open: `planner` while an
 /// open planner of the runtime's works on it, `answer` while one of
-/// `planner_questions` waits for a person, `planner_start` while it is one
-/// the supervisor opens a planner for (`waiting` holds it: no slot, or
+/// `planner_questions` waits for a person, `no_provider` while the request
+/// is named by the standing `planner_start_blocked` event, `planner_start`
+/// while it is one the supervisor opens a planner for (`waiting` holds it: no slot, or
 /// planners do not start), and `held` otherwise: it waits for an answered
 /// question to be carried to a planner, for the answer to a question about
 /// a draft its planner left, for another planner (one replanning the same
 /// goal or holding a draft it names) or for its replanning operation's
-/// snapshot, as `waiting`'s rule tells.
+/// snapshot, as `waiting`'s rule tells. Only `no_provider` carries
+/// `provider_reasons`, the unavailable providers and reasons from that event.
 pub fn requests(
     open: &[(
         crate::domain::plan_request::PlanRequest,
@@ -1018,6 +1023,7 @@ pub fn requests(
         Vec<crate::domain::Ask>,
     )],
     waiting: &[crate::domain::RequestId],
+    blocked: Option<&PlannerStartBlocked>,
 ) -> Value {
     open.iter()
         .map(|(request, planner, asks)| {
@@ -1030,16 +1036,19 @@ pub fn requests(
                 })
                 .map(|ask| ask.id)
                 .collect();
-            let waiting_for = if planner.is_some() {
-                "planner"
+            let blocked = blocked.filter(|blocked| blocked.requests.contains(&request.id));
+            let (waiting_for, provider_reasons) = if planner.is_some() {
+                ("planner", None)
             } else if !questions.is_empty() {
-                "answer"
+                ("answer", None)
+            } else if let Some(blocked) = blocked {
+                ("no_provider", Some(&blocked.providers))
             } else if waiting.contains(&request.id) {
-                "planner_start"
+                ("planner_start", None)
             } else {
-                "held"
+                ("held", None)
             };
-            json!({
+            let mut row = json!({
                 "id": request.id,
                 "text": truncate(&request.text, REQUEST_TEXT_CHARS)
                     .unwrap_or_else(|| request.text.clone()),
@@ -1049,7 +1058,11 @@ pub fn requests(
                 "planner_id": planner,
                 "planner_questions": questions,
                 "waiting_for": waiting_for,
-            })
+            });
+            if let Some(reasons) = provider_reasons {
+                row["provider_reasons"] = json!(reasons);
+            }
+            row
         })
         .collect()
 }

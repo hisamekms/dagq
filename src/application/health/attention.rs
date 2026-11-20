@@ -24,6 +24,7 @@ pub fn truncate_reason(text: &str) -> String {
 /// directory of a throughput review's or an observation's finish, and of a
 /// supervisor's heartbeat that stopped its `supervisor`, `cause`,
 /// `failures` and `secs`.
+/// Planner start waits carry the providers and the work held by them.
 /// An attention event also carries its `next`.
 pub fn compact_event(event: &RunEvent) -> Value {
     let mut value = json!({"id": event.id, "kind": event.kind});
@@ -97,6 +98,13 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
+    if event.kind == EventKind::PlannerStartBlocked {
+        for key in ["providers", "requests", "proposals"] {
+            if let Some(value) = payload.get(key) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
     if event.kind == EventKind::AdmissionStalled {
         for key in ["supervisor", "reasons"] {
             if let Some(value) = payload.get(key) {
@@ -162,6 +170,21 @@ pub fn compact_event(event: &RunEvent) -> Value {
     }
     object.insert("created_at".into(), json!(event.created_at));
     value
+}
+
+/// What the standing planner start wait shows in inbox status.
+pub fn planner_start_attention(blocked: &event_kind::PlannerStartBlocked) -> Value {
+    json!({
+        "run_id": null,
+        "task_id": null,
+        "kind": EventKind::PlannerStartBlocked,
+        "status": "waiting",
+        "last_error": null,
+        "next": AttentionNext::CheckPlannerProviders,
+        "providers": blocked.providers,
+        "requests": blocked.requests,
+        "proposals": blocked.proposals,
+    })
 }
 
 /// Whether a live supervisor applies the answer of the `update_failed` ask

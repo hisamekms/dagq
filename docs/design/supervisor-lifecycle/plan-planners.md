@@ -122,7 +122,9 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 5. **`planner_question`**: 依頼のaskを開けるのはその依頼の閉じていないruntimeのplanner自身だけである（[Authorization](../authorization.md#対話と記録のコマンドapplication)）。
    answerの行き先は`plan_requests.rs`の`route_of`、配送は`request_planner.rs`が持つ。
 6. **終わりと時間切れ**: 上の[runtimeのplannerの経路](#runtimeのplannerの経路)に従う。
-7. **人に見せる**: plannerが立たないあいだも、inboxの`status`（`--role`なしを含む）が`open`の依頼を古い順に、閉じていないplannerと`planner_question`から待っている理由を添えて出す（ADR-t1394-1のConsequences）。
+7. **人に見せる**: inboxの`status`（`--role`なしを含む）は、`open`の依頼を待っている理由とともに古い順に出す。
+   使える起動先が無いあいだ、依頼は`open`のまま残り、inboxの`status`が起動先を待つ依頼にproviderごとの理由を添えて出す。
+   同じ理由で待つreviseはinboxのattentionに出し、使える起動先が戻れば待たせた依頼とreviseにplannerを立てる。
    plannerの`status`には出さない。
    欄の意味は`application::health::requests`のdoc commentが持つ。
 

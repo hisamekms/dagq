@@ -14,7 +14,7 @@
 //! planners per draft.
 
 use super::*;
-use crate::domain::EventKind;
+use crate::domain::{EventKind, event_kind::PlannerStartBlocked};
 use crate::{
     application::{
         DraftPlannerStart, PlannerAnswerRoute,
@@ -44,12 +44,13 @@ impl PlanningState {
         env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
         runtime_open: &mut usize,
+        blocked: &mut PlannerStartBlocked,
     ) -> Result<()> {
         for ask in env.queue.planner_answers()? {
             // A question about a draft a request's planner added goes the
             // way of the request's (ADR-t2015-1).
             if let Some(request) = env.queue.answer_request(&ask)? {
-                self.deliver_request_answer(env, views, runtime_open, &ask, request)?;
+                self.deliver_request_answer(env, views, runtime_open, &ask, request, blocked)?;
                 continue;
             }
             if let Some(finding) = ask.finding_id {

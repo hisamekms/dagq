@@ -109,6 +109,17 @@ fn wiring_service_use_cases() -> (
     )
 }
 
+/// The status assembly for planning requests and their attention, shared
+/// with the wiring harness through the composition root (rule L9).
+#[cfg(test)]
+fn wiring_planning_status(
+    status: &mut Value,
+    queue: &SqliteQueue,
+    role: Option<crate::domain::SessionRole>,
+) -> Result<()> {
+    observation::add_planning_status(status, queue, role)
+}
+
 /// Explicit approval-policy dispatch for the wiring tests. Contexts reach
 /// the host's command composition through this root (rule L9).
 #[cfg(test)]

@@ -758,6 +758,16 @@ impl Wiring {
         .expect("read the queue's status")
     }
 
+    /// Read through the CLI and queue service's assembly of the inbox's
+    /// requests and planner start attention. The host probes are kept out
+    /// of this read so it can run against the fake repository.
+    pub(super) fn planning_status(&self, role: Option<crate::domain::SessionRole>) -> Value {
+        let mut status = self.status_for(role);
+        super::super::wiring_planning_status(&mut status, &self.queue(), role)
+            .expect("assemble planning status for the queue");
+        status
+    }
+
     /// This test's queue on a clock stopped at `at`.
     fn queue_at(&self, at: SystemTime) -> (SqliteQueue, Arc<dyn crate::application::Clock>) {
         let clock: Arc<dyn crate::application::Clock> =
@@ -942,6 +952,18 @@ impl Wiring {
     pub(super) fn supervise_planning(&self, planners: usize, timeout: Duration) -> Value {
         self.planning.set((Some(planners), timeout));
         self.supervise_once()
+    }
+
+    /// Use one supervisor for a sequence of planner passes with intervening
+    /// queue changes. Its callback and drain share the harness deadline.
+    pub(super) fn supervise_planning_while(
+        &self,
+        planners: usize,
+        timeout: Duration,
+        act: impl FnMut(&mut SqliteQueue, &dyn Fn()) -> bool,
+    ) -> Value {
+        self.planning.set((Some(planners), timeout));
+        self.supervise_once_while_stoppable(act)
     }
 
     /// One `--once` supervisor on this test's queue: run until no run is

@@ -1108,8 +1108,8 @@ fn status_shows_the_inbox_the_open_requests_a_planner_has_not_taken() {
     let goal = open_goal(&mut queue);
     assert!(status_requests(&fx.db, Some("inbox")).is_empty());
 
-    // Recorded while the supervisor runs --no-claude, no planner opens for
-    // them: the inbox's status lists them, oldest first, as waiting for one.
+    // This supervisor has no usable provider, so the inbox's status lists
+    // the requests oldest first with the provider wait.
     let recorded = ok_as(
         "inbox",
         &fx.db,
@@ -1146,7 +1146,7 @@ fn status_shows_the_inbox_the_open_requests_a_planner_has_not_taken() {
     assert!(backend.launched().is_empty());
     let waiting: Vec<(i64, String)> = all
         .iter()
-        .map(|id| (*id, "planner_start".to_owned()))
+        .map(|id| (*id, "no_provider".to_owned()))
         .collect();
     assert_eq!(status_requests(&fx.db, Some("inbox")), waiting);
     assert_eq!(status_requests(&fx.db, None), waiting);
@@ -1156,10 +1156,14 @@ fn status_shows_the_inbox_the_open_requests_a_planner_has_not_taken() {
     assert_eq!(shown["requested_by"], "inbox");
     assert_eq!(shown["created_at"], recorded["created_at"]);
 
-    // With Claude, the oldest gets the one planner and the rest wait.
+    // With Claude available, the oldest gets the one planner and the rest
+    // wait for a slot.
     supervise_owned(&fx, &backend, &reviewer);
     let opened = request_planner(&queue, first).expect("a planner for the oldest");
-    let mut expected = waiting.clone();
+    let mut expected: Vec<_> = all
+        .iter()
+        .map(|id| (*id, "planner_start".to_owned()))
+        .collect();
     expected[0].1 = "planner".into();
     assert_eq!(status_requests(&fx.db, Some("inbox")), expected);
 

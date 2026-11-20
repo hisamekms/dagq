@@ -16,8 +16,9 @@
 //! the answers are delivered and before the draft and finding planners,
 //! since a person waits for them.
 
+use super::planner_start::include_reasons;
 use super::*;
-use crate::domain::EventKind;
+use crate::domain::{EventKind, actor_model::RuntimePlannerRoute, event_kind::PlannerStartBlocked};
 use crate::{
     application::{
         PlannerAnswerRoute, RequestPlannerStart,
@@ -30,7 +31,7 @@ use crate::{
     },
     domain::{
         Ask, FindingId, GoalId, PlannerSession, RequestId, TaskId,
-        plan_request::{PlanRequest, RequestRef},
+        plan_request::{PlanRequest, RequestRef, RequestStatus},
         planner::answer_waits,
     },
 };
@@ -49,6 +50,7 @@ impl PlanningState {
         runtime_open: &mut usize,
         ask: &Ask,
         request: RequestId,
+        blocked: &mut PlannerStartBlocked,
     ) -> Result<()> {
         match env.queue.planner_answer_route(ask)? {
             PlannerAnswerRoute::Planner(planner) => {
@@ -128,7 +130,9 @@ impl PlanningState {
                 }
             }
             PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
-                if let Some(workspace) = self.start_request_planner(env, request, Some(ask))? {
+                if let Some(workspace) =
+                    self.start_request_planner(env, request, Some(ask), blocked)?
+                {
                     *runtime_open += 1;
                     env.queue.ask_delivered(ask.id, &workspace)?;
                 }
@@ -167,6 +171,7 @@ impl PlanningState {
         &mut self,
         env: &mut PlanningEnv<'_>,
         runtime_open: &mut usize,
+        blocked: &mut PlannerStartBlocked,
     ) -> Result<()> {
         env.queue.investigations()?;
         // A replanning request whose planner declined it or ran out ends
@@ -186,7 +191,10 @@ impl PlanningState {
             if *runtime_open >= env.runtime_planners {
                 break;
             }
-            if self.start_request_planner(env, request.id, None)?.is_some() {
+            if self
+                .start_request_planner(env, request.id, None, blocked)?
+                .is_some()
+            {
                 *runtime_open += 1;
             }
         }
@@ -202,9 +210,21 @@ impl PlanningState {
         env: &mut PlanningEnv<'_>,
         request: RequestId,
         answer: Option<&Ask>,
+        blocked: &mut PlannerStartBlocked,
     ) -> Result<Option<String>> {
-        let Some(actor) = self.planner_launch(env) else {
-            return Ok(None);
+        let actor = match self.planner_route(env) {
+            RuntimePlannerRoute::Start(actor) => actor,
+            RuntimePlannerRoute::NoTarget(reasons) => {
+                // A draft's answer can need a planner after its request has
+                // ended. Only open requests belong in this attention.
+                if answer.is_none_or(|ask| ask.request_id.is_some())
+                    || env.queue.plan_request(request)?.status == RequestStatus::Open
+                {
+                    blocked.requests.insert(request);
+                    include_reasons(blocked, reasons);
+                }
+                return Ok(None);
+            }
         };
         let (planner, current, attempt) = match env
             .queue

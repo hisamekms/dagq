@@ -2517,6 +2517,9 @@ pub enum AttentionNext {
     /// `tell_of_stopped_planner_turns`; task 1441 removed the backstop on a
     /// silent planner, task 805): a person reads it with `planner log`.
     CheckPlanner,
+    /// The inbox checks the provider reasons for a runtime planner that
+    /// cannot start.
+    CheckPlannerProviders,
     /// The runtime opened its planners for a draft the runtime or a job
     /// registered, and none decided it (`draft_planner_exhausted`,
     /// ADR-0041 decision 16): the inbox records a planning request that
@@ -2809,6 +2812,7 @@ impl fmt::Display for AttentionNext {
             Self::PlanReviewByHand => f.write_str("plan review by hand"),
             Self::GoalReviewByHand => f.write_str("goal review by hand"),
             Self::CheckPlanner => f.write_str("check the planner"),
+            Self::CheckPlannerProviders => f.write_str("check planner providers"),
             Self::DecideDraft => f.write_str("request a plan for the draft"),
             Self::DecideFinding => f.write_str("request a plan for the finding"),
             Self::DecideFollowUps { goal_id } => {
@@ -2886,6 +2890,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "goal_review_failed",
     "planner_unresponsive",
     EventKind::PlannerSwitchStalled.as_str(),
+    EventKind::PlannerStartBlocked.as_str(),
     "draft_planner_exhausted",
     "finding_planner_exhausted",
     // Never recorded: `status` derives it on each read, so no event wakes
@@ -3203,6 +3208,7 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         (Some(EventKind::PlannerUnresponsive | EventKind::PlannerSwitchStalled), _) => {
             Some(AttentionNext::CheckPlanner)
         }
+        (Some(EventKind::PlannerStartBlocked), _) => Some(AttentionNext::CheckPlannerProviders),
         (Some(EventKind::DraftPlannerExhausted), _) => Some(AttentionNext::DecideDraft),
         (Some(EventKind::FindingPlannerExhausted), _) => Some(AttentionNext::DecideFinding),
         // A Spike's request has nobody who asked (ADR-t1487-1): its

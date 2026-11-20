@@ -1,6 +1,8 @@
 //! Runtime planner routing and delivery through the supervisor and queue,
 //! with the production Codex turn driver against a fake spawner.
 
+mod start_wait;
+
 use super::{agent::Script, harness::Wiring};
 use crate::{
     application::{AskQuery, PlanReviewStore, RunFiles, TaskStore},
@@ -149,8 +151,8 @@ fn idle(fx: &Wiring, row: &PlannerSession, provider: Provider, since: i64) {
     );
 }
 
-fn answer_request(queue: &mut SqliteQueue, request: RequestId) -> AskId {
-    let ask = queue
+fn ask_request(queue: &mut SqliteQueue, request: RequestId) -> AskId {
+    queue
         .ask(NewAsk {
             kind: AskKind::PlannerQuestion,
             task_id: None,
@@ -167,7 +169,11 @@ fn answer_request(queue: &mut SqliteQueue, request: RequestId) -> AskId {
         })
         .unwrap()
         .ask
-        .id;
+        .id
+}
+
+fn answer_request(queue: &mut SqliteQueue, request: RequestId) -> AskId {
+    let ask = ask_request(queue, request);
     queue.answer(ask, "keep").unwrap();
     ask
 }

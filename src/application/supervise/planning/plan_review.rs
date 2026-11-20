@@ -8,10 +8,12 @@
 //! this takes a run slot; a failure is logged and tried again on a later
 //! pass.
 
+use super::planner_start::{include_reasons, record_start_wait};
 use super::*;
 use super::{VerdictSent, verdict_sent};
 use crate::domain::EventKind;
 use crate::domain::actor_model::RoleModels;
+use crate::domain::event_kind::PlannerStartBlocked;
 use crate::domain::headless_job::ReviewTakeover;
 use crate::domain::language::with_instruction;
 use crate::domain::provider_switch::SwitchReason;
@@ -1157,6 +1159,7 @@ impl PlanningState {
         if self.tend_planner_walls(env, &views, &mut switches)? {
             views = self.planner_views(env)?;
         }
+        let mut blocked = PlannerStartBlocked::default();
         for revise in env.queue.revising_proposals()? {
             let proposal = revise.proposal.id();
             if switches.holds_proposal(proposal) {
@@ -1295,8 +1298,13 @@ impl PlanningState {
                     if held {
                         continue;
                     }
-                    let Some(actor) = self.planner_launch(env) else {
-                        continue;
+                    let actor = match self.planner_route(env) {
+                        RuntimePlannerRoute::Start(actor) => actor,
+                        RuntimePlannerRoute::NoTarget(reasons) => {
+                            blocked.proposals.insert(proposal.id());
+                            include_reasons(&mut blocked, reasons);
+                            continue;
+                        }
                     };
                     if !env.queue.claim_revise(proposal.id())? {
                         continue;
@@ -1372,11 +1380,11 @@ impl PlanningState {
         }
         // Then the drafts the runtime or a job registered (ADR-0041
         // decision 16), within the same limit.
-        self.deliver_planner_answers(env, &views, &mut runtime_open)?;
+        self.deliver_planner_answers(env, &views, &mut runtime_open, &mut blocked)?;
         // The planning requests a person made through the inbox
         // (ADR-t1394-1) come before the runtime's own drafts and findings:
         // a person waits on them.
-        self.open_request_planners(env, &mut runtime_open)?;
+        self.open_request_planners(env, &mut runtime_open, &mut blocked)?;
         // Then, once the findings whose proposal ended are settled, the
         // findings of the supervisor's that are no improvement — the
         // repairs of the landing branch's CI (ADR-t2928-1) and the agent
@@ -1396,7 +1404,7 @@ impl PlanningState {
         if let Some(proposal) = starved {
             self.release_runtime_planner(env, proposal, timeout, &views)?;
         }
-        Ok(())
+        record_start_wait(env, blocked)
     }
 
     /// The runtime's planners alive, each with why it is not ended
@@ -1685,24 +1693,29 @@ impl PlanningState {
         Ok((!open.is_empty(), answered))
     }
 
-    /// Select a provider before claiming any work for a new planner.
+    /// The selected launch when a provider can start.
     pub(super) fn planner_launch(&mut self, env: &PlanningEnv<'_>) -> Option<ActorLaunch> {
+        match self.planner_route(env) {
+            RuntimePlannerRoute::Start(actor) => Some(actor),
+            RuntimePlannerRoute::NoTarget(_) => None,
+        }
+    }
+
+    /// Select a provider or report why there is no target, before claiming work.
+    pub(super) fn planner_route(&mut self, env: &PlanningEnv<'_>) -> RuntimePlannerRoute {
         let roles = env.verifier.role_models().unwrap_or_else(|error| {
             warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
             Default::default()
         });
         self.warn_ignored_route_setting(&roles);
         let role = ModelRole::RuntimePlanner;
-        match runtime_planner_route(
+        runtime_planner_route(
             &roles.launch(role),
             roles.switchable(role),
             env.jobs.no_claude(),
             env.jobs.fallback_jobs(),
             |provider| super::planner_switch::planner_unusable(env, provider),
-        ) {
-            RuntimePlannerRoute::Start(actor) => Some(actor),
-            RuntimePlannerRoute::NoTarget(_) => None,
-        }
+        )
     }
 
     pub(super) fn planner_wrapper_launch<'e>(

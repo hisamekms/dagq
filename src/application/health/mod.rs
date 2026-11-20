@@ -160,8 +160,20 @@ mod tests {
                 vec![ask(3, "planner_question", Some(5)), ask(4, "blocked", None)],
             ),
             (request(4, "held"), None, vec![answered]),
+            (request(5, "provider unavailable"), None, vec![]),
         ];
-        let listed = requests(&open, &[RequestId::new(3)]);
+        let providers = json!([{"provider": "codex", "reason": "executable_missing"}]);
+        let blocked = serde_json::from_value(json!({
+            "providers": providers,
+            "requests": [1, 2, 5],
+            "proposals": [],
+        }))
+        .unwrap();
+        let listed = requests(
+            &open,
+            &[RequestId::new(3), RequestId::new(5)],
+            Some(&blocked),
+        );
         let of = |field: &str| -> Vec<Value> {
             listed
                 .as_array()
@@ -170,23 +182,27 @@ mod tests {
                 .map(|r| r[field].clone())
                 .collect()
         };
-        assert_eq!(of("id"), [json!(1), json!(2), json!(3), json!(4)]);
+        assert_eq!(of("id"), [json!(1), json!(2), json!(3), json!(4), json!(5)]);
         assert_eq!(
             of("waiting_for"),
-            ["planner", "answer", "planner_start", "held"]
+            ["planner", "answer", "planner_start", "held", "no_provider"]
         );
         assert_eq!(
             of("planner_id"),
-            [json!(7), json!(null), json!(null), json!(null)]
+            [json!(7), json!(null), json!(null), json!(null), json!(null)]
         );
         assert_eq!(
             of("planner_questions"),
-            [json!([]), json!([2]), json!([]), json!([])]
+            [json!([]), json!([2]), json!([]), json!([]), json!([])]
         );
         assert_eq!(listed[0]["requested_by"], "inbox");
         assert_eq!(listed[0]["created_at"], 101);
         assert_eq!(listed[2]["text"], format!("{}…", "x".repeat(120)));
-        assert_eq!(requests(&[], &[]), json!([]));
+        for row in &listed.as_array().unwrap()[..4] {
+            assert!(row.get("provider_reasons").is_none(), "{row}");
+        }
+        assert_eq!(listed[4]["provider_reasons"], providers);
+        assert_eq!(requests(&[], &[], None), json!([]));
     }
 
     #[test]

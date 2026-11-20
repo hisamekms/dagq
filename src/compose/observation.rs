@@ -17,7 +17,10 @@ use super::{
     OneShot, bound_checkout, bound_main_checkout, goal_tags, provider_checks, queue_broker_view,
     queue_service_view, task_changes, task_title_prefixes, worker_adapters,
 };
-use crate::domain::EventKind;
+use crate::domain::{
+    EventKind,
+    event_kind::{PLANNER_START_KINDS, PlannerStartBlocked},
+};
 use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -1762,7 +1765,10 @@ fn push_target(db: &Path, binding: Option<&Path>) -> crate::application::push::P
 
 /// `status`'s `requests` ([`health::requests`]): the `open` planning requests with the planner
 /// of the runtime's open for each and its asks, and which of them wait for a planner to open.
-fn open_requests<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Value>
+fn open_requests<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+    blocked: Option<&PlannerStartBlocked>,
+) -> Result<Value>
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
@@ -1780,7 +1786,32 @@ where
             Ok((request, planner, asks))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(health::requests(&open, &waiting))
+    Ok(health::requests(&open, &waiting, blocked))
+}
+
+/// Add the inbox's requests and standing planner start attention from the
+/// same queue record.
+pub(super) fn add_planning_status<E: TransactionEntries>(
+    status: &mut Value,
+    queue: &StoreQueue<E>,
+    role: Option<SessionRole>,
+) -> Result<()>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
+    if !health::status_sections(role).inbox {
+        return Ok(());
+    }
+    let blocked =
+        PlannerStartBlocked::from_latest(queue.latest_queue_event(&PLANNER_START_KINDS)?)?;
+    status["requests"] = open_requests(queue, blocked.as_ref())?;
+    if let Some(blocked) = blocked {
+        status["attention"]
+            .as_array_mut()
+            .expect("status builds an attention array")
+            .push(health::planner_start_attention(&blocked));
+    }
+    Ok(())
 }
 
 /// [`OneShot`]'s `local_config` of the main checkout `checkout` at `now`
@@ -1909,8 +1940,8 @@ impl OneShot {
             status["inbox_watcher"] = self.inbox_watcher(db);
             status["queue_service"] = queue_service_view(db, Some(queue));
             status["queue_broker"] = queue_broker_view(db, Some(queue));
-            status["requests"] = open_requests(queue)?;
         }
+        add_planning_status(&mut status, queue, role)?;
         Ok(status)
     }
 

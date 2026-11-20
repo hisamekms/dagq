@@ -1,0 +1,9 @@
+[[test]]
+name = "compose::wiring_tests::runtime_planner_provider::start_wait::no_claude_and_no_codex_publish_one_wait_until_codex_starts_the_work"
+reason = "実際の supervisor と queue service と SQLite の境界を通し、継続する控えで記録を増やさず、解除した pass で待ちの解除と依頼・revise の起動を同じ queue で観測する。実行は1 supervisor と1 msの tick に絞り、待ちの判定と表示の優先順は unit test に置く。"
+task = 5575
+
+[[test]]
+name = "compose::wiring_tests::runtime_planner_provider::start_wait::a_wait_on_the_explicit_provider_tracks_request_arrival_and_withdrawal"
+reason = "実際の supervisor と queue service と SQLite の境界を通し、待つ依頼の追加と Withdraw の transaction で閉じた依頼が、同じ queue の次の pass の記録と status の対象を変えることを観測する。追加、取り下げ、provider の復旧を各1回に絞り、1 supervisor と1 msの tick で確かめる。"
+task = 5575
