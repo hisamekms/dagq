@@ -17,6 +17,8 @@ amends:
   - adr-t807-1 decision 3
   - adr-t807-1 decision 5
   - adr-t1540-1 decision 5
+amended_by:
+  - adr-t5583-1
 owners:
   - hisamekms
 tags:

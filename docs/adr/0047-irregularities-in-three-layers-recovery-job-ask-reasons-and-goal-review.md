@@ -11,6 +11,7 @@ supersedes:
   - adr-0043
   - adr-0044
 amended_by:
+  - adr-t5583-1
   - adr-t5066-1
   - adr-t1521-2
   - adr-t1521-1

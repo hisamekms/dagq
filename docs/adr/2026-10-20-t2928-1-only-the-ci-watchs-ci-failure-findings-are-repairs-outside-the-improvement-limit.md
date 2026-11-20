@@ -12,6 +12,7 @@ amends:
   - adr-t1920-1 decision 4
   - adr-0051 decision 25
 amended_by:
+  - adr-t5583-1
   - adr-t2971-1
 owners:
   - hisamekms
