@@ -9,6 +9,8 @@
 出典: local-checks.md。
 
 - receiptの`summary`は受け入れ条件の各項目を根拠（変えたfile、testの`<module>::<test>`とコマンド、文書のpathと節、測定のscript・CSV）へ対応づける。根拠の無い項目は差し戻す。
+- `--verify`の全件が通ることを求める項目は、着地の検証とmainのCIが判定する正式な合否（全体の`cargo test`・`cargo llvm-cov`の通過）がreceiptに無いことでは差し戻さない（local-checks.md「workerの手元の検証」「resumeでの再現」）。
+  同じ項目のほかの要求と、local-checks.md「workerの手元の検証」とADR-t3240-1決定2・3が求める手元の検証の根拠は引き続き見る。
 - taskにpathsがあれば差分はその中だけを変える。受け入れ条件に要らない範囲の外の作業はfollow_upにする。
 - 満たせない項目をfollow_upに回して`succeeded`にしない。人の判断が要るものは`worker_question`、範囲の外の作業が要るものは`failed`。
 - 広く書く条件（「ほかに同じ形のもの」）は洗い出した一覧と各々の扱いが、項目ごとの値の条件は求めた単位の値が要る。測定のtaskは求める周回数を満たす。

@@ -1211,7 +1211,9 @@ pub fn recovery_prompt(
 /// Coverage-only precheck input contract: one acceptance file, one diff file,
 /// and only the receipt's acceptance_items projection. No project rules,
 /// task context, source browsing, test execution, or general review criteria
-/// are added. Ambiguity must pass through to ordinary review, not become a gap.
+/// are added. Only the acceptance wording can establish that a result belongs
+/// to a landing or CI gate. Ambiguity must pass through to ordinary review, not
+/// become a gap.
 pub fn acceptance_precheck_prompt(acceptance: &str, diff: &str, items: &str) -> String {
     format!(
         r#"You are builtin:acceptance-precheck, a coverage-only check before run review.
@@ -1222,8 +1224,12 @@ For each acceptance item (treat unnumbered criteria as item 1), look only for:
 - shared_baseline: a test's comparison baseline shares the implementation under test (including comparisons between two new code paths), so it does not verify the required independent baseline;
 - unconnected: no evidence connects the required behavior to its entry/startup path;
 - missing_item: an acceptance item has no implementation/test evidence.
+If the item's wording itself describes a landing or CI gate (for example, "all task verification commands pass"), do not report missing_item merely because the receipt lacks the gate result or leaves it to landing or CI.
+This exception covers only the gate result. Report missing_item if evidence is missing for the item's other requirements (implementation, tests, or connection to an entry path) or for the worker-local checks cited in the receipt.
+The exception does not apply when the item explicitly asks the worker to run a command and report its result.
 Do not inspect code_defect, docs_drift, security, or general test quality.
-If judging requires anything outside this diff and receipt projection, do not assert a gap; leave it for normal review.
+If the wording is unclear about whether a result belongs to a landing or CI gate and deciding would require more material, leave it for normal review without asserting a gap.
+Likewise, if judging requires evidence outside this diff and receipt projection, do not assert a gap; leave it for normal review.
 Return only JSON: {{"findings":[{{"item":1,"kind":"shared_baseline|unconnected|missing_item","evidence":"specific diff/receipt evidence"}}]}}.
 Use exactly one allowed kind per finding and its positive acceptance item number.
 With no demonstrated gap return {{"findings":[]}}. This does not approve landing or replace any review.
@@ -1255,6 +1261,12 @@ mod precheck_tests {
             "shares the implementation under test",
             "entry/startup path",
             "missing_item",
+            "the item's wording itself describes a landing or CI gate",
+            "do not report missing_item merely because the receipt lacks the gate result or leaves it to landing or CI",
+            "This exception covers only the gate result.",
+            "Report missing_item if evidence is missing for the item's other requirements (implementation, tests, or connection to an entry path) or for the worker-local checks cited in the receipt.",
+            "The exception does not apply when the item explicitly asks the worker to run a command and report its result.",
+            "If the wording is unclear about whether a result belongs to a landing or CI gate and deciding would require more material, leave it for normal review without asserting a gap.",
             "Do not inspect code_defect, docs_drift, security",
             "outside this diff and receipt projection",
             "acceptance.txt",
