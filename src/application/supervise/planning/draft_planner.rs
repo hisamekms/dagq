@@ -5,7 +5,7 @@
 //! the drafts waiting at once that came from the same run's receipt, goal
 //! review or withdrawal), within `runtime_planners` of [`LoopSettings::limits`]
 //! (shared with the planners opened for revises; a bundle counts one), the
-//! bundle of the oldest draft first. The planner adopts each draft
+//! order from planner admission. The planner adopts each draft
 //! (completes and submits it, so plan review checks it), drops it (cancels
 //! it with a note) or asks the inbox a `planner_question` about it, whose
 //! answer the supervisor types into its workspace (or hands to a new
@@ -13,54 +13,61 @@
 //! make the next bundle, at most [`crate::domain::MAX_DRAFT_PLANNERS`]
 //! planners per draft.
 
-use super::*;
-use crate::domain::{EventKind, event_kind::PlannerStartBlocked};
+use super::{planner_admission::AnswerTarget, *};
+use crate::domain::EventKind;
 use crate::{
     application::{
         DraftPlannerStart, PlannerAnswerRoute,
         planner::{PlannerView, open_draft_planner},
         prompt::{DraftPlannerMaterial, FittedPrompt, RevisitHistory, draft_planner_prompt},
     },
-    domain::{
-        Ask, AskKind, BundleKey, DraftOrigin, DraftTarget, follow_up::bundles,
-        planner::answer_waits,
-    },
+    domain::{Ask, AskKind, BundleKey, DraftOrigin, DraftTarget, planner::answer_waits},
 };
 
 impl PlanningState {
     /// Deliver the answered `planner_question` asks: sent to the live
     /// planner of the runtime's that works on the ask's task once it stopped
-    /// after asking (as its next turn), handed to a new planner when the draft's
-    /// one is gone (within the limit, counted in `runtime_open`), or closed
-    /// when the draft moved on. The sending is claimed first
+    /// after asking (as its next turn), or closed when the draft moved on.
+    /// Return the answers that need a new planner for admission. The sending is claimed first
     /// (`planner_answer_claimed`), so only one supervisor sends an answer. A
     /// sending that fails records `ask_delivery_failed` and ends the planner
     /// ([`Self::hand_over_undelivered_answer`]), so the answer goes to a new
     /// planner.
-    /// A new planner leads with the answered draft and takes other waiting
-    /// drafts of its bundle; an open bundle key holds delivery until it closes.
-    pub(in crate::application::supervise) fn deliver_planner_answers(
+    pub(super) fn deliver_planner_answers(
         &mut self,
         env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
-        runtime_open: &mut usize,
-        blocked: &mut PlannerStartBlocked,
-    ) -> Result<()> {
+    ) -> Result<Vec<(Ask, AnswerTarget)>> {
+        let mut waiting = Vec::new();
         for ask in env.queue.planner_answers()? {
             // A question about a draft a request's planner added goes the
-            // way of the request's (ADR-t2015-1).
-            if let Some(request) = env.queue.answer_request(&ask)? {
-                self.deliver_request_answer(env, views, runtime_open, &ask, request, blocked)?;
-                continue;
-            }
-            if let Some(finding) = ask.finding_id {
-                self.deliver_finding_answer(env, views, runtime_open, &ask, finding)?;
-                continue;
-            }
-            let Some(task) = ask.task_id else {
+            // way of the request's planner (ADR-t2015-1).
+            let target = if let Some(request) = env.queue.answer_request(&ask)? {
+                AnswerTarget::Request(request)
+            } else if let Some(finding) = ask.finding_id {
+                AnswerTarget::Finding(finding)
+            } else if let Some(task) = ask.task_id {
+                AnswerTarget::Draft(task)
+            } else {
                 continue;
             };
-            match env.queue.planner_answer_route(&ask)? {
+            let route = env.queue.planner_answer_route(&ask)?;
+            if route == PlannerAnswerRoute::NewPlanner {
+                waiting.push((ask, target));
+                continue;
+            }
+            let task = match target {
+                AnswerTarget::Request(request) => {
+                    self.deliver_request_answer(env, views, &ask, request, route)?;
+                    continue;
+                }
+                AnswerTarget::Finding(finding) => {
+                    self.deliver_finding_answer(env, views, &ask, finding, route)?;
+                    continue;
+                }
+                AnswerTarget::Draft(task) => task,
+            };
+            match route {
                 PlannerAnswerRoute::Planner(planner) => {
                     let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                         continue;
@@ -136,28 +143,7 @@ impl PlanningState {
                         }
                     }
                 }
-                PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
-                    // The drafts of its bundle that wait go with it.
-                    let mut drafts = vec![task];
-                    if let Some(origin) = env.queue.draft_origin(task)? {
-                        let key = BundleKey::of(origin.0, &origin.1, task);
-                        drafts.extend(
-                            env.queue
-                                .planner_drafts()?
-                                .into_iter()
-                                .filter(|target| {
-                                    target.task.id() != task && target.bundle_key() == key
-                                })
-                                .map(|target| target.task.id()),
-                        );
-                    }
-                    if let Some(workspace) = self.start_draft_planner(env, &drafts, Some(&ask))? {
-                        *runtime_open += 1;
-                        env.queue.ask_delivered(ask.id, &workspace)?;
-                    }
-                }
-                // At the limit: the answer waits for a planner to end.
-                PlannerAnswerRoute::NewPlanner => {}
+                PlannerAnswerRoute::NewPlanner => unreachable!(),
                 PlannerAnswerRoute::Close => {
                     env.queue.close_planner_answer(
                         ask.id,
@@ -170,35 +156,35 @@ impl PlanningState {
                 PlannerAnswerRoute::Revise(_) | PlannerAnswerRoute::Person => {}
             }
         }
-        Ok(())
+        Ok(waiting)
     }
 
-    /// Open a planner for each bundle of drafts waiting for one, the
-    /// bundle of the oldest draft first, while the runtime's planners are
-    /// below the limit. The pass registers due recurring drafts first,
-    /// so a newly registered recurring draft can be taken in this same pass.
-    pub(in crate::application::supervise) fn open_draft_planners(
+    /// Lead with the answered draft and take other waiting drafts of its bundle.
+    pub(super) fn start_draft_answer(
         &mut self,
         env: &mut PlanningEnv<'_>,
-        runtime_open: &mut usize,
-    ) -> Result<()> {
-        for bundle in bundles(env.queue.planner_drafts()?) {
-            if *runtime_open >= env.runtime_planners {
-                break;
-            }
-            let drafts: Vec<TaskId> = bundle.iter().map(|target| target.task.id()).collect();
-            if self.start_draft_planner(env, &drafts, None)?.is_some() {
-                *runtime_open += 1;
-            }
+        task: TaskId,
+        ask: &Ask,
+    ) -> Result<Option<String>> {
+        let mut drafts = vec![task];
+        if let Some(origin) = env.queue.draft_origin(task)? {
+            let key = BundleKey::of(origin.0, &origin.1, task);
+            drafts.extend(
+                env.queue
+                    .planner_drafts()?
+                    .into_iter()
+                    .filter(|target| target.task.id() != task && target.bundle_key() == key)
+                    .map(|target| target.task.id()),
+            );
         }
-        Ok(())
+        self.start_draft_planner(env, &drafts, Some(ask))
     }
 
     /// Record a planner for the bundle of `drafts` (carrying `answer`,
     /// about the first), write its prompt and open its workspace; the
     /// workspace's UUID, or `None` when no draft was taken (another
     /// supervisor took them, they moved on, or their planners are used up).
-    fn start_draft_planner(
+    pub(super) fn start_draft_planner(
         &mut self,
         env: &mut PlanningEnv<'_>,
         drafts: &[TaskId],

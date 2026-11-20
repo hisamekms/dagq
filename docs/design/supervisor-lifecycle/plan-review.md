@@ -50,7 +50,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - jobは読むだけで、`dagq`の書き込むコマンドはCLIが役割で拒む（[Queue service](../queue-service.md#クライアントモード)）。
 - repositoryの規則をruntimeに埋め込まず、jobがrepositoryの指示と文書から読む（[Prompt](prompt.md#repositoryの規則を読む順)）。
 - `lint`のhintsはplannerがsubmitの前に読むもので、submitもjobも読まない（[ADR-t3321-1](../../adr/2026-10-24-t3321-1-lint-hints-related-doc-sections-without-refusing-submit.md)）。
-- plannerの起動・行・終わりの記録は[`plan` / `planners`](plan-planners.md)、draft・findingのplannerは[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)が持ち、それらはreviseの配送の後に同じ上限の中で立つ。
+- plannerの起動・行・終わりの記録は[`plan` / `planners`](plan-planners.md)、draft・findingのplannerは[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)が持ち、新規起動は同じ枠を共有する。
 
 ## 不変条件
 
@@ -108,7 +108,9 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 
 ## reviseの配送
 
-- 配送・plannerの立て方・期限: `PlanningState::tend_planners`と`revise_watch`、文は`prompt::plan_revise_request`。
+- 配送と期限の入口は`PlanningState::tend_planners`、文は`prompt::plan_revise_request`が持つ。
+- 生きている持ち主への配送は枠を追加で取らず、上限でもidleになれば届ける。
+- 持ち主が居ないreviseは、proposal内のtaskの効く優先度の最大で[新規起動の列](plan-planners.md#runtimeのplannerの経路)に入る。
 - 上限で待つreviseのための枠の空け方: `PlanningState::release_runtime_planner`。
 - 約束: 終了の依頼を置く直前に`turns/`を読み直し、終わっていない依頼があれば終わらせない（`PlanningState::request_outstanding`、ほかの理由は`busy_reasons`）。
 - 持ち主が居ないreviseは、回答済みの`planner_question`と引き継ぎ材料を同じ新しいplannerに運ぶ（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定2〜4、`PlanReviewStore::revise_sent`）。

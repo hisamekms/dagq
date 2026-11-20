@@ -2,7 +2,7 @@
 //! decisions 4 to 7): a request the inbox recorded at a person's word gets
 //! a planner of the runtime's, within `runtime_planners` of
 //! [`LoopSettings::limits`] (shared with the planners for revises, drafts
-//! and findings), the oldest request first. The planner reads the
+//! and findings), in planner admission order. The planner reads the
 //! request's words from the file they were handed over in
 //! ([`crate::application::planner_handoff`]), and submits a proposal of it
 //! (the request becomes `proposed`, linked to it), declines it with a
@@ -12,9 +12,7 @@
 //! planner that ends with the request undecided is followed by another, at
 //! most [`crate::domain::plan_request::MAX_REQUEST_PLANNERS`]; then the
 //! request is `exhausted` and the inbox decides. No run slot is used: the
-//! requests come in the supervisor's planner pass after the revises and
-//! the answers are delivered and before the draft and finding planners,
-//! since a person waits for them.
+//! requests share admission with the other work needing a new planner.
 
 use super::planner_start::include_reasons;
 use super::*;
@@ -37,22 +35,21 @@ use crate::{
 };
 
 impl PlanningState {
-    /// Deliver the answer of a `planner_question` about `request`, or about
-    /// a draft its planner added (ADR-t2015-1): typed into the live
-    /// planner opened for it once it stopped after asking, handed to a new
-    /// planner when that one is gone (within the limit; for a draft even
-    /// when the request moved on), or closed when the request moved on
-    /// (proposed, declined, out of planners) or the draft is kept.
-    pub(in crate::application::supervise) fn deliver_request_answer(
+    /// Deliver a `planner_question` answer about `request` or a draft its
+    /// planner added (ADR-t2015-1) to the live planner as its next turn.
+    /// Close the answer when the request moved on or the draft is kept.
+    ///
+    /// [`Self::deliver_planner_answers`] returns [`PlannerAnswerRoute::NewPlanner`]
+    /// answers for shared admission and dispatches the remaining routes here.
+    pub(super) fn deliver_request_answer(
         &mut self,
         env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
-        runtime_open: &mut usize,
         ask: &Ask,
         request: RequestId,
-        blocked: &mut PlannerStartBlocked,
+        route: PlannerAnswerRoute,
     ) -> Result<()> {
-        match env.queue.planner_answer_route(ask)? {
+        match route {
             PlannerAnswerRoute::Planner(planner) => {
                 let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                     return Ok(());
@@ -129,16 +126,7 @@ impl PlanningState {
                     }
                 }
             }
-            PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
-                if let Some(workspace) =
-                    self.start_request_planner(env, request, Some(ask), blocked)?
-                {
-                    *runtime_open += 1;
-                    env.queue.ask_delivered(ask.id, &workspace)?;
-                }
-            }
-            // At the limit: the answer waits for a planner to end.
-            PlannerAnswerRoute::NewPlanner => {}
+            PlannerAnswerRoute::NewPlanner => unreachable!(),
             // A draft kept by the answer waits as it is (ADR-t1540-1).
             PlannerAnswerRoute::Close if ask.request_id.is_none() => {
                 env.queue.close_planner_answer(
@@ -159,20 +147,9 @@ impl PlanningState {
         Ok(())
     }
 
-    /// Open a planner for each request waiting for one, the oldest first,
-    /// while the runtime's planners are below the limit. Each pass first
-    /// records the request of each completed Spike that has none, and
-    /// closes the investigations that ended (ADR-t1487-1 decisions 5 and
-    /// 7), whether or not a planner can open: the landing records a
-    /// Spike's request in its own transaction, and this catches what a
-    /// landing of an older binary, a completion by hand or a failed
-    /// transaction left out.
-    pub(in crate::application::supervise) fn open_request_planners(
-        &mut self,
-        env: &mut PlanningEnv<'_>,
-        runtime_open: &mut usize,
-        blocked: &mut PlannerStartBlocked,
-    ) -> Result<()> {
+    /// Catch completed Spikes that still need requests, settle ended
+    /// replans and apply approved replacements before admitting new planners.
+    pub(super) fn settle_planning_requests(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
         env.queue.investigations()?;
         // A replanning request whose planner declined it or ran out ends
         // its operation's planning first (ADR-t1521-2 decision 4).
@@ -186,26 +163,14 @@ impl PlanningState {
             );
         }
         // A replacement plan review approved is applied by the runtime.
-        super::replan_apply::apply_replacements(env)?;
-        for request in env.queue.planner_requests()? {
-            if *runtime_open >= env.runtime_planners {
-                break;
-            }
-            if self
-                .start_request_planner(env, request.id, None, blocked)?
-                .is_some()
-            {
-                *runtime_open += 1;
-            }
-        }
-        Ok(())
+        super::replan_apply::apply_replacements(env)
     }
 
     /// Record a planner for `request` (carrying `answer`), hand it the
     /// request, write its prompt and open its workspace; the workspace's
     /// UUID, or `None` when the request was not taken (another supervisor
     /// took it, it moved on, or its planners are used up).
-    fn start_request_planner(
+    pub(super) fn start_request_planner(
         &mut self,
         env: &mut PlanningEnv<'_>,
         request: RequestId,

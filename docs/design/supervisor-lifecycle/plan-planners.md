@@ -79,6 +79,8 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 
 - 経路は非対話だけで、選ぶ設定は無い（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)決定1・2、ADR-t1433-2決定3）。
   旧keyは[Actor model](actor-model.md#runtimeのplannerの経路)が持つ。
+- **枠の配分**は`PlanningState::admit_planners`が行う。
+  providerの切り替えで予約した枠も使用中として数える。
 - **turnの依頼**: supervisorの依頼はproviderによらず`send_to_planner`を通る。
   入力の印で前のidle markerを数えず、終了の依頼はwrapperがagentを呼ばずに処理する。
 - **Codex**: 生きているplannerへの続きは同じthreadに届ける（[ADR-t2930-1](../../adr/2026-11-19-t2930-1-headless-codex-runtime-planner.md)、`Codex::planner_turn_command`）。
@@ -114,7 +116,8 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 1. **記録**: `request add`が人の言葉を記録し、中身は記録の後に変えない（`domain::plan_request`）。
    打てるのはinboxと`DAGQ_ROLE`の無い人だけである（`request.record`）。
    優先度はruntimeが依頼の値をgoalとtaskに付け、plannerは書き写さない（[ADR-t1975-1](../../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)）。
-2. **立てる**: 対象は`plan_requests.rs`の`targets`、順と枠は`open_request_planners`が持つ。
+2. **立てる**: 対象は`plan_requests.rs`の`targets`が持つ。
+   依頼の優先度で新規起動の列に入り、他の仕事と枠を共有する。
    同じdraftに依頼と再検討のplannerを同時に立てない（[Draft planners](draft-planners.md#再検討の時刻)）。
 3. **受け渡しとprompt**: 人の言葉はファイルで渡し（`planner_handoff::hand_request_to_planner`）、初期promptは`prompt::request_planner_prompt`で、上げる基準は[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)である。
 4. **結末**: submitがproposalを依頼に結び（`link_requests`）、却下の`request decline`は依頼のplanner自身だけが打てる。

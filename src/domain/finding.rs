@@ -436,9 +436,8 @@ impl ImprovementLimit {
 /// improvement: its planners and the proposals linked to it count against
 /// the [`ImprovementLimit`], and its planner waits at it (ADR-0051
 /// decision 25). Two findings the supervisor recorded are not, and their
-/// planners are opened whatever the improvements running, before the
-/// drafts': a `ci_failure` one of its CI watch, the repair of the landing
-/// branch's CI (ADR-t2928-1), and an `agent_eval_watch_due` one of its
+/// planners can open even at the improvement limit: a `ci_failure` from
+/// its CI watch (ADR-t2928-1), and an `agent_eval_watch_due` one of its
 /// watch of the adopted definitions, whose planner asks for cases or a
 /// hold-out and submits no proposal (ADR-t2971-1). Either kind recorded by
 /// anyone else, an `agent_eval_below_threshold` finding, and the CI
@@ -450,13 +449,8 @@ pub fn counts_as_improvement(kind: &str, recorded_by: &str) -> bool {
             || kind == super::agent_eval::watch::WATCH_FINDING_KIND))
 }
 
-/// The findings waiting for a planner of the runtime's, kept in their
-/// order (the oldest mark first), split by the turn of the supervisor's
-/// planners that opens theirs: those that are no improvement
-/// ([`counts_as_improvement`]: the supervisor's `ci_failure`, ADR-t2928-1,
-/// and its `agent_eval_watch_due`, ADR-t2971-1) before the drafts' and past
-/// the [`ImprovementLimit`], the improvements after the drafts' and within
-/// it.
+/// The findings waiting for a runtime planner, split by whether the
+/// improvement limit applies. The admission queue orders both groups.
 #[derive(Debug, Default)]
 pub struct PlannerTurns {
     pub before_drafts: Vec<Finding>,
@@ -1088,11 +1082,8 @@ mod tests {
         }
     }
 
-    /// ADR-t2971-1: the supervisor's `agent_eval_watch_due` finding, like
-    /// its `ci_failure` one, takes the turn before the drafts, while an
-    /// `agent_eval_watch_due` row another role recorded and an
-    /// `agent_eval_below_threshold` one stay with the improvements; each
-    /// turn keeps the oldest mark first.
+    /// Partition exempt findings from improvements, preserving input order
+    /// within each group. Admission orders the groups together.
     #[test]
     fn the_supervisors_watch_due_and_ci_failure_findings_open_before_the_improvements() {
         let watch_due = super::super::agent_eval::watch::WATCH_FINDING_KIND;

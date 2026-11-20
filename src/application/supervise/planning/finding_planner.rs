@@ -3,7 +3,7 @@
 //! `finding record --propose`, or by a person's `propose` answer to an ask
 //! — gets a planner of the runtime's, within
 //! `runtime_planners` of [`LoopSettings::limits`] (shared with the planners for
-//! revises and drafts), the oldest mark first. The planner submits a
+//! revises and drafts), in planner admission order. The planner submits a
 //! proposal that remedies it (linking the finding, which becomes
 //! `proposed`), dismisses it, or asks the inbox a `planner_question`,
 //! whose answer the supervisor delivers to it as its next turn (or hands
@@ -14,7 +14,7 @@
 //! supervisor's that is no improvement ([`counts_as_improvement`](crate::domain::counts_as_improvement)) — a
 //! `ci_failure` one of its CI watch (ADR-t2928-1) or an
 //! `agent_eval_watch_due` one of its agent watch (ADR-t2971-1) — gets its
-//! planner before the drafts' and past the improvements' limit.
+//! planner even at the improvement limit.
 
 use super::*;
 use crate::domain::EventKind;
@@ -26,12 +26,12 @@ use crate::{
     },
     domain::{
         Ask, FindingId, GoalId, ImprovementLimit, kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
-        planner::answer_waits, planner_turns,
+        planner::answer_waits,
     },
 };
 
 /// No planner was opened: the improvements running reached their limit
-/// (ADR-0051 decision 25), so the findings after it wait too.
+/// (ADR-0051 decision 25).
 #[derive(Debug)]
 struct ImprovementsAtLimit(ImprovementLimit);
 
@@ -63,28 +63,30 @@ impl PlanningState {
         Ok(())
     }
 
-    /// Deliver the answer of a `planner_question` about `finding`: sent to
-    /// the live planner opened for it, as its next turn, once it stopped
-    /// after asking,
-    /// handed to a new planner when that one is gone (within the limit), or
-    /// closed when the finding moved on. The live planner gets the answer of
-    /// its own question once it went idle after asking, and that of a
-    /// question someone else opened whenever it is idle; the delivery is
-    /// first claimed with `claim_planner_answer`, then the answer is written
+    /// Deliver a `planner_question` answer about `finding` to the live
+    /// planner as its next turn, or close it when the finding moved on.
+    ///
+    /// [`Self::deliver_planner_answers`] returns [`PlannerAnswerRoute::NewPlanner`]
+    /// answers for shared admission and dispatches the remaining routes here.
+    ///
+    /// The live planner gets the answer of its own question once it went
+    /// idle after asking, and that of a question someone else opened
+    /// whenever it is idle. The delivery is first claimed with
+    /// `claim_planner_answer`, then the answer is written
     /// as the planner's next turn's request (nothing is typed into it), and
     /// once it is written the ask is closed with `ask_delivered`.
     /// Failed delivery records `ask_delivery_failed` and calls
     /// [`Self::hand_over_undelivered_answer`]: the planner is ended as an
-    /// answer-wait, and a new planner carries the answer after its row closes.
-    pub(in crate::application::supervise) fn deliver_finding_answer(
+    /// answer-wait so the answer stays pending for admission once its row closes.
+    pub(super) fn deliver_finding_answer(
         &mut self,
         env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
-        runtime_open: &mut usize,
         ask: &Ask,
         finding: FindingId,
+        route: PlannerAnswerRoute,
     ) -> Result<()> {
-        match env.queue.planner_answer_route(ask)? {
+        match route {
             PlannerAnswerRoute::Planner(planner) => {
                 let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                     return Ok(());
@@ -160,14 +162,7 @@ impl PlanningState {
                     }
                 }
             }
-            PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
-                if let Some(workspace) = self.start_finding_planner(env, finding, Some(ask), 0)? {
-                    *runtime_open += 1;
-                    env.queue.ask_delivered(ask.id, &workspace)?;
-                }
-            }
-            // At the limit: the answer waits for a planner to end.
-            PlannerAnswerRoute::NewPlanner => {}
+            PlannerAnswerRoute::NewPlanner => unreachable!(),
             PlannerAnswerRoute::Close => {
                 env.queue.close_planner_answer(
                     ask.id,
@@ -180,77 +175,28 @@ impl PlanningState {
         Ok(())
     }
 
-    /// Open a planner for each finding waiting for one that is no
-    /// improvement ([`counts_as_improvement`](crate::domain::counts_as_improvement): a `ci_failure` one of the
-    /// supervisor's CI watch, ADR-t2928-1, or an `agent_eval_watch_due` one
-    /// of its agent watch, ADR-t2971-1), the oldest mark first, while the
-    /// runtime's planners are below the limit; the improvements' limit does
-    /// not hold them. It runs in `tend_planners` after the revises, the
-    /// answers and the planning requests' planners, before the draft
-    /// planners, so neither the drafts nor the improvements marked before
-    /// take the place of the repair of the landing branch's CI or of a step
-    /// of the watch.
-    pub(in crate::application::supervise) fn open_repair_planners(
+    /// Try one marked finding once admission has room. The store checks
+    /// eligibility and the improvement limit when opening. Return whether
+    /// it took a slot so admission can advance past a skipped candidate.
+    pub(super) fn start_marked_finding(
         &mut self,
         env: &mut PlanningEnv<'_>,
-        runtime_open: &mut usize,
-    ) -> Result<()> {
-        self.open_planners_of(env, runtime_open, false)
-    }
-
-    /// Open a planner for each improvement finding waiting for one, the
-    /// oldest mark first, while the runtime's planners are below the limit
-    /// and the improvements running below theirs (ADR-0051 decision 25).
-    /// It runs in `tend_planners` after the revises, the answers, the
-    /// planning requests' planners, the repairs' and the draft planners,
-    /// and not in a drain.
-    pub(in crate::application::supervise) fn open_finding_planners(
-        &mut self,
-        env: &mut PlanningEnv<'_>,
-        runtime_open: &mut usize,
-    ) -> Result<()> {
-        self.open_planners_of(env, runtime_open, true)
-    }
-
-    /// Open the planners of the findings waiting for one of the turn
-    /// [`planner_turns`] gives them, the improvements' or the one before
-    /// the drafts', the oldest mark first.
-    fn open_planners_of(
-        &mut self,
-        env: &mut PlanningEnv<'_>,
-        runtime_open: &mut usize,
-        improvements: bool,
-    ) -> Result<()> {
-        let turns = planner_turns(env.queue.planner_findings()?);
-        let findings = if improvements {
-            turns.improvements
-        } else {
-            turns.before_drafts
-        };
-        if findings.is_empty() {
-            return Ok(());
-        }
-        let limit = self.max_improvement_proposals();
-        for finding in findings {
-            if *runtime_open >= env.runtime_planners {
-                break;
+        finding: FindingId,
+        limit: usize,
+    ) -> Result<bool> {
+        match self.start_finding_planner(env, finding, None, limit) {
+            Ok(opened) => Ok(opened.is_some()),
+            Err(error) if error.is::<ImprovementsAtLimit>() => {
+                tracing::debug!("finding {finding}: {error}");
+                Ok(false)
             }
-            match self.start_finding_planner(env, finding.id, None, limit) {
-                Ok(Some(_)) => *runtime_open += 1,
-                Ok(None) => {}
-                Err(error) if error.is::<ImprovementsAtLimit>() => {
-                    tracing::debug!("finding {}: {error}", finding.id);
-                    break;
-                }
-                Err(error) => return Err(error),
-            }
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 
     /// `[kpi]`'s `max_improvement_proposals`, read again each time; the
     /// default when the settings do not read.
-    fn max_improvement_proposals(&self) -> usize {
+    pub(super) fn max_improvement_proposals(&self) -> usize {
         match (self.max_improvement_proposals)() {
             Ok(limit) => limit,
             Err(error) => {
@@ -266,7 +212,7 @@ impl PlanningState {
     /// finding was not taken (another supervisor took it, it moved on, or
     /// its planners are used up), or the error [`ImprovementsAtLimit`].
     /// `limit` is ignored when the planner carries `answer`.
-    fn start_finding_planner(
+    pub(super) fn start_finding_planner(
         &mut self,
         env: &mut PlanningEnv<'_>,
         finding: FindingId,

@@ -615,3 +615,50 @@ fn a_codex_wall_retries_the_failed_request_in_the_same_thread_before_queued_work
         assert!(args.contains(&std::ffi::OsStr::new("planner-thread")));
     }
 }
+
+#[test]
+fn an_idle_owner_receives_its_revise_when_it_fills_the_only_slot() {
+    let fx = fixture("planner-admission-occupied-delivery")
+        .with_continuous_passes()
+        .with_tick(Duration::from_millis(2))
+        .with_supervisor_file(std::sync::Arc::new(|| {
+            Ok(Some(crate::domain::slot_limits::SupervisorConfig {
+                runtime_planners: Some(1),
+                ..Default::default()
+            }))
+        }));
+    let mut queue = fx.queue();
+    let owner_request = request(&mut queue, "Own a revise");
+    let mut target = None;
+    let outcome = fx.supervise_once_while_stoppable(|queue, stop| {
+        if let Some((owner, _, _, due)) = target {
+            if what(queue, owner).is_empty() && fx.passes() < due {
+                return false;
+            }
+            stop();
+            return true;
+        }
+        let Some(owner) = queue
+            .planners(false)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.request_id == Some(owner_request) && row.workspace_id.is_some())
+        else {
+            return false;
+        };
+        let waiting = request(queue, "Wait outside the planner slot");
+        let proposal = revise(queue, "Send back to the owner", owner.workspace_id.clone());
+        idle(&fx, &owner, Provider::Claude, owner.created_at);
+        target = Some((owner.id, waiting, proposal, fx.passes() + 10));
+        false
+    });
+
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let (owner, waiting, proposal, _) = target.unwrap();
+    assert_eq!(what(&queue, owner), ["revise"]);
+    assert_eq!(queue.request_by_id(waiting).unwrap().planners, 0);
+    assert_eq!(fx.sessions.planner_launches(), 1);
+    let sent = payloads(&queue, EventKind::PlanReviseSent);
+    assert_eq!(sent[0]["planner_id"], json!(owner));
+    assert_eq!(sent[0]["proposal_id"], json!(proposal));
+}

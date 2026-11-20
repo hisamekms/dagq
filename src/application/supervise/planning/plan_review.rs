@@ -1120,23 +1120,10 @@ impl PlanningState {
     /// Take back a revise whose planner is gone, tell the inbox of a revise
     /// no planner answered within the timeout, deliver every revise not
     /// delivered yet, and end the runtime's planners that are done
-    /// (ADR-0041 decisions 12, 13). The findings' planners come last: after
-    /// the revises, the answers of `planner_question`s, the planners of the
-    /// planning requests and the draft planners. A draining supervisor
-    /// does not call it, so it opens no planner while it drains.
-    ///
-    /// A revise goes, in proposal ID order, to its owner planner when that
-    /// one is alive, once it is idle; else, when fewer than
-    /// `runtime_planners` of the runtime's planners are alive (apart from
-    /// the run slots; a person's planner is not counted), to a new headless
-    /// planner opened with the findings in its first prompt, its effort
-    /// raised one step; else it waits at the limit. No planner is opened
-    /// past the limit: an idle planner that waits on nothing does no work,
-    /// and kept, it would fill the limit for good, so the limit is freed by
-    /// [`Self::release_runtime_planner`] instead. A revise with no owner
-    /// waits while a `planner_question` about its tasks is not answered
-    /// (nothing is told), and the answers go with it to the new planner,
-    /// by the route the ask's answer takes. A revise not submitted again
+    /// (ADR-0041 decisions 12, 13). Deliver to idle owners independently
+    /// of slot usage and admit new planners through the shared priority
+    /// queue. A revise with no owner waits for its outstanding questions
+    /// and carries their answers when it starts. A revise not submitted again
     /// within the planner timeout, delivered or not, tells the inbox once
     /// (`planner_unresponsive`, the attention `check the planner`; no
     /// workspace is closed); an undelivered one also names the runtime's
@@ -1223,14 +1210,12 @@ impl PlanningState {
                 ReviseWatch::Nothing => {}
             }
         }
-        let mut runtime_open = views
+        let runtime_open = views
             .iter()
             .filter(|view| view.planner.origin == PlannerOrigin::Runtime && view.alive)
             .count()
             + switches.reserved_slots(&views);
-        // A revise with no planner that waited at the limit past the
-        // timeout (task 884).
-        let mut starved = None;
+        let mut unowned = Vec::new();
         for revise in env.queue.revising_proposals()? {
             if revise.sent_at.is_some() || switches.holds_proposal(revise.proposal.id()) {
                 continue;
@@ -1289,122 +1274,106 @@ impl PlanningState {
                 // Not listed, yet its session runs: it is not given up on
                 // that evidence; the timeout tells the inbox.
                 Some(view) if !self.planner_gone(env, view) => {}
-                _ if runtime_open < env.runtime_planners => {
-                    // A fix stopped at a question nobody answered yet is not
-                    // started again without the answer; the answers given
-                    // go with the revise to the same new planner
-                    // (ADR-t1704-1 decision 4).
-                    let (held, answers) = self.revise_questions(env, proposal.id())?;
-                    if held {
-                        continue;
-                    }
-                    let actor = match self.planner_route(env) {
-                        RuntimePlannerRoute::Start(actor) => actor,
-                        RuntimePlannerRoute::NoTarget(reasons) => {
-                            blocked.proposals.insert(proposal.id());
-                            include_reasons(&mut blocked, reasons);
-                            continue;
-                        }
-                    };
-                    if !env.queue.claim_revise(proposal.id())? {
-                        continue;
-                    }
-                    // What each planner that stopped at one of them left,
-                    // once per planner (ADR-t1704-1 decision 3).
-                    let mut found = Vec::new();
-                    for ask in &answers {
-                        found.extend(env.queue.planner_handover(ask.id)?);
-                    }
-                    let handovers = once_per_planner(found);
-                    let carried = Carried {
-                        answers: &answers,
-                        handovers: &handovers,
-                        replacement: None,
-                    };
-                    let opened = match self.open_planner_for(
-                        env,
-                        actor,
-                        proposal,
-                        &revise.reasons,
-                        carried,
-                        None,
-                    ) {
-                        Ok(opened) => opened,
-                        Err(error) => {
-                            env.queue.revise_lost(
-                                proposal.id(),
-                                None,
-                                "the planner could not be opened",
-                            )?;
-                            return Err(error);
-                        }
-                    };
-                    runtime_open += 1;
-                    let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
-                    info!(
-                        "proposal {}: opened planner {} in workspace {workspace} for its revise",
-                        proposal.id(),
-                        opened.planner.id
-                    );
-                    // The answers it carries are closed with the revise's
-                    // record, so neither is left without the other
-                    // (ADR-t1704-1 decision 2).
-                    let delivered: Vec<AskId> = answers.iter().map(|ask| ask.id).collect();
-                    env.queue.revise_sent(
-                        proposal.id(),
-                        opened.planner.id,
-                        &workspace,
-                        Some(&opened.launch),
-                        &delivered,
-                    )?;
-                    for ask in &answers {
-                        info!(ask_id = %ask.id, "answer of ask {} went with the revise of proposal {} to planner {}", ask.id, proposal.id(), opened.planner.id);
-                    }
-                    views = self.planner_views(env)?;
-                }
-                // At the limit: the revise waits for a runtime planner to
-                // end, and past the timeout frees a place (task 884).
                 _ => {
-                    if starved.is_none()
-                        && planner_wait_start(
-                            revise.revised_at,
-                            env.queue.revise_goal_wait(proposal.id())?,
-                        )
-                        .is_some_and(|at| now - at > timeout)
-                        && self.planner_launch(env).is_some()
-                    {
-                        starved = Some(proposal.id());
-                    }
+                    let since = planner_wait_start(
+                        revise.revised_at,
+                        env.queue.revise_goal_wait(proposal.id())?,
+                    );
+                    unowned.push((revise, since));
                 }
             }
         }
-        // Then the drafts the runtime or a job registered (ADR-0041
-        // decision 16), within the same limit.
-        self.deliver_planner_answers(env, &views, &mut runtime_open, &mut blocked)?;
-        // The planning requests a person made through the inbox
-        // (ADR-t1394-1) come before the runtime's own drafts and findings:
-        // a person waits on them.
-        self.open_request_planners(env, &mut runtime_open, &mut blocked)?;
-        // Then, once the findings whose proposal ended are settled, the
-        // findings of the supervisor's that are no improvement — the
-        // repairs of the landing branch's CI (ADR-t2928-1) and the agent
-        // watch's steps (ADR-t2971-1) — before the drafts and the
-        // improvements, within the same limit.
+        let answers = self.deliver_planner_answers(env, &views)?;
+        self.settle_planning_requests(env)?;
         self.settle_findings(env)?;
-        self.open_repair_planners(env, &mut runtime_open)?;
-        self.open_draft_planners(env, &mut runtime_open)?;
-        // Then the improvements marked for a proposal (ADR-0044 decision
-        // 19), within the same limit.
-        self.open_finding_planners(env, &mut runtime_open)?;
+        let (opened_revise, starved) = self.admit_planners(
+            env,
+            runtime_open,
+            unowned,
+            answers,
+            now - timeout,
+            &mut blocked,
+        )?;
+        if opened_revise {
+            views = self.planner_views(env)?;
+        }
         self.tell_of_stopped_planner_turns(env, &views)?;
         views.retain(|view| {
             !switches.holds_recipient(view.planner.id) && !switches.holds_source(view.planner.id)
         });
         self.end_runtime_planners(env, &views)?;
-        if let Some(proposal) = starved {
+        if let Some(proposal) = starved
+            && self.planner_launch(env).is_some()
+        {
             self.release_runtime_planner(env, proposal, timeout, &views)?;
         }
         record_start_wait(env, blocked)
+    }
+
+    pub(super) fn start_unowned_revise(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        revise: &RevisingProposal,
+        blocked: &mut PlannerStartBlocked,
+    ) -> Result<bool> {
+        let proposal = &revise.proposal;
+        let (held, answers) = self.revise_questions(env, proposal.id())?;
+        if held {
+            return Ok(false);
+        }
+        let actor = match self.planner_route(env) {
+            RuntimePlannerRoute::Start(actor) => actor,
+            RuntimePlannerRoute::NoTarget(reasons) => {
+                blocked.proposals.insert(proposal.id());
+                include_reasons(blocked, reasons);
+                return Ok(false);
+            }
+        };
+        if !env.queue.claim_revise(proposal.id())? {
+            return Ok(false);
+        }
+        // Each planner that stopped at a question hands over once.
+        let mut found = Vec::new();
+        for ask in &answers {
+            found.extend(env.queue.planner_handover(ask.id)?);
+        }
+        let handovers = once_per_planner(found);
+        let carried = Carried {
+            answers: &answers,
+            handovers: &handovers,
+            replacement: None,
+        };
+        let opened =
+            match self.open_planner_for(env, actor, proposal, &revise.reasons, carried, None) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    env.queue.revise_lost(
+                        proposal.id(),
+                        None,
+                        "the planner could not be opened",
+                    )?;
+                    return Err(error);
+                }
+            };
+        let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
+        info!(
+            "proposal {}: opened planner {} in workspace {workspace} for its revise",
+            proposal.id(),
+            opened.planner.id
+        );
+        // Close the carried answers atomically with the delivery record.
+        let delivered: Vec<AskId> = answers.iter().map(|ask| ask.id).collect();
+        env.queue.revise_sent(
+            proposal.id(),
+            opened.planner.id,
+            &workspace,
+            Some(&opened.launch),
+            &delivered,
+        )?;
+        for ask in &answers {
+            info!(ask_id = %ask.id, "answer of ask {} went with the revise of proposal {} to planner {}", ask.id, proposal.id(), opened.planner.id);
+        }
+        Ok(true)
     }
 
     /// The runtime's planners alive, each with why it is not ended
@@ -1461,6 +1430,8 @@ impl PlanningState {
         timeout: i64,
         views: &[PlannerView],
     ) -> Result<()> {
+        // This recovery is based on an overdue revise and the holder's
+        // inactivity. Admission priority only orders work for a free slot.
         let now = env.generators.clock.now();
         let runtime = |view: &&PlannerView| view.planner.origin == PlannerOrigin::Runtime;
         if views.iter().filter(runtime).any(|view| {

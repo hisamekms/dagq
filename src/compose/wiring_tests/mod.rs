@@ -36,6 +36,7 @@ mod landing_binding;
 mod landing_incremental;
 mod main_log;
 mod pass_reads;
+mod planner_admission;
 mod previous_run_decisions;
 mod provider_trial;
 mod replan_planning;

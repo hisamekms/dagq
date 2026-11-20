@@ -35,10 +35,10 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    (b) 人がaskに`propose`と答えると、`answer`の同じトランザクションでruntimeが付ける（下の5）。
    印は`open`のfindingにだけ付き、`proposed`のfindingには付かない。
 2. **対象**（`planner_findings`）: statusが`open`で印があり、閉じていないruntimeのplannerが無く、closeされていない`planner_question`が無く、今の印の後に立てたplannerを使い切っていないfinding。
-3. **立てる**（`open_finding_planners`）: runtimeが立てたplannerで生きているものが上限`runtime_planners`（[Run environment](run-environment.md)の`[supervisor]`。revise・draft・計画の依頼（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）のplannerと共有、run slotとは別、人が開いたplannerは数えない）未満のあいだ、`open_finding_planner`で立てる。
-   storeは`BEGIN IMMEDIATE`で対象の条件を再検査してから`planners`の行と`finding_planner_opened`を書くので、2つのsupervisorや同じsupervisorの2つのpassが同じfindingに立てない。
-   同じトランザクションで改善の数を数え、上限に達していれば何も書かずに`FindingPlannerStart::AtLimit`を返し、そのpassでは後の改善のfindingにも立てない（下の11）。
-   改善でないfinding（`finding::counts_as_improvement`が偽: supervisorのCIの見張りが記録した`ci_failure`と、agentの見張りが記録した`agent_eval_watch_due`）は上限を見ず、draftのplannerより前に`open_repair_planners`で立つ（下の「CIの見張りの`ci_failure`のfinding」、見張りの手順は[ADR-t2971-1](../../adr/2026-10-22-t2971-1-the-agent-watchs-step-findings-are-outside-the-improvement-limit.md)）。
+3. **立てる**: findingの起動は`start_marked_finding`が[共有の枠](plan-planners.md#runtimeのplannerの経路)を使う。
+   同じfindingを同時に担当するplannerは1つまで。
+   改善の上限に達したら新たな改善のplannerは待つ（下の11）。
+   supervisorが記録したCIの修理とagentの見張りの手順のfindingには改善の上限を適用しない。
    見張りの手順のplannerはproposalを出さないので上限の目的に当たらず、`agent_eval_below_threshold`と記録者がsupervisorでない`agent_eval_watch_due`の行は改善として待つ。
    eventはfindingの対象（runならrunとtask、task、goal、queueなら何にも付かないqueueのevent）に付く。
    plannerはworkspaceを持たず、非対話のwrapperがbackgroundで起動する（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
@@ -74,9 +74,10 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    人の言葉を受けたinboxがそのfindingを参照にした計画の依頼（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定8）を記録し、依頼のruntimeのplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）が決めるか、人が`DAGQ_ROLE`の無い自分のterminalで`submit --finding`するか`finding dismiss`する。
 9. **planner_question**: `planner_question`はfindingを持てる（taskもrunも無くてよい）。
    answerの行き先（`planner_answer_route`）はfindingで決める。
-   runtimeのplannerが一度も立っていないfindingなら人（runtimeのplanner以外の質問）。
+   runtimeのplannerが一度も立っていないfindingのanswerは人が扱う（runtimeのplanner以外の質問）。
    閉じていないそのfindingのruntimeのplannerがあれば、answerはそのplannerに届く。
-   無ければ、findingがまだ対象（`open`、印あり、使い切っていない）なら上限の中で新しいplannerがanswerを持って立ち、そうでなければsupervisorが`planner_answer_closed`で閉じる。
+   無ければ、findingがまだ対象（`open`、印あり、回数切れの記録なし）ならanswerを運ぶ新しいplannerの起動が[共有の列](plan-planners.md#runtimeのplannerの経路)に入り、そうでなければsupervisorが`planner_answer_closed`で閉じる。
+   answerを運ぶ起動は、改善の上限や決めずに終わった回数の上限を越えられる。
    配送の入口は`PlanningState::deliver_finding_answer`で、配送に失敗してもanswerを失わない。
    配送のeventはfindingの対象に付き、queueが対象のfindingではqueueのeventになる（`EventKind::is_queue`）。
 10. **終わり**: runtimeのplannerは、自分のfindingの`planner_question`のanswerを届ける前と、送ったanswerをまだ読み終えていないあいだ（turnで配送したものも、依頼の記録が無いもの・初期promptで運んだものも。判じ方は[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）は終了の依頼を受けない。
@@ -129,9 +130,8 @@ findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればp
 `[ci_watch]`で有効にしたrepositoryでは、supervisorが着地先のbranchのCIの赤から`ci_failure`のfindingを印付きで記録し（observerでなくruntimeの書き込み）、上の1〜10の経路でplannerが立つ。
 このfindingは着地先のbranchの修理で改善ではなく（[ADR-t2928-1](../../adr/2026-10-20-t2928-1-only-the-ci-watchs-ci-failure-findings-are-repairs-outside-the-improvement-limit.md)）、11の上限に数えず待たせない。
 修理として扱うのは`kind`が`ci_failure`で`recorded_by`が`supervisor`のfindingだけで（`finding::counts_as_improvement`）、それ以外の`ci_failure`の行は改善として数え上限で待つ。
-`finding record`はどの役割でも`ci_failure`とagentの見張りの2つの種類を拒むので（`finding::check_recordable_kind`）、observerや人はこれらのkindを名乗って上限と順番を飛ばせない。
-`tend_planners`は計画の依頼のplannerの後、draftと改善のfindingのplannerより前に、このfindingのplannerを印の古い順に`runtime_planners`の枠の中で立てるので、印の古い改善のfindingやdraftに枠を先に取られ続けない。
-優先度（6のgoalから継ぐ形）は変えない。
+`finding record`はどの役割でも`ci_failure`とagentの見張りの2つの種類を拒むので（`finding::check_recordable_kind`）、observerや人はこれらのkindを名乗って改善の上限を飛ばせない。
+CIの修理は着地を待つrunの効く優先度の最大で新規起動の列に入る。
 `finding_planner_prompt`は`ci_failure`のときに節を足し、findingの`detail`の各項を修正taskの説明に写すこと、同じtestを直す閉じていないtaskを探して、あればtaskを足さずにfindingをそのtaskが覆うものとして`finding dismiss`すること、修正taskに改善の規則どおり優先度を付けないこと（6）を指示する。
 findingの項目が全部CIで通れば、そのfindingが`open`で閉じていないplannerが無いときに限りsupervisorが`resolved`にする。
 findingの欄と鍵は[CI watch](ci-watch.md)の「finding（修正taskの材料）」。
@@ -140,7 +140,7 @@ findingの欄と鍵は[CI watch](ci-watch.md)の「finding（修正taskの材料
 
 [ADR-t3807-1](../../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)。
 `[ci_watch]`が宣言した定時のworkflowの実行が着地先のbranchで落ちると、supervisorがworkflowごとに1つの`ci_scheduled_failure`のfindingを印付きで記録し、上の1〜10の経路でplannerが立つ。
-このfindingは着地先のbranchの壊れではないので改善として数え（`finding::counts_as_improvement`）、11の上限の中で印の古い順に待つ。
+このfindingは着地先のbranchの壊れではないので改善として数え（`finding::counts_as_improvement`）、11の上限に達していれば待つ。
 `finding record`はこの種類も拒み（`finding::check_recordable_kind`）、記録するのは見張りだけである。
 `finding_planner_prompt`はこの種類に節を足さず、findingの`detail`（落ちたjobとstep・実行のURL）がふだんの手順の材料になる。
 既に落ちているtestの一覧の項目にはならず、修正taskのrunの一覧（`ci_failure_findings_of`）にも入らない。

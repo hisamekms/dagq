@@ -157,6 +157,8 @@ impl<E: TransactionEntries> StoreQueue<E> {
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
                 ask.finding_id == Some(finding)
+                    && ask.answer.is_some()
+                    && ask.closed_at.is_none()
                     && route_of(&tx, finding)? == PlannerAnswerRoute::NewPlanner
                     && !SqlRead::query_row(
                         &tx,
