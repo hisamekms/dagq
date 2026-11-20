@@ -1,0 +1,268 @@
+# Measured seconds under native debug stress load: --test-threads 6,
+# --stress-duration 60s (one complete iteration; a pass may exceed the duration).
+# The small checks retain every query start and negative control.
+# Volume checks retain the 30/300 comparisons beside those small checks.
+
+# 1.939 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, the today read is a positive control: earlier and queue reads grow with history, while range rows and whole-ledger answers agree at the existing query start. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 6.107 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history"
+reason = "goal 297 の量の層: the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 2.319 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::every_part_narrowed_returns_as_many_records_whatever_the_settled_history"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, all earlier-record parts preserve whole-ledger KPI answers for every existing query start; earlier records, range rows and executions stay equal across history sizes. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 17.450 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::every_part_narrowed_returns_as_many_records_whatever_the_settled_history"
+reason = "goal 297 の量の層: every_part_narrowed_returns_as_many_records_whatever_the_settled_history の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 0.202 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, the range candidates and owner lookups stay equal across history sizes. Saved-owner, lagging-event and running-row visibility agrees with the whole read at the existing two-day start. 固定の case と全件の答えの比較を省かないため、負荷の下では application の 200 ms を超える。"
+task = 5026
+
+# 3.694 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees"
+reason = "goal 297 の量の層: the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 0.288 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for the existing two-day since boundary, full stats answers match the whole read and returned row counts stay equal across history sizes. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 1.677 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier"
+reason = "goal 297 の量の層: stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 23.238 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, each queue kind preserves all KPI query starts and whole-ledger answers; its returned queue row count stays equal across history sizes. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 38.328 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses"
+reason = "goal 297 の量の層: each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 2.000 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, across all KPI query starts, the combined range, earlier, execution, queue and visible-event reads stay equal across history sizes and answers match the whole read. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 13.798 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history"
+reason = "goal 297 の量の層: the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 1.517 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, at the two-day range start, running rows, separate W/R marks and rows written past them preserve whole-read visibility. Lookups and total small reads stay equal as whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 3.582 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them"
+reason = "goal 297 の量の層: a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 1.049 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, at the two-day range start, R spares task owners but retains run-owner checks. Both reads preserve whole-read visibility; spared lookups stay equal as whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 5.434 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows"
+reason = "goal 297 の量の層: r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 4.781 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for the existing since/until boundaries, event and visible-event bounds preserve whole-read stats and tokens with equal reads across settled history sizes. The K-search fallback and clock rollback remain covered with 300 events after E. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 20.016 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts"
+reason = "goal 297 の量の層: u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 9.498 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, at every existing KPI and stats query start, paired old/duplicate session closes preserve whole-read answers and equal earlier reads as whole reads grow. Counting closes still exposes the missing open sessions. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 24.311 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it"
+reason = "goal 297 の量の層: a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 11.462 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, at every existing KPI and stats query start, planner key prefixes and ask actors preserve whole-read answers and equal earlier reads as whole reads grow. Omitting actor lookups still exposes the route mismatch. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 26.511 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names"
+reason = "goal 297 の量の層: a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 11.411 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, increasing a named member task's own priority history keeps end-only earlier reads equal and whole-read answers intact at every existing query start. Whole-record reads grow as a positive control. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 10.857 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history"
+reason = "goal 297 の量の層: a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 13.419 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, at every existing query start, goal-submitted membership preserves whole-read proposal answers and equal earlier reads as whole reads grow. Omitting goal membership still exposes the proposal mismatch. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 31.661 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it"
+reason = "goal 297 の量の層: a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 6.113 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::every_shape_returns_as_many_records_whatever_the_settled_history"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, all earlier-record shapes together preserve whole-ledger KPI and stats answers at every existing query start; earlier reads stay equal as whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 21.432 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::every_shape_returns_as_many_records_whatever_the_settled_history"
+reason = "goal 297 の量の層: every_shape_returns_as_many_records_whatever_the_settled_history の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 9.981 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for every existing KPI and stats query start, the old snapshot retains its documented marks-between misses and growing reads; the old queue read still misses answers. The near-snapshot companion checks history-independent reads. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 43.185 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row"
+reason = "goal 297 の量の層: the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 11.542 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::a_snapshot_after_the_settled_history_reads_its_marks_by_the_range"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, after the settled history, the snapshot reads marks by range: all KPI and stats query starts preserve whole-read answers and equal queue reads across history sizes, while whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 33.543 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::a_snapshot_after_the_settled_history_reads_its_marks_by_the_range"
+reason = "goal 297 の量の層: a_snapshot_after_the_settled_history_reads_its_marks_by_the_range の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 9.554 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_candidates_sampled_read_by_their_range_answer_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for candidates sampled, every existing KPI and stats query start preserves whole-read answers and equal queue reads across history sizes, while whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 49.338 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_candidates_sampled_read_by_their_range_answer_as_every_row"
+reason = "goal 297 の量の層: the_candidates_sampled_read_by_their_range_answer_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 9.893 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::main_s_record_read_from_a_summary_answers_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for main summaries and named commits, every existing query start preserves whole-read answers and equal queue reads across history sizes, while whole reads grow; the old read still misses answers. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 41.432 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::main_s_record_read_from_a_summary_answers_as_every_row"
+reason = "goal 297 の量の層: main_s_record_read_from_a_summary_answers_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 10.613 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::what_befell_a_landing_read_by_the_range_answers_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for landings, every existing query start preserves whole-read answers and equal queue reads across history sizes, while whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 36.251 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::what_befell_a_landing_read_by_the_range_answers_as_every_row"
+reason = "goal 297 の量の層: what_befell_a_landing_read_by_the_range_answers_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 9.732 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for goals of range tasks, every existing query start preserves whole-read answers and equal queue reads across history sizes, while whole reads grow; the old read still misses answers. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 43.639 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row"
+reason = "goal 297 の量の層: the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 9.495 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, for updates, failures and asks without runs, every existing query start preserves whole-read answers and equal queue reads across history sizes, while whole reads grow. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 41.874 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row"
+reason = "goal 297 の量の層: the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026
+
+# 8.478 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row"
+reason = "goal 297: 10・20 単位に縮めた後も、With 10 and 20 units outside the range, all queue parts together preserve whole-read answers at every existing query start and equal queue reads across history sizes, while whole reads grow. The configurable answer size retains the original answer-check condition. 固定の case と全件の答えの比較を省かないため application の 200 ms を超える。"
+task = 5026
+
+# 24.422 s
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::volume::every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row"
+reason = "goal 297 の量の層: every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row の 10・20 単位版を unit に残し、同じ query start・全件の答え・読む量の比較を 30・300 単位でも保つ。Spike の fixed fixture と KPI/stats の全比較を省かない。"
+task = 5026

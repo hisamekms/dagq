@@ -8,8 +8,8 @@
 //! narrowed read below stands where
 //! [`crate::domain::ledger::window::select_from_time`] gathers the earlier
 //! records, and each test compares the answers with those of every row and
-//! counts what the read returns with 30 and 300 settled units outside
-//! the range.
+//! counts what the read returns with 10 and 20 settled units outside
+//! the range. The volume layer retains the 30/300-unit comparisons.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -938,11 +938,23 @@ fn kpi_misses(rows: &[LedgerRow], parts: &[Part]) -> Vec<String> {
     misses
 }
 
+/// With 10 and 20 units outside the range, the today read is a positive control: earlier
+/// and queue reads grow with history, while range rows and whole-ledger answers agree at
+/// the existing query start.
 #[test]
 fn the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history() {
+    check_the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history(
+        10, 20,
+    );
+}
+
+fn check_the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history(
+    small_units: usize,
+    large_units: usize,
+) {
     let query = time_query(&kpi_questions()[0]);
-    let small = rows_of(&history(30));
-    let large = rows_of(&history(300));
+    let small = rows_of(&history(small_units));
+    let large = rows_of(&history(large_units));
     // The read of today gives the answers of every row, ...
     assert_eq!(kpi_misses(&small, &[]), Vec::<String>::new());
     let whole = select(small.clone(), &whole_query());
@@ -961,17 +973,14 @@ fn the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settl
     // units: (i) and (ii) of the description.
     let (_, small_reads) = narrowed(&small, &query, &[]);
     let (_, large_reads) = narrowed(&large, &query, &[]);
-    eprintln!("today: 30 units {small_reads:?}, 300 units {large_reads:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(earlier_today(&large, &query) >= earlier_today(&small, &query) + 270);
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(large_reads.queue >= small_reads.queue + 270);
+    eprintln!("today: {small_units} units {small_reads:?}, {large_units} units {large_reads:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        earlier_today(&large, &query)
+            >= earlier_today(&small, &query) + (large_units - small_units)
+    );
+    // The whole read grows by at least one row per added settled unit.
+    assert!(large_reads.queue >= small_reads.queue + (large_units - small_units));
     assert_eq!(small_reads.rows, large_reads.rows);
 }
 
@@ -991,15 +1000,25 @@ fn each_part_narrowed_alone_keeps_the_answers_of_every_row_or_names_what_it_miss
     assert_eq!(missing, Vec::<&String>::new(), "{report:#?}");
 }
 
+/// With 10 and 20 units outside the range, all earlier-record parts preserve whole-ledger
+/// KPI answers for every existing query start; earlier records, range rows and executions
+/// stay equal across history sizes.
 #[test]
 fn every_part_narrowed_returns_as_many_records_whatever_the_settled_history() {
+    check_every_part_narrowed_returns_as_many_records_whatever_the_settled_history(10, 20);
+}
+
+fn check_every_part_narrowed_returns_as_many_records_whatever_the_settled_history(
+    small_units: usize,
+    large_units: usize,
+) {
     let query = time_query(&kpi_questions()[0]);
-    let small = rows_of(&history(30));
-    let large = rows_of(&history(300));
+    let small = rows_of(&history(small_units));
+    let large = rows_of(&history(large_units));
     assert_eq!(kpi_misses(&large, &PARTS), Vec::<String>::new());
     let (_, small_reads) = narrowed(&small, &query, &PARTS);
     let (_, large_reads) = narrowed(&large, &query, &PARTS);
-    eprintln!("narrowed: 30 units {small_reads:?}, 300 units {large_reads:?}");
+    eprintln!("narrowed: {small_units} units {small_reads:?}, {large_units} units {large_reads:?}");
     assert_eq!(small_reads.earlier, large_reads.earlier);
     assert_eq!(small_reads.rows, large_reads.rows);
     assert_eq!(small_reads.executions, large_reads.executions);
@@ -1143,9 +1162,20 @@ fn store_cases(log: &Log) -> (Vec<LedgerRow>, Vec<RunEvent>, Vec<EventId>, Event
     (rows, events, lagging, mark)
 }
 
+/// With 10 and 20 units outside the range, the range candidates and owner lookups stay
+/// equal across history sizes. Saved-owner, lagging-event and running-row visibility agrees
+/// with the whole read at the existing two-day start.
 #[test]
 fn the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees() {
-    for settled in [30, 300] {
+    check_the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees(10, 20);
+}
+
+fn check_the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees(
+    small_units: usize,
+    large_units: usize,
+) {
+    let mut counts = Vec::new();
+    for settled in [small_units, large_units] {
         let log = history(settled);
         let (rows, events, lagging, mark) = store_cases(&log);
         let whole = visible(&rows, &events);
@@ -1175,7 +1205,9 @@ fn the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_wh
             lagging.len()
         );
         assert_eq!(small, expected);
+        counts.push((range.len(), looked));
     }
+    assert_eq!(counts[0], counts[1]);
 }
 
 #[test]
@@ -1207,8 +1239,18 @@ fn a_cursors_time_of_every_event_runs_past_that_of_the_visible_ones() {
     eprintln!("cursor {cursor:?}: all {of_all}, visible {of_seen}");
 }
 
+/// With 10 and 20 units outside the range, for the existing two-day since boundary, full
+/// stats answers match the whole read and returned row counts stay equal across history
+/// sizes.
 #[test]
 fn stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier() {
+    check_stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier(10, 20);
+}
+
+fn check_stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier(
+    small_units: usize,
+    large_units: usize,
+) {
     let sources = StatsSources {
         config_file: &|| Ok(None),
         conflicts_file: &|| Ok(None),
@@ -1223,7 +1265,8 @@ fn stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier() {
         full: true,
         ..StatsQuery::default()
     };
-    for settled in [30, 300] {
+    let mut counts = Vec::new();
+    for settled in [small_units, large_units] {
         let rows = rows_of(&history(settled));
         let base = WindowQuery {
             since: Some(since),
@@ -1249,7 +1292,9 @@ fn stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier() {
         differences(&got, &expected, "stats", &mut out);
         eprintln!("stats {settled}: {reads:?} {out:#?}");
         assert_eq!(out, Vec::<String>::new());
+        counts.push(reads);
     }
+    assert_eq!(counts[0], counts[1]);
 }
 
 // (ii) queue rows.
@@ -1321,10 +1366,21 @@ fn queue_narrowed(rows: &[LedgerRow], from_ms: i64, kinds: &BTreeSet<String>) ->
         .collect()
 }
 
+/// With 10 and 20 units outside the range, each queue kind preserves all KPI query starts
+/// and whole-ledger answers; its returned queue row count stays equal across history sizes.
 #[test]
 fn each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses() {
-    let small = rows_of(&history(30));
-    let large = rows_of(&history(300));
+    check_each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses(
+        10, 20,
+    );
+}
+
+fn check_each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses(
+    small_units: usize,
+    large_units: usize,
+) {
+    let small = rows_of(&history(small_units));
+    let large = rows_of(&history(large_units));
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
     let kinds: BTreeSet<String> = small
         .iter()
@@ -1415,11 +1471,21 @@ fn kpi_misses_against(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, R
     (wrong, reads)
 }
 
+/// With 10 and 20 units outside the range, across all KPI query starts, the combined range,
+/// earlier, execution, queue and visible-event reads stay equal across history sizes and
+/// answers match the whole read.
 #[test]
 fn the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history() {
+    check_the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history(10, 20);
+}
+
+fn check_the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history(
+    small_units: usize,
+    large_units: usize,
+) {
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
     let mut totals = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let rows = rows_of(&history(settled));
         let kinds: BTreeSet<String> = rows
             .iter()
@@ -1830,10 +1896,20 @@ fn of_the_range(events: &[RunEvent]) -> Vec<RunEvent> {
         .collect()
 }
 
+/// With 10 and 20 units outside the range, at the two-day range start, running rows,
+/// separate W/R marks and rows written past them preserve whole-read visibility. Lookups
+/// and total small reads stay equal as whole reads grow.
 #[test]
 fn a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them() {
+    check_a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them(10, 20);
+}
+
+fn check_a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them(
+    small_units: usize,
+    large_units: usize,
+) {
     let mut looks = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let (rows, events, marks, running) = store_apart(settled);
         assert_eq!(runs_on_their_way(&rows), vec![running.clone()]);
         let whole = visible(&rows, &events);
@@ -1919,18 +1995,28 @@ fn a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_th
     }
     assert_eq!(looks[0].0, looks[1].0);
     assert_eq!(looks[0].1, looks[1].1);
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(looks[1].2 >= looks[0].2 + 270, "{looks:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        looks[1].2 >= looks[0].2 + (large_units - small_units),
+        "{looks:?}"
+    );
     assert!(looks[0].1 < looks[0].2, "{looks:?}");
 }
 
+/// With 10 and 20 units outside the range, at the two-day range start, R spares task owners
+/// but retains run-owner checks. Both reads preserve whole-read visibility; spared lookups
+/// stay equal as whole reads grow.
 #[test]
 fn r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows() {
+    check_r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows(10, 20);
+}
+
+fn check_r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows(
+    small_units: usize,
+    large_units: usize,
+) {
     let mut looks = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let (rows, events, marks, _) = store_apart(settled);
         let whole = visible(&rows, &events);
         let range = of_the_range(&events);
@@ -1956,14 +2042,14 @@ fn r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows() {
     }
     assert_eq!(looks[0].0, looks[1].0);
     assert_eq!(looks[0].1, looks[1].1);
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(looks[1].2 >= looks[0].2 + 270, "{looks:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        looks[1].2 >= looks[0].2 + (large_units - small_units),
+        "{looks:?}"
+    );
     // A run's event at or before R is not spared: run 12's task ended and
     // its row was not written, so the whole read sees none of its events.
-    let (rows, events, marks, _) = store_apart(30);
+    let (rows, events, marks, _) = store_apart(small_units);
     let whole = visible(&rows, &events);
     let unseen = events
         .iter()
@@ -2129,8 +2215,19 @@ fn read_past_the_end(rows: &[LedgerRow], bound: Option<EventId>, end: i64, upto:
         .count()
 }
 
+/// With 10 and 20 units outside the range, for the existing since/until boundaries, event
+/// and visible-event bounds preserve whole-read stats and tokens with equal reads across
+/// settled history sizes. The K-search fallback and clock rollback remain covered with 300
+/// events after E.
 #[test]
 fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts() {
+    check_u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts(10, 20);
+}
+
+fn check_u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts(
+    small_units: usize,
+    large_units: usize,
+) {
     let sources = StatsSources {
         config_file: &|| Ok(None),
         conflicts_file: &|| Ok(None),
@@ -2170,13 +2267,13 @@ fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_wh
     };
     let mut two = BTreeMap::new();
     let mut searched = BTreeMap::new();
-    // The settled history before S (30, 300 units) and the history after
+    // The two settled history sizes before S and the history after
     // E (30, 300 events), a clock turned back after the long one.
     for (settled, after, late) in [
-        (30, 30, false),
-        (300, 30, false),
-        (30, 300, false),
-        (30, 300, true),
+        (small_units, 30, false),
+        (large_units, 30, false),
+        (small_units, 300, false),
+        (small_units, 300, true),
     ] {
         let (rows, events) = store_after(settled, after, end, late);
         let whole = visible(&rows, &events);
@@ -2253,24 +2350,27 @@ fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_wh
     eprintln!("(found, walked, reads, rows past the end read, of the whole read): {searched:#?}");
     // Before S the history does not count, for either bound and for K.
     for name in ["every", "visible"] {
-        assert_eq!(two[&(30, name)], two[&(300, name)]);
+        assert_eq!(two[&(small_units, name)], two[&(large_units, name)]);
     }
-    assert_eq!(two[&(30, "every")], two[&(30, "visible")]);
-    assert_eq!(searched[&(30, 30, false)], searched[&(300, 30, false)]);
-    let near = searched[&(30, 30, false)];
+    assert_eq!(two[&(small_units, "every")], two[&(small_units, "visible")]);
+    assert_eq!(
+        searched[&(small_units, 30, false)],
+        searched[&(large_units, 30, false)]
+    );
+    let near = searched[&(small_units, 30, false)];
     assert!(near.0 && near.3 < near.4, "{near:?}");
     // After E it does: past K the search gives up and the read takes every
     // row past the end, as the whole read does (4670 (vi)'s fallback); a
     // clock turned back gives a bound past them all.
-    let long = searched[&(30, 300, false)];
+    let long = searched[&(small_units, 300, false)];
     assert!(!long.0 && long.1 == K && long.3 == long.4 && long.4 > 300);
-    let late = searched[&(30, 300, true)];
+    let late = searched[&(small_units, 300, true)];
     assert!(late.0 && late.1 == 1 && late.3 == late.4);
     // By the first input alone, a bound below a row of the window (task
     // 70's, started in it) changes the answer: `select` itself drops only
     // rows starting past the end. Kept by the times of its records, that row
     // stays and the answer holds.
-    let (rows, events, _, _) = store_apart(30);
+    let (rows, events, _, _) = store_apart(small_units);
     let started = rows
         .iter()
         .find(|row| row.kind == LedgerKind::Task && row.key == "70")
@@ -2483,11 +2583,23 @@ fn fix_old_closes(log: &mut Log) {
     }
 }
 
+/// With 10 and 20 units outside the range, at every existing KPI and stats query start,
+/// paired old/duplicate session closes preserve whole-read answers and equal earlier reads
+/// as whole reads grow. Counting closes still exposes the missing open sessions.
 #[test]
 fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it() {
+    check_a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it(
+        10, 20,
+    );
+}
+
+fn check_a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it(
+    small_units: usize,
+    large_units: usize,
+) {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let rows = rows_of(&history_with(settled, add_old_closes, fix_old_closes));
         let of = |n: u8| {
             rows.iter()
@@ -2506,7 +2618,7 @@ fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_
         let (paired_misses, paired_reads) = shape_misses(&rows, SHAPED);
         eprintln!("{settled}: paired {paired_reads:?} {paired_misses:?}");
         assert_eq!(paired_misses, Vec::<String>::new());
-        if settled == 30 {
+        if settled == small_units {
             let (counted_misses, counted_reads) = shape_misses(&rows, counted);
             eprintln!("{settled}: counted {counted_reads:?} {counted_misses:?}");
             assert!(
@@ -2518,16 +2630,16 @@ fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_
         reads.push(paired_reads);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].0.earlier >= fulls[0].0.earlier + (large_units - small_units),
+        "{fulls:?}"
+    );
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].1.rows >= fulls[0].1.rows + (large_units - small_units),
+        "{fulls:?}"
+    );
 }
 
 /// (i-a): planner 70's session (headless) opened and closed long before
@@ -2564,11 +2676,21 @@ fn add_planner_question(log: &mut Log) {
     }
 }
 
+/// With 10 and 20 units outside the range, at every existing KPI and stats query start,
+/// planner key prefixes and ask actors preserve whole-read answers and equal earlier reads
+/// as whole reads grow. Omitting actor lookups still exposes the route mismatch.
 #[test]
 fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names() {
+    check_a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names(10, 20);
+}
+
+fn check_a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names(
+    small_units: usize,
+    large_units: usize,
+) {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let rows = rows_of(&history_with(settled, add_planner_question, |_| {}));
         let prefix_alone = Shape {
             actor_planners: false,
@@ -2577,7 +2699,7 @@ fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_a
         let (shaped, shaped_reads) = shape_misses(&rows, SHAPED);
         eprintln!("{settled}: prefix and actors {shaped_reads:?} {shaped:?}");
         assert_eq!(shaped, Vec::<String>::new());
-        if settled == 30 {
+        if settled == small_units {
             // Without the actor no read names planner 70: its route is
             // `unknown` instead of `headless`.
             for shape in [OF_4678, prefix_alone] {
@@ -2593,16 +2715,16 @@ fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_a
         reads.push(shaped_reads);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].0.earlier >= fulls[0].0.earlier + (large_units - small_units),
+        "{fulls:?}"
+    );
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].1.rows >= fulls[0].1.rows + (large_units - small_units),
+        "{fulls:?}"
+    );
 }
 
 /// (i-b): `count` priority changes of task 66 (of proposal 8, completed
@@ -2621,8 +2743,18 @@ fn add_priorities(count: usize) -> impl FnOnce(&mut Log) {
     }
 }
 
+/// With 10 and 20 units outside the range, increasing a named member task's own priority
+/// history keeps end-only earlier reads equal and whole-read answers intact at every
+/// existing query start. Whole-record reads grow as a positive control.
 #[test]
 fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history() {
+    check_a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history(10, 20);
+}
+
+fn check_a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history(
+    small_units: usize,
+    large_units: usize,
+) {
     let whole_records = Shape {
         member_ends: false,
         ..SHAPED
@@ -2630,8 +2762,8 @@ fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_histo
     let mut ends = Vec::new();
     let mut fulls = Vec::new();
     let mut records = Vec::new();
-    for count in [30, 300] {
-        let rows = rows_of(&history_with(30, add_priorities(count), |_| {}));
+    for count in [small_units, large_units] {
+        let rows = rows_of(&history_with(small_units, add_priorities(count), |_| {}));
         let (misses, read) = shape_misses(&rows, SHAPED);
         let (whole_misses, whole_read) = shape_misses(&rows, whole_records);
         eprintln!(
@@ -2645,12 +2777,18 @@ fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_histo
     }
     assert_eq!(earlier_reads(ends[0]), earlier_reads(ends[1]));
     assert!(
-        records[1].earlier >= records[0].earlier + 270,
+        records[1].earlier >= records[0].earlier + (large_units - small_units),
         "{records:?}"
     );
     // Today's read and every row's records grow with task 66's history.
-    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
-    assert!(fulls[1].2 >= fulls[0].2 + 270, "{fulls:?}");
+    assert!(
+        fulls[1].0.earlier >= fulls[0].0.earlier + (large_units - small_units),
+        "{fulls:?}"
+    );
+    assert!(
+        fulls[1].2 >= fulls[0].2 + (large_units - small_units),
+        "{fulls:?}"
+    );
 }
 
 /// (i-d): goal 80 in proposal 9 (its `goal_submitted`, a finding the
@@ -2698,11 +2836,21 @@ fn add_goal_proposal(log: &mut Log) {
     log.landed(81, &run(81), NEAR + 3000);
 }
 
+/// With 10 and 20 units outside the range, at every existing query start, goal-submitted
+/// membership preserves whole-read proposal answers and equal earlier reads as whole reads
+/// grow. Omitting goal membership still exposes the proposal mismatch.
 #[test]
 fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
+    check_a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it(10, 20);
+}
+
+fn check_a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it(
+    small_units: usize,
+    large_units: usize,
+) {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let rows = rows_of(&history_with(settled, add_goal_proposal, |_| {}));
         let whole = select(rows.clone(), &whole_query());
         let query = kpi_questions()[0].clone();
@@ -2727,7 +2875,7 @@ fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
             running(&window, &query)
         );
         assert_eq!(shaped, Vec::<String>::new());
-        if settled == 30 {
+        if settled == small_units {
             for shape in [OF_4678, no_goal] {
                 let (misses, _) = shape_misses(&rows, shape);
                 eprintln!("{shape:?}: {misses:?}");
@@ -2743,30 +2891,40 @@ fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
         reads.push(shaped_reads);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].0.earlier >= fulls[0].0.earlier + (large_units - small_units),
+        "{fulls:?}"
+    );
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].1.rows >= fulls[0].1.rows + (large_units - small_units),
+        "{fulls:?}"
+    );
 }
 
+/// With 10 and 20 units outside the range, all earlier-record shapes together preserve
+/// whole-ledger KPI and stats answers at every existing query start; earlier reads stay
+/// equal as whole reads grow.
 #[test]
 fn every_shape_returns_as_many_records_whatever_the_settled_history() {
+    check_every_shape_returns_as_many_records_whatever_the_settled_history(10, 20);
+}
+
+fn check_every_shape_returns_as_many_records_whatever_the_settled_history(
+    small_units: usize,
+    large_units: usize,
+) {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 300] {
+    for settled in [small_units, large_units] {
         let log = history_with(
             settled,
             |log| {
                 add_old_closes(log);
                 add_planner_question(log);
                 add_goal_proposal(log);
-                add_priorities(30)(log);
+                add_priorities(small_units)(log);
             },
             fix_old_closes,
         );
@@ -2778,16 +2936,16 @@ fn every_shape_returns_as_many_records_whatever_the_settled_history() {
         reads.push(read);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].0.earlier >= fulls[0].0.earlier + (large_units - small_units),
+        "{fulls:?}"
+    );
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fulls[1].1.rows >= fulls[0].1.rows + (large_units - small_units),
+        "{fulls:?}"
+    );
 }
 
 // (ii) the queue rows' kinds Spike 4678 left unresolved (Spike 4756).
@@ -3828,14 +3986,26 @@ fn queue_units_without_lives(settled: usize) -> Log {
     log
 }
 
-/// Check the part `name` of (ii): with 30 settled units the read of
-/// Spike 4678 ([`queue_narrowed`]) and that of [`QUEUE_SHAPED`] against the
-/// whole read, the shaped read's queue rows of the part the same with 30
-/// and 300 units while the whole read's grow, and the shaped read's
-/// answers against the whole read's with `large` units of `history`.
-/// Returns the misses of the read of Spike 4678.
-fn check_part(name: &str, history: fn(usize) -> Log) -> Vec<String> {
-    check_part_of(name, history_ii, queue_units_only, history)
+/// Check each part's range boundary shapes and whole-ledger answers,
+/// comparing returned queue rows across the two settled history sizes.
+/// The unbounded read is a growth control; an old snapshot deliberately
+/// retains the documented marks-between misses. Returns the old read's misses.
+fn check_part(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+    name: &str,
+    history: fn(usize) -> Log,
+) -> Vec<String> {
+    check_part_of(
+        small_units,
+        large_units,
+        answer_units,
+        name,
+        history_ii,
+        queue_units_only,
+        history,
+    )
 }
 
 /// The settled units the answers are compared with besides 30: 300 by
@@ -3848,18 +4018,21 @@ fn large_answers() -> usize {
         .unwrap_or(300)
 }
 
-/// [`check_part`] of the histories `small` (of 30 units), `units` (whose
-/// queue rows are counted with 300) and `history` (of the answers with
-/// [`large_answers`]).
+/// [`check_part`] with separate full, count-only and answer histories.
+/// `small_units` and `large_units` set the read-count comparison;
+/// `answer_units` sets the additional whole-ledger answer comparison.
 fn check_part_of(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
     name: &str,
     small: fn(usize) -> Log,
     units: fn(usize) -> Log,
     history: fn(usize) -> Log,
 ) -> Vec<String> {
-    let large = large_answers();
+    let large = answer_units;
     let part = QUEUE_PARTS.iter().find(|(n, _)| *n == name).unwrap().1;
-    let small = rows_of(&small(30));
+    let small = rows_of(&small(small_units));
     let (of_4678, _) = part_report(&small, part, QueueShape::default());
     let (misses, [narrowed_small, whole_small]) = part_report(&small, part, QUEUE_SHAPED);
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
@@ -3870,7 +4043,7 @@ fn check_part_of(
             .sum::<usize>()
             + rows.iter().filter(|row| row.key == "main_summary").count()
     };
-    let units = rows_of(&units(300));
+    let units = rows_of(&units(large_units));
     let by_kind = |rows: &[LedgerRow]| {
         part.iter()
             .map(|kind| queue_count(rows, kind))
@@ -3888,16 +4061,13 @@ fn check_part_of(
     let (large_misses, _) = queue_misses(&rows, &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
     eprintln!(
         "{name}: 4678 {} misses {:?}; shaped {narrowed_small}/{narrowed_large} of {whole_small}/{whole_large} \
-         (30/300), misses {misses:?}, with {large}: {large_misses:?}",
+         ({small_units}/{large_units}), misses {misses:?}, with {large}: {large_misses:?}",
         of_4678.len(),
         of_4678.iter().take(4).collect::<Vec<_>>()
     );
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
+    // The whole read grows by at least one row per added settled unit.
     assert!(
-        whole_large >= whole_small + 270 || whole_small < 10,
+        whole_large >= whole_small + (large_units - small_units) || whole_small < 10,
         "{name}"
     );
     if name == "ii-a" && small.iter().any(old_snapshot) {
@@ -3913,14 +4083,14 @@ fn check_part_of(
             marks(&misses) && marks(&large_misses),
             "{misses:?} {large_misses:?}"
         );
-        // 300 units against 30: a read in proportion to the settled history
-        // reads at least one more for each of the 270 units more, and one that
-        // does not grow reads as many with both and fails (a ratio of 10 times
-        // does not hold once a fixed part is added).
-        assert!(narrowed_large >= narrowed_small + 270, "{name}");
+        // The whole read grows by at least one row per added settled unit.
+        assert!(
+            narrowed_large >= narrowed_small + (large_units - small_units),
+            "{name}"
+        );
         return of_4678;
     }
-    assert_eq!(misses, Vec::<String>::new(), "{name} 30");
+    assert_eq!(misses, Vec::<String>::new(), "{name} {small_units}");
     assert_eq!(large_misses, Vec::<String>::new(), "{name} {large}");
     assert_eq!(narrowed_small, narrowed_large, "{name}");
     of_4678
@@ -3973,15 +4143,47 @@ fn near_snapshot_units(settled: usize) -> Log {
     without_unit_tasks(near_snapshot(settled))
 }
 
+/// With 10 and 20 units outside the range, for every existing KPI and stats query start,
+/// the old snapshot retains its documented marks-between misses and growing reads; the old
+/// queue read still misses answers. The near-snapshot companion checks history-independent
+/// reads.
 #[test]
 fn the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row() {
-    let of_4678 = check_part("ii-a", queue_units_only);
+    check_the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row(10, 20, 20);
+}
+
+fn check_the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
+    let of_4678 = check_part(
+        small_units,
+        large_units,
+        answer_units,
+        "ii-a",
+        queue_units_only,
+    );
     assert!(!of_4678.is_empty());
 }
 
+/// With 10 and 20 units outside the range, after the settled history, the snapshot reads
+/// marks by range: all KPI and stats query starts preserve whole-read answers and equal
+/// queue reads across history sizes, while whole reads grow.
 #[test]
 fn a_snapshot_after_the_settled_history_reads_its_marks_by_the_range() {
+    check_a_snapshot_after_the_settled_history_reads_its_marks_by_the_range(10, 20, 20);
+}
+
+fn check_a_snapshot_after_the_settled_history_reads_its_marks_by_the_range(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
     check_part_of(
+        small_units,
+        large_units,
+        answer_units,
         "ii-a",
         near_snapshot,
         near_snapshot_units,
@@ -3989,35 +4191,134 @@ fn a_snapshot_after_the_settled_history_reads_its_marks_by_the_range() {
     );
 }
 
+/// With 10 and 20 units outside the range, for candidates sampled, every existing KPI and
+/// stats query start preserves whole-read answers and equal queue reads across history
+/// sizes, while whole reads grow.
 #[test]
 fn the_candidates_sampled_read_by_their_range_answer_as_every_row() {
-    check_part("ii-f", queue_units_only);
+    check_the_candidates_sampled_read_by_their_range_answer_as_every_row(10, 20, 20);
 }
 
+fn check_the_candidates_sampled_read_by_their_range_answer_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
+    check_part(
+        small_units,
+        large_units,
+        answer_units,
+        "ii-f",
+        queue_units_only,
+    );
+}
+
+/// With 10 and 20 units outside the range, for main summaries and named commits, every
+/// existing query start preserves whole-read answers and equal queue reads across history
+/// sizes, while whole reads grow; the old read still misses answers.
 #[test]
 fn main_s_record_read_from_a_summary_answers_as_every_row() {
-    let of_4678 = check_part("ii-b", queue_units_without_lives);
+    check_main_s_record_read_from_a_summary_answers_as_every_row(10, 20, 20);
+}
+
+fn check_main_s_record_read_from_a_summary_answers_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
+    let of_4678 = check_part(
+        small_units,
+        large_units,
+        answer_units,
+        "ii-b",
+        queue_units_without_lives,
+    );
     assert!(!of_4678.is_empty());
 }
 
+/// With 10 and 20 units outside the range, for landings, every existing query start
+/// preserves whole-read answers and equal queue reads across history sizes, while whole
+/// reads grow.
 #[test]
 fn what_befell_a_landing_read_by_the_range_answers_as_every_row() {
-    check_part("ii-c", queue_units_without_lives);
+    check_what_befell_a_landing_read_by_the_range_answers_as_every_row(10, 20, 20);
 }
 
+fn check_what_befell_a_landing_read_by_the_range_answers_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
+    check_part(
+        small_units,
+        large_units,
+        answer_units,
+        "ii-c",
+        queue_units_without_lives,
+    );
+}
+
+/// With 10 and 20 units outside the range, for goals of range tasks, every existing query
+/// start preserves whole-read answers and equal queue reads across history sizes, while
+/// whole reads grow; the old read still misses answers.
 #[test]
 fn the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row() {
-    let of_4678 = check_part("ii-d", queue_units_without_lives);
+    check_the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row(10, 20, 20);
+}
+
+fn check_the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
+    let of_4678 = check_part(
+        small_units,
+        large_units,
+        answer_units,
+        "ii-d",
+        queue_units_without_lives,
+    );
     assert!(!of_4678.is_empty());
 }
 
+/// With 10 and 20 units outside the range, for updates, failures and asks without runs,
+/// every existing query start preserves whole-read answers and equal queue reads across
+/// history sizes, while whole reads grow.
 #[test]
 fn the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row() {
-    check_part("ii-e", queue_units_without_lives);
+    check_the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row(
+        10, 20, 20,
+    );
 }
 
+fn check_the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
+    check_part(
+        small_units,
+        large_units,
+        answer_units,
+        "ii-e",
+        queue_units_without_lives,
+    );
+}
+
+/// With 10 and 20 units outside the range, all queue parts together preserve whole-read
+/// answers at every existing query start and equal queue reads across history sizes, while
+/// whole reads grow. The configurable answer size retains the original answer-check
+/// condition.
 #[test]
 fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
+    check_every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row(10, 20, 20);
+}
+
+fn check_every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row(
+    small_units: usize,
+    large_units: usize,
+    answer_units: usize,
+) {
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
     let queue = |rows: &[LedgerRow]| {
         rows.iter()
@@ -4025,12 +4326,12 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
             .count()
     };
     let mut counts = Vec::new();
-    for (settled, log) in [
-        (30, near_snapshot(30)),
-        (30, near_snapshot_units(30)),
-        (large_answers(), near_snapshot_units(large_answers())),
-        (300, near_snapshot_units(300)),
-    ] {
+    for (settled, units_only) in queue_comparisons(small_units, large_units, answer_units) {
+        let log = if units_only {
+            near_snapshot_units(settled)
+        } else {
+            near_snapshot(settled)
+        };
         let rows = rows_of(&log);
         // Every queue kind: (ii)'s by their shapes, 4678's by its read.
         let kinds: BTreeSet<String> = rows
@@ -4039,7 +4340,7 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
             .map(|row| subject_kind(row).to_owned())
             .collect();
         let narrowed = queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED);
-        if settled < 300 || large_answers() == 300 {
+        if settled < large_units || answer_units == large_units {
             let (misses, _) = queue_misses(&rows, &narrowed);
             assert_eq!(misses, Vec::<String>::new(), "{settled}");
         }
@@ -4050,13 +4351,264 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
         );
         counts.push((queue(&narrowed), queue(&rows)));
     }
-    // Of the units without their tasks: the same with 30 and 300.
-    assert_eq!(counts[1].0, counts[3].0, "{counts:?}");
-    // 300 units against 30: a read in proportion to the settled history
-    // reads at least one more for each of the 270 units more, and one that
-    // does not grow reads as many with both and fails (a ratio of 10 times
-    // does not hold once a fixed part is added).
-    assert!(counts[3].1 >= counts[1].1 + 270, "{counts:?}");
+    // Of the units without their tasks: compare the small and fixed large counts.
+    let fixed_large = counts.last().unwrap();
+    assert_eq!(counts[1].0, fixed_large.0, "{counts:?}");
+    // The whole read grows by at least one row per added settled unit.
+    assert!(
+        fixed_large.1 >= counts[1].1 + (large_units - small_units),
+        "{counts:?}"
+    );
+}
+
+/// Build each distinct fixture once. The configurable answer history is
+/// also the fixed large count comparison when their sizes agree.
+fn queue_comparisons(small: usize, large: usize, answers: usize) -> Vec<(usize, bool)> {
+    let mut cases = vec![(small, false), (small, true), (answers, true)];
+    if answers != large {
+        cases.push((large, true));
+    }
+    cases
+}
+
+/// The default shares its 300-unit fixture; an override keeps both the
+/// requested answer history and the fixed 300-unit count comparison.
+#[test]
+fn queue_comparisons_share_only_the_equal_large_fixture() {
+    assert_eq!(
+        queue_comparisons(30, 300, 300),
+        vec![(30, false), (30, true), (300, true)]
+    );
+    for large in [20, 301] {
+        assert_eq!(
+            queue_comparisons(30, 300, large),
+            vec![(30, false), (30, true), (large, true), (300, true)]
+        );
+    }
+}
+
+/// Large-history counterparts of the small range and visibility checks.
+mod volume {
+    use super::*;
+
+    /// With 30 and 300 units outside the range, the today read is a positive control:
+    /// earlier and queue reads grow with history, while range rows and whole-ledger answers
+    /// agree at the existing query start.
+    #[test]
+    fn the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history() {
+        check_the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, all earlier-record parts preserve
+    /// whole-ledger KPI answers for every existing query start; earlier records, range rows
+    /// and executions stay equal across history sizes.
+    #[test]
+    fn every_part_narrowed_returns_as_many_records_whatever_the_settled_history() {
+        check_every_part_narrowed_returns_as_many_records_whatever_the_settled_history(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, the range candidates and owner lookups stay
+    /// equal across history sizes. Saved-owner, lagging-event and running-row visibility
+    /// agrees with the whole read at the existing two-day start.
+    #[test]
+    fn the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees()
+    {
+        check_the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, for the existing two-day since boundary,
+    /// full stats answers match the whole read and returned row counts stay equal across
+    /// history sizes.
+    #[test]
+    fn stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier() {
+        check_stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, each queue kind preserves all KPI query
+    /// starts and whole-ledger answers; its returned queue row count stays equal across
+    /// history sizes.
+    #[test]
+    fn each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses() {
+        check_each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, across all KPI query starts, the combined
+    /// range, earlier, execution, queue and visible-event reads stay equal across history
+    /// sizes and answers match the whole read.
+    #[test]
+    fn the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history() {
+        check_the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, at the two-day range start, running rows,
+    /// separate W/R marks and rows written past them preserve whole-read visibility.
+    /// Lookups and total small reads stay equal as whole reads grow.
+    #[test]
+    fn a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them() {
+        check_a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them(
+            30, 300,
+        );
+    }
+
+    /// With 30 and 300 units outside the range, at the two-day range start, R spares task
+    /// owners but retains run-owner checks. Both reads preserve whole-read visibility;
+    /// spared lookups stay equal as whole reads grow.
+    #[test]
+    fn r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows() {
+        check_r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, for the existing since/until boundaries,
+    /// event and visible-event bounds preserve whole-read stats and tokens with equal reads
+    /// across settled history sizes. The K-search fallback and clock rollback remain
+    /// covered with 300 events after E.
+    #[test]
+    fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts()
+     {
+        check_u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, at every existing KPI and stats query
+    /// start, paired old/duplicate session closes preserve whole-read answers and equal
+    /// earlier reads as whole reads grow. Counting closes still exposes the missing open
+    /// sessions.
+    #[test]
+    fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it() {
+        check_a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it(
+            30, 300,
+        );
+    }
+
+    /// With 30 and 300 units outside the range, at every existing KPI and stats query
+    /// start, planner key prefixes and ask actors preserve whole-read answers and equal
+    /// earlier reads as whole reads grow. Omitting actor lookups still exposes the route
+    /// mismatch.
+    #[test]
+    fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names()
+     {
+        check_a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, increasing a named member task's own
+    /// priority history keeps end-only earlier reads equal and whole-read answers intact at
+    /// every existing query start. Whole-record reads grow as a positive control.
+    #[test]
+    fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history() {
+        check_a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history(
+            30, 300,
+        );
+    }
+
+    /// With 30 and 300 units outside the range, at every existing query start,
+    /// goal-submitted membership preserves whole-read proposal answers and equal earlier
+    /// reads as whole reads grow. Omitting goal membership still exposes the proposal
+    /// mismatch.
+    #[test]
+    fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
+        check_a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, all earlier-record shapes together preserve
+    /// whole-ledger KPI and stats answers at every existing query start; earlier reads stay
+    /// equal as whole reads grow.
+    #[test]
+    fn every_shape_returns_as_many_records_whatever_the_settled_history() {
+        check_every_shape_returns_as_many_records_whatever_the_settled_history(30, 300);
+    }
+
+    /// With 30 and 300 units outside the range, for every existing KPI and stats query
+    /// start, the old snapshot retains its documented marks-between misses and growing
+    /// reads; the old queue read still misses answers. The near-snapshot companion checks
+    /// history-independent reads.
+    #[test]
+    fn the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row() {
+        check_the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row(
+            30,
+            300,
+            large_answers(),
+        );
+    }
+
+    /// With 30 and 300 units outside the range, after the settled history, the snapshot
+    /// reads marks by range: all KPI and stats query starts preserve whole-read answers and
+    /// equal queue reads across history sizes, while whole reads grow.
+    #[test]
+    fn a_snapshot_after_the_settled_history_reads_its_marks_by_the_range() {
+        check_a_snapshot_after_the_settled_history_reads_its_marks_by_the_range(
+            30,
+            300,
+            large_answers(),
+        );
+    }
+
+    /// With 30 and 300 units outside the range, for candidates sampled, every existing KPI
+    /// and stats query start preserves whole-read answers and equal queue reads across
+    /// history sizes, while whole reads grow.
+    #[test]
+    fn the_candidates_sampled_read_by_their_range_answer_as_every_row() {
+        check_the_candidates_sampled_read_by_their_range_answer_as_every_row(
+            30,
+            300,
+            large_answers(),
+        );
+    }
+
+    /// With 30 and 300 units outside the range, for main summaries and named commits, every
+    /// existing query start preserves whole-read answers and equal queue reads across
+    /// history sizes, while whole reads grow; the old read still misses answers.
+    #[test]
+    fn main_s_record_read_from_a_summary_answers_as_every_row() {
+        check_main_s_record_read_from_a_summary_answers_as_every_row(30, 300, large_answers());
+    }
+
+    /// With 30 and 300 units outside the range, for landings, every existing query start
+    /// preserves whole-read answers and equal queue reads across history sizes, while whole
+    /// reads grow.
+    #[test]
+    fn what_befell_a_landing_read_by_the_range_answers_as_every_row() {
+        check_what_befell_a_landing_read_by_the_range_answers_as_every_row(
+            30,
+            300,
+            large_answers(),
+        );
+    }
+
+    /// With 30 and 300 units outside the range, for goals of range tasks, every existing
+    /// query start preserves whole-read answers and equal queue reads across history sizes,
+    /// while whole reads grow; the old read still misses answers.
+    #[test]
+    fn the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row() {
+        check_the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row(
+            30,
+            300,
+            large_answers(),
+        );
+    }
+
+    /// With 30 and 300 units outside the range, for updates, failures and asks without
+    /// runs, every existing query start preserves whole-read answers and equal queue reads
+    /// across history sizes, while whole reads grow.
+    #[test]
+    fn the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row() {
+        check_the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row(
+            30,
+            300,
+            large_answers(),
+        );
+    }
+
+    /// With 30 and 300 units outside the range, all queue parts together preserve
+    /// whole-read answers at every existing query start and equal queue reads across
+    /// history sizes, while whole reads grow. The configurable answer size retains the
+    /// original answer-check condition.
+    #[test]
+    fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
+        check_every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row(
+            30,
+            300,
+            large_answers(),
+        );
+    }
 }
 
 // The rest of (ii) (Spike 4811).
