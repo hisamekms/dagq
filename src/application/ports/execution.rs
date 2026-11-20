@@ -580,6 +580,17 @@ pub trait AgentProvider {
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
         let _ = (command, model, effort);
     }
+    /// Select a worker turn's model and effort with the repository's
+    /// per-turn Codex override. Other providers use the stage as given.
+    fn select_worker_model(
+        &self,
+        command: &mut CommandSpec,
+        model: &str,
+        effort: &str,
+        _codex_worker_model: Option<&str>,
+    ) {
+        self.select_model(command, model, effort);
+    }
     /// Start the session of a role other than the worker (`command`) the
     /// way `launch` says (ADR-0079 decision 7): with its model and effort
     /// through [`AgentProvider::select_model`] when it gives them, else as

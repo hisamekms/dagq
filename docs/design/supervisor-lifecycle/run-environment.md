@@ -154,6 +154,10 @@ serverの所有とguardの境界は[sccacheの地図](sccache.md)。
 main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。
 main checkoutが無いときの各コマンドの扱いは`main_checkout_of`、通知で使う名前は`naming_checkout`のdoc commentが持つ。
 
+wrapperはworkerのturnごとにboundのmain checkoutからruntimesと`[worker.codex]`を読み直す。
+設定は切り替え直後を含むCodexのturnに効く。
+読みは`BoundRuntimes::read`と`RuntimesRead`、定義は`run_env::WORKER_CODEX_TABLE`と`WORKER_CODEX_MODEL`。
+
 ## `[run.env]`が名指すプログラムの検査
 
 > 直し対象（正: `AfterExit::Land`、直す: `task 5356`）。

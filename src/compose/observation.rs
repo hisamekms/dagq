@@ -404,7 +404,9 @@ fn runtimes_of<E: TransactionEntries>(
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
-    crate::infrastructure::run_env::BoundRuntimes::new(bound_checkout(queue)).read()
+    crate::infrastructure::run_env::BoundRuntimes::new(bound_checkout(queue))
+        .read()
+        .map(|settings| settings.runtimes)
 }
 
 /// `doctor`'s `agents`: see [`crate::application::review::check_agents`],

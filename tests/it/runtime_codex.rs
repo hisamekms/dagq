@@ -780,6 +780,13 @@ fn no_claude_unreadable_codex_review_at_its_limit_fails_with_its_output() {
 fn a_codex_run_answers_and_revises_through_resumes_of_its_thread_and_lands() {
     let config = codex_config();
     let (dir, repo, db, backend, codex) = codex_fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[worker.codex]\nmodel = 'gpt-worker-configured'\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "configure the Codex worker model"]);
     set_codex_model(dir.path(), "gpt-test-codex");
     fs::write(dir.path().join("codex-usage-records"), "").unwrap();
     set_turns(
@@ -875,13 +882,18 @@ esac"#
         .collect();
     assert_eq!(calls_args.len(), 3, "{args:?}");
     let run_dir = run.run_dir().unwrap();
-    for (at, line) in calls_args.iter().enumerate() {
+    for (at, (line, effort)) in calls_args
+        .iter()
+        .zip(["medium", "medium", "high"])
+        .enumerate()
+    {
         for part in [
             r#" -c| sandbox_mode="workspace-write"|"#,
             r#" -c| approval_policy="never"|"#,
             " -c| sandbox_workspace_write.network_access=true|",
             " --json|",
-            " model_reasoning_effort=",
+            " -m| gpt-worker-configured|",
+            &format!(r#" -c| model_reasoning_effort="{effort}"|"#),
         ] {
             assert!(line.contains(part), "call {at}, {part}: {line}");
         }

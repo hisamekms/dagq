@@ -468,7 +468,7 @@ fn run_session_as(
         )
     };
     let bound = crate::infrastructure::run_env::BoundRuntimes::new(checkout);
-    let runtimes = move || bound.read();
+    let read_turn_settings = move || bound.read();
     wrapper::run_session(
         Session {
             queue,
@@ -485,7 +485,7 @@ fn run_session_as(
             sccache: sccache
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
             clock: &crate::infrastructure::clock::SystemClock,
-            runtimes: &runtimes,
+            runtimes: &read_turn_settings,
             toolchains: &toolchains,
             containers,
             telemetry: &crate::infrastructure::queue_service::SystemServiceAccess,

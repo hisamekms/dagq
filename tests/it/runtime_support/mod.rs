@@ -1072,6 +1072,16 @@ impl AgentProvider for HeadlessProvider {
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
         self.agent.select_model(command, model, effort);
     }
+    fn select_worker_model(
+        &self,
+        command: &mut CommandSpec,
+        model: &str,
+        effort: &str,
+        codex_worker_model: Option<&str>,
+    ) {
+        self.agent
+            .select_worker_model(command, model, effort, codex_worker_model);
+    }
     fn turn_command(
         &self,
         target: &dagq::application::TurnTarget<'_>,

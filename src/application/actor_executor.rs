@@ -107,6 +107,7 @@ pub enum SessionAgent<'a> {
         stderr: &'a Path,
         without_env: &'a [&'a str],
         with_env: &'a [(String, String)],
+        codex_model: Option<&'a str>,
     },
     /// A planner in a terminal (ADR-0041): only a person's, opened before
     /// `dagq plan` was abolished (ADR-t1394-1). The runtime's planners run
@@ -987,6 +988,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let mut with: &[(String, String)] = &[];
                 let mut checks = None;
                 let mut codex_planner = None;
+                let mut codex_model = None;
                 let mut command = match agent {
                     SessionAgent::Turn {
                         run,
@@ -996,7 +998,9 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         stderr,
                         without_env,
                         with_env,
+                        codex_model: configured,
                     } => {
+                        codex_model = configured;
                         streams = Streams::Files { stdout, stderr };
                         without = without_env;
                         with = with_env;
@@ -1024,7 +1028,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     }
                 };
                 if let Some((model, effort)) = model {
-                    provider.select_model(&mut command, model, effort);
+                    if codex_model.is_some() {
+                        provider.select_worker_model(&mut command, model, effort, codex_model);
+                    } else {
+                        provider.select_model(&mut command, model, effort);
+                    }
                 }
                 // The workspace's environment already makes the wrapper's
                 // children this actor; set again, the agent is it whatever
@@ -1534,6 +1542,7 @@ mod tests {
             stderr: Path::new("/r/turn.err"),
             without_env: &[],
             with_env: &[],
+            codex_model: None,
         }
     }
 

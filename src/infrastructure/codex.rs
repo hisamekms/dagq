@@ -688,6 +688,15 @@ impl Codex {
     }
 }
 
+/// An explicit worker override wins over the stage model. Without an
+/// override, a Claude stage leaves the model to Codex's own default.
+fn codex_model_for_turn<'a>(
+    model: &'a str,
+    codex_worker_model: Option<&'a str>,
+) -> Option<&'a str> {
+    codex_worker_model.or_else(|| (!model.starts_with("claude")).then_some(model))
+}
+
 impl AgentProvider for Codex {
     fn preflight(&self) -> Result<()> {
         output(Command::new(&self.executable).arg("--version"))?;
@@ -741,10 +750,18 @@ impl AgentProvider for Codex {
         command.arg("-c").arg(distrust_config(tree)?);
         Ok(command)
     }
-    /// `-m <model>` for a model of Codex's (a claim's Claude model is left
-    /// to Codex's default) and `-c model_reasoning_effort="<effort>"`.
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
-        if !model.starts_with("claude") {
+        self.select_worker_model(command, model, effort, None);
+    }
+    /// Apply [`codex_model_for_turn`] with the stage's reasoning effort.
+    fn select_worker_model(
+        &self,
+        command: &mut CommandSpec,
+        model: &str,
+        effort: &str,
+        codex_worker_model: Option<&str>,
+    ) {
+        if let Some(model) = codex_model_for_turn(model, codex_worker_model) {
             command.option_args(["-m", model]);
         }
         command.option_args([
@@ -1252,31 +1269,25 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_model_is_left_to_codex_and_the_effort_is_given() {
+    fn worker_model_override_wins_and_the_stage_effort_is_given() {
         let codex = Codex::new("codex".into());
-        let mut command = CommandSpec::new("codex");
-        command.args(["exec", "--json", "--", "prompt"]);
-        codex.select_model(&mut command, "claude-opus-5-5", "max");
-        codex.select_model(&mut command, "gpt-6-astra", "low");
-        let args: Vec<String> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "exec",
-                "--json",
-                "-c",
-                r#"model_reasoning_effort="xhigh""#,
-                "-m",
-                "gpt-6-astra",
-                "-c",
-                r#"model_reasoning_effort="low""#,
-                "--",
-                "prompt"
-            ]
-        );
+        for (stage, configured, expected_model) in [
+            ("claude-opus-5-5", Some("gpt-X"), Some("gpt-X")),
+            ("gpt-Y", Some("gpt-X"), Some("gpt-X")),
+            ("claude-opus-5-5", None, None),
+            ("gpt-Y", None, Some("gpt-Y")),
+        ] {
+            assert_eq!(codex_model_for_turn(stage, configured), expected_model);
+            let mut command = CommandSpec::new("codex");
+            command.args(["exec", "--json", "--", "prompt"]);
+            codex.select_worker_model(&mut command, stage, "max", configured);
+            let mut expected = vec!["exec", "--json"];
+            if let Some(model) = expected_model {
+                expected.extend(["-m", model]);
+            }
+            expected.extend(["-c", r#"model_reasoning_effort="xhigh""#, "--", "prompt"]);
+            assert!(command.get_args().eq(expected), "{command:?}");
+        }
     }
 
     /// A prompt past the system's limit on the arguments (about 1 MB on

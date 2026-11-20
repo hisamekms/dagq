@@ -79,7 +79,7 @@ use crate::{
     application::{Exit, Verifier},
     domain::{
         ChangeSet, GoalTag, ReviseLimit, TagSet, TaskChange, TitlePrefixes,
-        actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
+        actor_model::{ModelRole, RoleModel, RoleModels, check_codex_model, check_effort},
         agent_eval::round::{EvalConfig, ProviderCost},
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
@@ -152,6 +152,12 @@ const WORKER_TRIAL_TABLE: &str = "worker.trial";
 /// `[worker.provider_trial]`: the trial of the provider pair of the worker
 /// and its review (ADR-t4005-1).
 const PROVIDER_TRIAL_TABLE: &str = "worker.provider_trial";
+/// Optional `[worker.codex]` table for Codex worker turns. Only
+/// [`WORKER_CODEX_MODEL`] is accepted. Duplicate tables and keys are errors.
+const WORKER_CODEX_TABLE: &str = "worker.codex";
+/// The optional `model` key of [`WORKER_CODEX_TABLE`]. It must be a nonblank
+/// string and must not start with `claude`, as for Codex in `[roles.<role>]`.
+const WORKER_CODEX_MODEL: &str = "model";
 /// `[roles.<role>]`: the provider, model and effort of a role other than
 /// the worker (ADR-0079 decision 7, ADR-t1063-1), one table per role.
 const ROLES_PREFIX: &str = "roles.";
@@ -531,7 +537,7 @@ const CONTAINER_IMAGE_INPUTS: &str = "inputs";
 /// Unknown keys, invalid types or values and duplicate keys are errors.
 /// Only the commit-pinned main reader can expose these as trusted conditions.
 const LANDING_APPROVAL_TABLE: &str = "landing.approval";
-const TABLES: [&str; 36] = [
+const TABLES: [&str; 37] = [
     LANDING_APPROVAL_TABLE,
     RUN_ENV_TABLE,
     STALL_TABLE,
@@ -544,6 +550,7 @@ const TABLES: [&str; 36] = [
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
     PROVIDER_TRIAL_TABLE,
+    WORKER_CODEX_TABLE,
     LANGUAGE_TABLE,
     SUPERVISOR_TABLE,
     AREAS_TABLE,
@@ -640,6 +647,8 @@ pub struct Config {
     /// `[worker.trial]`, off unless it says `enabled = true` (ADR-0079
     /// decision 4).
     pub worker_trial: WorkerTrial,
+    /// The override from [`WORKER_CODEX_MODEL`], absent when the key is unset.
+    pub worker_codex_model: Option<String>,
     /// `[roles.<role>]`, none by default (ADR-0079 decision 7).
     pub roles: RoleModels,
     /// `runtime` of `[roles.worker]` and `[roles.verification]` (goal 38),
@@ -1200,7 +1209,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{WORKER_CODEX_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -2373,6 +2382,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
                 trial_keys.push(key.to_owned());
             }
+            Some(WORKER_CODEX_TABLE) => {
+                ensure!(
+                    key == WORKER_CODEX_MODEL,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{WORKER_CODEX_TABLE}]; its only key is {WORKER_CODEX_MODEL}"
+                );
+                ensure!(
+                    config.worker_codex_model.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let model = launch_value(key, rest, number)?;
+                check_codex_model(&model)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                config.worker_codex_model = Some(model);
+            }
             Some(PROVIDER_TRIAL_TABLE) => {
                 ensure!(
                     ProviderTrial::KEYS.contains(&key),
@@ -2611,7 +2635,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{WORKER_CODEX_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -2815,10 +2839,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     Ok(config)
 }
 
-/// The `model` or `effort` (`key`) of a review agent's table on line
-/// `number`, `rest` its value: a string that is not blank. Whether its
-/// job's provider takes it is checked as the review reads the table
-/// ([`ReviewAgents::launch_problems`]).
+/// Read a launch's `model` or `effort` (`key`) on line `number` as a
+/// nonblank string. The caller handles provider-specific validation.
 fn launch_value(key: &str, rest: &str, number: usize) -> Result<String> {
     let value = parse_string(rest.trim())
         .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
@@ -3810,13 +3832,7 @@ fn inbox_table_only(text: &str) -> String {
 /// invocation, against the main checkout. Status, doctor and the session
 /// wrapper read through `BoundRuntimes`, resolving the queue's checkout.
 pub fn load_runtimes(root: &Path) -> Result<RuntimeConfig> {
-    let path = root.join(CONFIG_FILE_NAME);
-    let Some(text) = read_config(&path)? else {
-        return Ok(RuntimeConfig::default());
-    };
-    Ok(parse_config(&text)
-        .with_context(|| format!("parse {}", path.display()))?
-        .runtimes)
+    Ok(load_container_config(root)?.map_or_else(RuntimeConfig::default, |config| config.runtimes))
 }
 
 /// `[container.image]` of the `dagq.toml` in `root`, the main checkout
@@ -3872,7 +3888,7 @@ fn load_container_config(root: &Path) -> Result<Option<Config>> {
         .map(Some)
 }
 
-/// The runtimes of the main checkout a queue is bound to (goal 38), read
+/// The turn settings of the main checkout a queue is bound to, read
 /// again on each [`Self::read`]: `checkout` is the binding as resolved. A
 /// queue bound to no checkout runs every target on the host; a binding
 /// that could not be resolved is an error of every read, so a caller that
@@ -3888,12 +3904,20 @@ impl BoundRuntimes {
         }
     }
 
-    /// The runtimes as the checkout's `dagq.toml` sets them now
-    /// ([`load_runtimes`]).
-    pub fn read(&self) -> Result<RuntimeConfig> {
+    /// The runtimes and Codex worker model as the checkout's `dagq.toml`
+    /// sets them now, parsed together.
+    pub fn read(&self) -> Result<crate::application::session::RuntimesRead> {
+        use crate::application::session::RuntimesRead;
+
         match &self.checkout {
-            Ok(Some(checkout)) => load_runtimes(checkout),
-            Ok(None) => Ok(RuntimeConfig::default()),
+            Ok(Some(checkout)) => Ok(load_container_config(checkout)?.map_or_else(
+                RuntimesRead::default,
+                |config| RuntimesRead {
+                    runtimes: config.runtimes,
+                    codex_model: config.worker_codex_model,
+                },
+            )),
+            Ok(None) => Ok(RuntimesRead::default()),
             Err(error) => bail!("the checkout the queue is bound to could not be found: {error}"),
         }
     }
@@ -8550,13 +8574,50 @@ LITERAL = 'no \n escapes # here'
     #[test]
     fn the_bound_runtimes_are_the_host_without_a_checkout_and_fail_without_its_binding() {
         assert_eq!(
-            BoundRuntimes::new(Ok(None)).read().unwrap(),
+            BoundRuntimes::new(Ok(None)).read().unwrap().runtimes,
             RuntimeConfig::default()
         );
         let bound = BoundRuntimes::new(Err(anyhow::anyhow!("repository moved")));
         for _ in 0..2 {
             let error = format!("{:#}", bound.read().unwrap_err());
             assert!(error.contains("repository moved"), "{error}");
+        }
+    }
+
+    #[test]
+    fn parses_the_optional_codex_worker_model_with_numbered_errors() {
+        let model = |text| parse_config(text).unwrap().worker_codex_model;
+        assert_eq!(
+            model("[worker.codex]\nmodel = 'gpt-X'"),
+            Some("gpt-X".into())
+        );
+        assert_eq!(model("[roles.worker]\nruntime = 'host'"), None);
+        assert_eq!(model("[worker.codex]"), None);
+        for (text, line, problem) in [
+            ("effort = 'low'", 2, "unknown key effort"),
+            ("model = ''", 2, "model is blank"),
+            ("model = '  '", 2, "model is blank"),
+            ("model = 123", 2, "value of model"),
+            (
+                "model = 'claude-example'",
+                2,
+                "model claude-example is Claude's",
+            ),
+            (
+                "model = 'gpt-X'\n[worker.codex]",
+                3,
+                "[worker.codex] is defined twice",
+            ),
+            (
+                "model = 'gpt-X'\nmodel = 'gpt-Y'",
+                3,
+                "model is defined twice",
+            ),
+        ] {
+            let error = parse_config(&format!("[worker.codex]\n{text}")).unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.starts_with(&format!("dagq.toml:{line}:")), "{error}");
+            assert!(error.contains(problem), "{error}");
         }
     }
 

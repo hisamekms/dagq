@@ -800,7 +800,8 @@ impl Spawner for FakeAgent {
                 output
             }
             TURN => {
-                let [run_dir, session] = args.as_slice() else {
+                // Model options may follow the two arguments of the scripted turn.
+                let [run_dir, session, ..] = args.as_slice() else {
                     bail!("a worker's turn names its run directory and session");
                 };
                 self.turn_prompts

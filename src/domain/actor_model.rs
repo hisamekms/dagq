@@ -141,14 +141,22 @@ impl RoleModel {
             ));
         }
         if provider == Provider::Codex
-            && let Some(model) = self.model.as_deref().filter(|m| m.starts_with("claude"))
+            && let Some(model) = &self.model
         {
-            return Err(format!(
-                "model {model} is Claude's; with provider codex name a model of Codex's, or none for Codex's default"
-            ));
+            check_codex_model(model)?;
         }
         Ok(())
     }
+}
+
+/// A model explicitly selected for Codex must be a Codex model.
+pub(crate) fn check_codex_model(model: &str) -> Result<(), String> {
+    if model.starts_with("claude") {
+        return Err(format!(
+            "model {model} is Claude's; with provider codex name a model of Codex's, or none for Codex's default"
+        ));
+    }
+    Ok(())
 }
 
 /// Every `[roles.<role>]` of `dagq.toml`; none by default.

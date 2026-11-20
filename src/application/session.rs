@@ -165,8 +165,8 @@ pub struct Session<'a> {
     )>,
     /// The clock the wrapper's turns read their times on.
     pub clock: &'a dyn super::Clock,
-    /// Reads where `dagq.toml` puts the worker, before each turn (goal 38).
-    pub runtimes: &'a super::headless_session::RuntimesFile,
+    /// Reads the runtimes and the Codex worker model before each turn.
+    pub runtimes: &'a RuntimesFile<'a>,
     /// Reads the profiles the main checkout's `dagq.toml` declares, before
     /// each turn, which the turn's output is read with.
     pub toolchains: &'a super::headless_session::ToolchainsFile,
@@ -175,6 +175,26 @@ pub struct Session<'a> {
     /// Where the wrapper sends the steps of its turns, with the run's
     /// telemetry token (ADR-t1662-3 decision 1).
     pub telemetry: &'a dyn super::TelemetrySinks,
+}
+
+/// Settings read together before a worker turn from the bound checkout.
+#[derive(Debug, Default)]
+pub struct RuntimesRead {
+    pub runtimes: crate::domain::container_runtime::RuntimeConfig,
+    /// The optional override read from `[worker.codex]` for Codex turns.
+    /// The reader rejects blank strings and names starting with `claude`.
+    pub codex_model: Option<String>,
+}
+
+/// Reads the runtimes and the Codex worker model of the bound checkout.
+pub type RuntimesFile<'a> = dyn Fn() -> Result<RuntimesRead> + 'a;
+
+/// Read the current settings for a worker turn, refusing an unreadable configuration.
+pub(super) fn read_turn_settings(read: Option<&RuntimesFile<'_>>) -> Result<Option<RuntimesRead>> {
+    // A file that cannot be read may set the worker to the container.
+    read.map(|read| read()).transpose().context(
+        "the runtimes of dagq.toml could not be read; dagq refuses to start the worker's turn rather than run it on the host",
+    )
 }
 
 /// Wrap the agent of run `id` under the lease `token` until it exits; the

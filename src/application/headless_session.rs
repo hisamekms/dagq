@@ -63,6 +63,7 @@ use super::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
     },
+    session::{RuntimesFile, read_turn_settings},
 };
 use crate::domain::{
     ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun,
@@ -240,7 +241,7 @@ pub(super) struct Turns<'a> {
     /// a worker set to the container is refused there and never started on
     /// the host, a run started on the host before the change too, and so is
     /// a turn whose read fails (goal 38). `None` for a planner.
-    pub(super) runtimes: Option<&'a RuntimesFile>,
+    pub(super) runtimes: Option<&'a RuntimesFile<'a>>,
     /// Reads the profiles the main checkout's `dagq.toml` declares, before
     /// each turn of a run, which the turn's output is read with for the
     /// tests its commands name as failed. `None` for a planner, whose
@@ -260,9 +261,6 @@ pub(super) struct Turns<'a> {
     /// ([`super::step_report::WrapperSteps`]).
     pub(super) steps: super::step_report::WrapperSteps,
 }
-
-/// Reads the runtimes of the main checkout's `dagq.toml` (goal 38).
-pub type RuntimesFile = dyn Fn() -> Result<crate::domain::container_runtime::RuntimeConfig>;
 
 /// Reads the profiles the main checkout's `dagq.toml` declares, never
 /// failing: what cannot be read reads with no profile.
@@ -1076,6 +1074,7 @@ impl<'a> Turns<'a> {
             None => TurnSession::New(&on.name),
         };
         let debug_log = run_dir.join(super::planner::PLANNER_DEBUG_LOG);
+        let settings = read_turn_settings(self.runtimes)?;
         let (actor, agent_program) = match &self.owner {
             TurnOwner::Run(run) => (
                 ActorContext::worker(run.id(), run.task_id()),
@@ -1087,6 +1086,9 @@ impl<'a> Turns<'a> {
                     stderr: &stderr,
                     without_env,
                     with_env: &with_env,
+                    codex_model: settings
+                        .as_ref()
+                        .and_then(|read| read.codex_model.as_deref()),
                 },
             ),
             TurnOwner::Planner {
@@ -1122,17 +1124,9 @@ impl<'a> Turns<'a> {
         if let Some(service) = self.queue_service {
             executor = executor.with_queue_service(service);
         }
-        // A file that cannot be read may set the worker to the container:
-        // the turn is not started, on the host or anywhere (fail closed).
         let mut in_container = None;
         if let TurnOwner::Run(run) = &self.owner {
-            let runtimes = self
-                .runtimes
-                .map(|read| read())
-                .transpose()
-                .context(
-                    "the runtimes of dagq.toml could not be read; dagq refuses to start the worker's turn rather than run it on the host",
-                )?;
+            let runtimes = settings.as_ref().map(|read| &read.runtimes);
             // A run works where it was made to (`turn_place`); one on the
             // host is refused by the host's executor once the worker is
             // set to the container.
@@ -1144,7 +1138,7 @@ impl<'a> Turns<'a> {
             if place == crate::domain::run_container::TurnPlace::Container {
                 in_container = Some(*run);
             }
-            if let Some(runtimes) = &runtimes {
+            if let Some(runtimes) = runtimes {
                 executor =
                     executor.with_config(super::execution::ExecutionConfig::of_runtimes(runtimes));
             }

@@ -24,9 +24,9 @@ worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md
 
 ## 既定を明示して渡す
 
-- runtimeはworkerの起動・resumeのたびに、modelとeffortをproviderに明示して渡す（`AgentProvider::select_model`）。
+- runtimeはClaudeのworkerの起動・resumeのたびに、段のmodelとeffortを明示して渡す（`AgentProvider::select_model`）。
   Claude Codeの既定やユーザー設定に依らない。
-- 既定は`domain::worker_model::WorkerSession::default`で、試しが無効なら全runがこれで起動する。
+- 段の既定は`domain::worker_model::WorkerSession::default`。
 - 決めるのはclaimとresumeとreviseで、runのsession wrapper（`application::session`）は起動の直前にそのrunで最後にsessionを開いたeventの値を読んで渡す（`WorkerSession::current`）。
   resumeは`resume_started`を記録してからsessionを開くので、その値（下の段上げで上がったものを含む）で開き直す。
   記録の無いrunは既定で起動する。
@@ -46,10 +46,11 @@ sessionを開くeventのpayloadにmodelとeffortと群を持たせる（`WorkerS
 
 ### Codexのrun
 
-Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）、effortだけを使う。
+Codexのworkerのmodelは`[worker.codex]`の設定に従い、effortは段に従う。
+modelの選択は`infrastructure::codex::codex_model_for_turn`、設定を読む時点は[Run environment](run-environment.md#main-checkoutの決め方)が持つ。
 そこでCodexで動くrun（`actual_provider`が`codex`。claimで切り替わったrunも、途中でCodexへ移ったrunのその後のresume・reviseも）のsessionを開くeventは、段のmodelを別に持ち群を持たない（`WorkerSession::fields_on`）。
 
-- 読み戻し（`WorkerSession::current`）はその段のmodelを段として読むので、段上げとtaskへの引き継ぎはClaudeのrunと同じに働く（効くのはeffortだけ）
+- 読み戻し（`WorkerSession::current`）はその段のmodelを段として読むので、段上げとtaskへの引き継ぎはClaudeのrunと同じに働く
 - Codexが実際に使ったmodelは、turnごとに`turn_finished`に残る（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。
   `stats`・`kpi`のrunのmodelはCodexで始まったrunではこの最初のturnのmodel（[stats](commands.md)）
 - Codexで動くclaimは試しに入らない: `choose`を呼ばず、群も百分位も持たない（群を持ったtaskでもそのrunは群null）。

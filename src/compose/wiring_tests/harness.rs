@@ -673,6 +673,16 @@ impl Wiring {
 
     /// A ready task verified by `verify` that depends on `after`.
     pub(super) fn ready_task_after(&self, verify: &[&str], after: &[TaskId]) -> TaskId {
+        self.ready_task_with(verify, after, None)
+    }
+
+    /// A ready headless task requesting `provider`, or the default.
+    pub(super) fn ready_task_with(
+        &self,
+        verify: &[&str],
+        after: &[TaskId],
+        provider: Option<crate::domain::Provider>,
+    ) -> TaskId {
         let mut queue = self.queue();
         let task = crate::application::TaskStore::add(
             &mut queue,
@@ -689,7 +699,7 @@ impl Wiring {
                 goal_dependencies: Vec::new(),
                 goal_id: None,
                 context: String::new(),
-                provider: None,
+                provider,
                 worker_mode: Some(WorkerMode::Headless),
                 wait_for_build: false,
                 execution_class: Default::default(),

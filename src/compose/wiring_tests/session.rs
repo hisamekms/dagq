@@ -420,3 +420,306 @@ fn wrap(
         resume,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        application::{
+            AgentProvider, CommandSpec, Spawned, Spawner, Streams, TurnReader, TurnTarget,
+            session::RuntimesRead,
+        },
+        domain::{
+            ClaimOutcome, CommitSha, EventKind, Provider, RunPlan, TaskRun,
+            headless_job::JobAccess,
+            provider_switch::WorkerRoute,
+            toolchain::Toolchains,
+            turn::{TurnRequest, TurnSession, request_path},
+            worker::{Worker, WorkerMode},
+        },
+        infrastructure::{adapters::ClaudeCode, codex::Codex},
+    };
+    use serde_json::json;
+    use std::{
+        cell::Cell,
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::SystemTime,
+    };
+
+    use super::super::{agent::Script, harness::Wiring};
+
+    /// Script the turn's process and output, and use the actual provider
+    /// adapter to apply model arguments before the executor calls spawn.
+    struct TurnProbe<'a> {
+        scripted: &'a FakeAgent,
+        adapter: &'a (dyn AgentProvider + Sync),
+        launched: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl AgentProvider for TurnProbe<'_> {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn wait_interval(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn review_command(
+            &self,
+            run: &TaskRun,
+            tree: &Path,
+            prompt: &str,
+            access: JobAccess,
+        ) -> Result<CommandSpec> {
+            self.scripted.review_command(run, tree, prompt, access)
+        }
+
+        fn turn_command(
+            &self,
+            target: &TurnTarget<'_>,
+            prompt: &str,
+            session: TurnSession<'_>,
+        ) -> Result<CommandSpec> {
+            self.scripted.turn_command(target, prompt, session)
+        }
+
+        fn turn_reader(&self, toolchains: &Toolchains) -> Result<Box<dyn TurnReader>> {
+            self.scripted.turn_reader(toolchains)
+        }
+
+        fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+            self.adapter.select_model(command, model, effort);
+        }
+
+        fn select_worker_model(
+            &self,
+            command: &mut CommandSpec,
+            model: &str,
+            effort: &str,
+            configured: Option<&str>,
+        ) {
+            self.adapter
+                .select_worker_model(command, model, effort, configured);
+        }
+    }
+
+    impl Spawner for TurnProbe<'_> {
+        fn spawn(&self, command: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
+            // The scripted command already names the run directory and
+            // session. Capture the options added by the production executor.
+            self.launched.lock().unwrap().push(
+                command
+                    .get_args()
+                    .skip(2)
+                    .map(|arg| arg.to_str().unwrap().to_owned())
+                    .collect(),
+            );
+            self.scripted.spawn(command, streams)
+        }
+    }
+
+    /// The wrapper reads the clock on every polling pass. Bound those
+    /// passes even if it stops consuming the requests already in memory.
+    struct TurnClock<'a> {
+        clock: &'a dyn Clock,
+        reads: AtomicUsize,
+    }
+
+    impl Clock for TurnClock<'_> {
+        fn system_time(&self) -> SystemTime {
+            assert!(
+                self.reads.fetch_add(1, Ordering::Relaxed) < 64,
+                "the wrapper did not complete its three scripted turn attempts"
+            );
+            self.clock.system_time()
+        }
+
+        fn monotonic(&self) -> Instant {
+            self.clock.monotonic()
+        }
+    }
+
+    #[test]
+    fn each_worker_turn_reads_settings_and_only_codex_uses_the_override() {
+        let codex = Codex::new("codex".into());
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        let claude_args = ["--model", "claude-opus-5-5", "--effort", "medium"];
+        for (provider, adapter, expected) in [
+            (
+                Provider::Codex,
+                &codex as &(dyn AgentProvider + Sync),
+                [
+                    [
+                        "-m",
+                        "gpt-first",
+                        "-c",
+                        r#"model_reasoning_effort="medium""#,
+                    ],
+                    [
+                        "-m",
+                        "gpt-second",
+                        "-c",
+                        r#"model_reasoning_effort="medium""#,
+                    ],
+                ],
+            ),
+            (
+                Provider::Claude,
+                &claude as &(dyn AgentProvider + Sync),
+                [claude_args; 2],
+            ),
+        ] {
+            let wiring = Wiring::new(
+                provider.as_str(),
+                Script {
+                    receipts: vec![],
+                    verdicts: vec![],
+                },
+            );
+            let task = wiring.ready_task_with(&[], &[], Some(provider));
+            let token = LeaseToken::new("turn-model-test");
+            let mut queue = wiring.queue();
+            let ClaimOutcome::Claimed { run } = queue
+                .claim_for_supervisor_in_order(
+                    &CommitSha::try_from("a".repeat(40)).unwrap(),
+                    &token,
+                    &[task],
+                    None,
+                    &Default::default(),
+                    &WorkerRoute::direct(&[Worker::new(provider, WorkerMode::Headless).unwrap()]),
+                )
+                .unwrap()
+            else {
+                panic!("the task must be claimed on {provider:?}");
+            };
+            assert_eq!(run.actual_provider(), provider);
+            let run_dir = PathBuf::from("/wiring/runs").join(run.id().as_str());
+            let path = |name: &str| run_dir.join(name).to_str().unwrap().to_owned();
+            queue
+                .plan_run(
+                    run.id(),
+                    &token,
+                    &RunPlan {
+                        repo_path: "/wiring/repo".into(),
+                        run_dir: path(""),
+                        worktree_path: path("worktree"),
+                        receipt_path: path("receipt.json"),
+                        log_path: path("session.log"),
+                        branch: "dagq/worker-model-test".into(),
+                    },
+                )
+                .unwrap();
+
+            let processes = FakeProcesses::with(1);
+            let (pid, start) = processes.start();
+            let start = start_token(&start);
+            let handle = BackgroundHandle {
+                pid,
+                start: start.clone(),
+            }
+            .to_string();
+            queue.workspace_created(run.id(), &token, &handle).unwrap();
+            queue
+                .record_runtime_event(
+                    run.id(),
+                    EventKind::WrapperLaunched,
+                    json!({"pid": pid, "start": start, "workspace_id": handle}),
+                )
+                .unwrap();
+            // The store derives queue-local paths when the wrapper reads the run.
+            let run = queue.run(run.id()).unwrap();
+            let run_dir = Path::new(run.run_dir().unwrap());
+            wiring
+                .files
+                .write(&run_dir.join("prompt.txt"), b"work")
+                .unwrap();
+            for seq in 1..=2 {
+                let request = TurnRequest {
+                    seq,
+                    what: "revise request".into(),
+                    prompt: "continue".into(),
+                };
+                wiring
+                    .files
+                    .write(
+                        &request_path(run_dir, seq),
+                        &serde_json::to_vec(&request).unwrap(),
+                    )
+                    .unwrap();
+            }
+            let probe = TurnProbe {
+                scripted: &wiring.agent,
+                adapter,
+                launched: Mutex::default(),
+            };
+            let reads = Cell::new(0);
+            let read = || {
+                reads.set(reads.get() + 1);
+                // Edit the setting between actual process launches, then
+                // make the third attempted turn's shared config unreadable.
+                let model = match probe.launched.lock().unwrap().len() {
+                    0 => "gpt-first",
+                    1 => "gpt-second",
+                    _ => anyhow::bail!("dagq.toml:2: model is blank"),
+                };
+                Ok(RuntimesRead {
+                    codex_model: Some(model.into()),
+                    ..Default::default()
+                })
+            };
+            let clock = wiring.generators().clock;
+            let tokens = MemoryTokens::new(run_dir.join("service"), clock.clone());
+            let clock = TurnClock {
+                clock: &*clock,
+                reads: AtomicUsize::new(0),
+            };
+            let mut queue = queue.with_actor(ActorContext::instance(ActorRole::Wrapper, run.id()));
+            let error = run_session(
+                Session {
+                    queue: &mut queue,
+                    db: &wiring.db,
+                    provider: &probe,
+                    other: None,
+                    spawner: &probe,
+                    queue_service: &tokens,
+                    processes: &processes,
+                    files: &*wiring.files,
+                    pid,
+                    start: WrapperStart::Background,
+                    registration_poll: Duration::ZERO,
+                    sccache: None,
+                    clock: &clock,
+                    runtimes: &read,
+                    toolchains: &Toolchains::none,
+                    containers: &Nothing,
+                    telemetry: &Nothing,
+                },
+                run.id(),
+                &token,
+                false,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                format!("{error:#}"),
+                "the runtimes of dagq.toml could not be read; dagq refuses to start the worker's turn rather than run it on the host: dagq.toml:2: model is blank",
+                "{provider:?}: {} settings reads, argv {:?}",
+                reads.get(),
+                probe.launched.lock().unwrap()
+            );
+            assert_eq!(reads.get(), 3, "{provider:?}");
+            assert_eq!(*probe.launched.lock().unwrap(), expected, "{provider:?}");
+            assert_eq!(
+                wiring.agent.turn_sessions(),
+                [
+                    format!("start {}", run.id()),
+                    format!("resume {}", run.id())
+                ]
+            );
+        }
+    }
+}
