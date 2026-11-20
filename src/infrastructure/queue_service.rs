@@ -7375,6 +7375,9 @@ impl<E: TransactionEntries> DialogueStore for ServiceSqlite<E>
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
+    fn recipients(&self, ask: &Ask) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+        self.queue.ask_recipients(ask)
+    }
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)
     }
@@ -7384,11 +7387,23 @@ where
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
         self.dialogue().open_ask(ask)
     }
-    fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
-        self.dialogue().answer(id, text, answerer)
+    fn answer(
+        &mut self,
+        id: AskId,
+        text: &str,
+        answerer: Answerer,
+        actor: &crate::domain::ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask> {
+        self.dialogue().answer(id, text, answerer, actor, team)
     }
-    fn close_ask(&mut self, id: AskId) -> Result<Ask> {
-        self.dialogue().close_ask(id)
+    fn close_ask(
+        &mut self,
+        id: AskId,
+        actor: &crate::domain::ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask> {
+        self.dialogue().close_ask(id, actor, team)
     }
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
         self.dialogue().add_note(note)

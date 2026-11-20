@@ -3160,6 +3160,10 @@ mod store_contract_tests {
         contract(|open| store_contract::goal_landing_marks_change_undone(&open));
     }
     #[test]
+    fn ask_routing() {
+        contract(|open| store_contract::ask_routing(&open));
+    }
+    #[test]
     fn delegates_records() {
         contract(|open| store_contract::delegates_records(&open));
     }

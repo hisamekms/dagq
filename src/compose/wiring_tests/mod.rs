@@ -19,6 +19,7 @@ mod service;
 mod session;
 
 mod already_satisfied;
+mod ask_close;
 mod audit_administration;
 mod audit_judgments;
 mod ci_freshness;

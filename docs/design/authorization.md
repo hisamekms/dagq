@@ -60,8 +60,6 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 
 ## Policy
 
-外向きの人もuserで、grantsの後・resourceの前に登録簿で狭め、inboxに親の人の許可も適用する。
-
 |人の役割|userの許可からの狭め|
 |---|---|
 |管理者|なし|
@@ -75,6 +73,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 |role|許すcapability|resourceの規則|
 |---|---|---|
 |user|予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` runnerの行と`image.publish`を除く全て|なし|
+|user・inbox|`ask.answer`・`ask.close`|OIDCの発行元のある配置は人（inboxは親）が今の宛先か管理者だけ|
 |user・inbox|`audit.read`（他は拒む）|なし|
 |user（続き）|`runner.register`・`runner.revoke`・`goal.landing_mark`・`credential.preference`|OIDCの人。登録と設定は自分、失効とgoalの印は持ち主か管理者（印はhostのuserも人のownerの無いgoalに）|
 |user（続き）|`runner.share`・`runner.list`・`delegate.write`|共有は管理者、一覧はmemberが自分、管理者が全て。代わりに答える人はOIDCの人の自分の分だけ|

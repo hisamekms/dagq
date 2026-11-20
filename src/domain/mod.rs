@@ -1274,6 +1274,7 @@ mod error;
 pub mod event_kind;
 pub mod full_disk;
 pub use event_kind::{EventKind, RecordedKind};
+pub mod ask_routing;
 pub mod delegate;
 pub mod execution_class;
 pub mod exit;

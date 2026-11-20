@@ -4,7 +4,9 @@
 //! run sequentially: business writes roll back except the fenced-write case,
 //! which removes its row; leader cases release their last holder. Runner
 //! assignment cases retain their private runners, tasks and runs.
+mod ask_routing;
 mod cases;
+pub use ask_routing::ask_routing;
 mod queue_ports;
 pub use queue_ports::queue_ports;
 mod delegates;
@@ -325,6 +327,7 @@ fn cases_sized<S: ContractStore, F: Fn() -> Result<S>, const SMALL: bool>()
             "goal landing marks change undone",
             Case::Fixed(goal_landing_marks_change_undone::<S, F>),
         ),
+        ("ask routing", Case::Fixed(ask_routing::<S, F>)),
         ("delegates", Case::Fixed(delegates_records::<S, F>)),
         ("delegates refused", Case::Fixed(delegates_refused::<S, F>)),
         (
@@ -1029,7 +1032,7 @@ mod tests {
                 })
                 .collect()
         }
-        const EXPECTED: [(&str, Fixture, Fixture); 83] = [
+        const EXPECTED: [(&str, Fixture, Fixture); 84] = [
             ("leader lifecycle", Fixed, Fixed),
             ("leader singleton", Fixed, Fixed),
             ("stale writer", Fixed, Fixed),
@@ -1053,6 +1056,7 @@ mod tests {
             ("goal landing marks survive tags", Fixed, Fixed),
             ("goal landing marks change with event", Fixed, Fixed),
             ("goal landing marks change undone", Fixed, Fixed),
+            ("ask routing", Fixed, Fixed),
             ("delegates", Fixed, Fixed),
             ("delegates refused", Fixed, Fixed),
             ("delegates change undone", Fixed, Fixed),
@@ -1256,9 +1260,9 @@ mod tests {
         let sqlite_volume = cases::<SqliteQueue, SqliteOpen>();
         let postgres = cases::<Postgres, PostgresOpen>();
         let sqlite_small = cases_sized::<SqliteQueue, SqliteOpen, true>();
-        assert_eq!(sqlite_volume.len(), 83);
-        assert_eq!(postgres.len(), 83);
-        assert_eq!(sqlite_small.len(), 83);
+        assert_eq!(sqlite_volume.len(), EXPECTED.len());
+        assert_eq!(postgres.len(), EXPECTED.len());
+        assert_eq!(sqlite_small.len(), EXPECTED.len());
         assert_eq!(snapshot(sqlite_volume), full, "SQLite volume");
         assert_eq!(snapshot(postgres), full, "Postgres run");
         assert_eq!(snapshot(sqlite_small), small, "SQLite small interference");

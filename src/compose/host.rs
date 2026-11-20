@@ -1816,7 +1816,7 @@ pub fn run_command<E: TransactionEntries>(
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
-    if matches!(command, QueueCommand::Answer(_)) {
+    if matches!(command, QueueCommand::Answer(_) | QueueCommand::AskClose(_)) {
         let policy = crate::infrastructure::dialogue::answer_policy(&*queue.generators().clock);
         run_command_with_policy(queue, db, command, &policy)
     } else {
@@ -1824,8 +1824,9 @@ where
     }
 }
 
-/// Shared command dispatch with its approval policy, also used by an explicit
-/// composition. Omitting the policy's deployment refuses landing by default.
+/// Shared command dispatch with the deployment policy for answer and close,
+/// also used by an explicit composition. Omitting the policy's deployment
+/// refuses landing by default.
 pub(crate) fn run_command_with_policy<E: TransactionEntries>(
     queue: &mut StoreQueue<E>,
     db: &Path,
@@ -1872,7 +1873,7 @@ where
         C::AskClose(params) => {
             let mut store = crate::infrastructure::dialogue::DialogueQueue { queue };
             serde_json::to_value(
-                Dialogue::new(&mut store, &actor, &StaticPolicy).close(AskId::new(params.id))?,
+                Dialogue::new(&mut store, &actor, answer_policy).close(AskId::new(params.id))?,
             )?
         }
         C::Hold(params) => serde_json::to_value(Holds::new(queue, &actor, &StaticPolicy).hold(

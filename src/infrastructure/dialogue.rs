@@ -34,6 +34,9 @@ impl<E: TransactionEntries> DenialLog for DialogueQueue<'_, E> {
 }
 
 impl<E: TransactionEntries> DialogueStore for DialogueQueue<'_, E> {
+    fn recipients(&self, ask: &Ask) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+        self.queue.ask_recipients(ask)
+    }
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)
     }
@@ -46,12 +49,25 @@ impl<E: TransactionEntries> DialogueStore for DialogueQueue<'_, E> {
         crate::application::ask::ask(self.queue, ask)
     }
 
-    fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
-        self.queue.answer_as(id, text, answerer)
+    fn answer(
+        &mut self,
+        id: AskId,
+        text: &str,
+        answerer: Answerer,
+        actor: &crate::domain::ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask> {
+        self.queue
+            .answer_for(id, text, answerer, Some((actor, team)))
     }
 
-    fn close_ask(&mut self, id: AskId) -> Result<Ask> {
-        self.queue.close_ask(id)
+    fn close_ask(
+        &mut self,
+        id: AskId,
+        actor: &crate::domain::ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask> {
+        self.queue.close_for(id, Some((actor, team)))
     }
 
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
@@ -156,5 +172,188 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod recipient_tests {
+    use super::*;
+    use crate::application::commands::dialogue::Dialogue;
+    use crate::domain::{
+        ActorContext, ActorRole, AskKind, AskReason, TaskId,
+        actor::HumanRole,
+        authorization::AnswerPolicy,
+        delegate::DelegateChange,
+        goal_owner::Owner,
+        oidc::OidcIdentity,
+        queue_service::{Member, TeamRole},
+    };
+    use crate::infrastructure::{
+        delegates, members,
+        sql_exec::{SqlRead, SqlWrite, sql_params},
+        sqlite::SqliteQueue,
+        store_writes,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn human_dialogue_records_identity_and_runtime_close_keeps_legacy_payload() {
+        let mut queue = SqliteQueue::init(format!(
+            "file:/dialogue-routing-{}?vfs=memdb",
+            uuid::Uuid::new_v4()
+        ))
+        .unwrap();
+        let identity = |subject: &str| OidcIdentity {
+            issuer: "https://id.example".into(),
+            subject: subject.into(),
+        };
+        let role = HumanRole {
+            role: TeamRole::Member,
+            on_call: false,
+        };
+        let owner = Owner::new(identity("owner"));
+        let user = ActorContext::new(
+            ActorRole::User,
+            format!("human:{}", serde_json::to_string(owner.identity()).unwrap()),
+        )
+        .with_human_role(role);
+        let inbox =
+            ActorContext::new(ActorRole::Inbox, "inbox").with_parent_role(identity("proxy"), role);
+        let tx = queue.write_entry("routing_fixture").unwrap();
+        for subject in ["owner", "proxy"] {
+            members::add(
+                &tx,
+                &Member {
+                    identity: identity(subject),
+                    role: TeamRole::Member,
+                    on_call: false,
+                    display_name: None,
+                    created_at: 1,
+                    disabled_at: None,
+                },
+            )
+            .unwrap();
+        }
+        let task = TaskId::new(SqlWrite::insert_id(&tx, "INSERT INTO tasks(title, description, acceptance, verification_commands, status) VALUES ('routing', '', '', '[]', 'draft')", sql_params![]).unwrap());
+        store_writes::set_task_owner(&tx, task, Some(&owner)).unwrap();
+        delegates::change(&tx, &owner, &DelegateChange::Add(identity("proxy")), 1).unwrap();
+        tx.commit().unwrap();
+        let open = |queue: &mut SqliteQueue| {
+            queue
+                .ask(NewAsk {
+                    kind: AskKind::WorkerQuestion,
+                    task_id: Some(task),
+                    run_id: None,
+                    question: "q".into(),
+                    options: vec![],
+                    asked_by: "worker".into(),
+                    reason_category: AskReason::Scope,
+                    finding_id: None,
+                    request_id: None,
+                    recommendation: None,
+                    confidence: None,
+                    topics: vec!["task_overlap".into()],
+                })
+                .unwrap()
+                .ask
+        };
+        let events = |queue: &SqliteQueue, kind: &str| -> Vec<Value> {
+            let tx = queue.read_entry("routing_events").unwrap();
+            tx.query_map(
+                "SELECT payload FROM run_events WHERE kind=?1 ORDER BY id",
+                sql_params![kind],
+                |r| {
+                    let text: String = r.get(0)?;
+                    Ok(serde_json::from_str(&text).unwrap())
+                },
+            )
+            .unwrap()
+        };
+        let policy = AnswerPolicy::new(Some(true), 100);
+        let ask = open(&mut queue);
+        let answered = Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &inbox, &policy)
+            .answer(ask.id, "free answer")
+            .unwrap();
+        assert_eq!(
+            answered.answer_authority,
+            Some(crate::domain::AnswerAuthority::Delegated)
+        );
+        assert_eq!(
+            events(&queue, "ask_answered")[0]["human_action"],
+            json!({"issuer": "https://id.example", "subject": "proxy", "reason": "delegate"})
+        );
+        let tx = queue.write_entry("remove_proxy").unwrap();
+        delegates::change(&tx, &owner, &DelegateChange::Remove(identity("proxy")), 2).unwrap();
+        tx.commit().unwrap();
+        let error = Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &inbox, &policy)
+            .close(ask.id)
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::domain::AuthorizationError>()
+                .is_some()
+        );
+        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+        assert!(events(&queue, "ask_closed").is_empty());
+        Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &user, &policy)
+            .close(ask.id)
+            .unwrap();
+        assert_eq!(
+            events(&queue, "ask_closed")[0]["human_action"],
+            json!({"issuer": "https://id.example", "subject": "owner", "reason": "owner"})
+        );
+
+        let ask = open(&mut queue);
+        Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &user, &policy)
+            .answer(ask.id, "next")
+            .unwrap();
+        let tx = queue.write_entry("unowned_before_runtime_close").unwrap();
+        store_writes::set_task_owner(&tx, task, None).unwrap();
+        tx.commit().unwrap();
+        crate::application::AskStore::close_ask(&mut queue, ask.id).unwrap();
+        assert_eq!(
+            events(&queue, "ask_closed")[1],
+            json!({"ask_id": ask.id, "kind": ask.kind})
+        );
+
+        assert_eq!(
+            events(&queue, "ask_answered")[1]["human_action"],
+            json!({"issuer": "https://id.example", "subject": "owner", "reason": "owner"})
+        );
+
+        // The same authenticated inbox on an issuer-less deployment retains
+        // its authority and the exact legacy event shape (no human fields).
+        let ask = open(&mut queue);
+        let before = serde_json::to_value(queue.read_ask(ask.id).unwrap()).unwrap();
+        assert!(
+            Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &user, &policy)
+                .answer(ask.id, "not addressed")
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(queue.read_ask(ask.id).unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(events(&queue, "ask_answered").len(), 2);
+        let local = AnswerPolicy::new(Some(false), 100);
+        Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &inbox, &local)
+            .answer(ask.id, "local")
+            .unwrap();
+        Dialogue::new(&mut DialogueQueue { queue: &mut queue }, &inbox, &local)
+            .close(ask.id)
+            .unwrap();
+        assert!(
+            events(&queue, "ask_answered")[2]
+                .get("human_action")
+                .is_none()
+        );
+        assert_eq!(
+            events(&queue, "ask_closed")[2],
+            json!({"ask_id": ask.id, "kind": ask.kind})
+        );
+        assert_eq!(
+            queue.read_ask(ask.id).unwrap().answer_authority,
+            Some(crate::domain::AnswerAuthority::Delegated)
+        );
     }
 }

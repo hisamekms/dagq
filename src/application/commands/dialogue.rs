@@ -41,8 +41,16 @@ pub trait DialogueStore: DenialLog {
     fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>>;
     /// Register the ask; the inbox's watch notifies the person of a new one.
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value>;
-    fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask>;
-    fn close_ask(&mut self, id: AskId) -> Result<Ask>;
+    fn recipients(&self, ask: &Ask) -> Result<Vec<crate::domain::ask_routing::Recipient>>;
+    fn answer(
+        &mut self,
+        id: AskId,
+        text: &str,
+        answerer: Answerer,
+        actor: &ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask>;
+    fn close_ask(&mut self, id: AskId, actor: &ActorContext, team: Option<bool>) -> Result<Ask>;
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent>;
     fn mark(&mut self, change: MarkChange, by: &str) -> Result<Value>;
     fn record_finding(&mut self, finding: NewFinding) -> Result<FindingOutcome>;
@@ -181,13 +189,41 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
             use sha2::{Digest, Sha256};
             answerer.original_text_hash = original.map(|s| Sha256::digest(s.as_bytes()).into());
         }
-        self.store.answer(id, text, answerer)
+        let result = self.store.answer(
+            id,
+            text,
+            answerer,
+            actor,
+            self.gate.authorizer.team_version(),
+        );
+        self.record_write_denial(&ask, result)
     }
 
     /// `ask close`: the user's, the inbox's and the supervisor's.
     pub fn close(&mut self, id: AskId) -> Result<Ask> {
-        self.authorize_ask(Capability::AskClose, id)?;
-        self.store.close_ask(id)
+        let ask = self.authorize_ask(Capability::AskClose, id)?;
+        let result = self
+            .store
+            .close_ask(id, self.gate.actor, self.gate.authorizer.team_version());
+        self.record_write_denial(&ask, result)
+    }
+
+    /// A concurrent owner/delegate change can refuse the transaction's
+    /// recheck after the read gate passed. Record it after rollback, too.
+    fn record_write_denial(&self, ask: &Ask, result: Result<Ask>) -> Result<Ask> {
+        if let Err(error) = &result
+            && let Some(error) = error.downcast_ref::<AuthorizationError>()
+        {
+            super::record(
+                &*self.store,
+                error,
+                &Resource::Ask {
+                    id: ask.id,
+                    run: ask.run_id.clone(),
+                },
+            );
+        }
+        result
     }
 
     /// `note` on a task, a run or a goal; `by` is the actor's.
@@ -288,6 +324,27 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
                 run: ask.run_id.clone(),
             },
         )?;
+        let team = self.gate.authorizer.team_version();
+        let current = if team == Some(true)
+            && crate::domain::ask_routing::person(self.gate.actor).is_some()
+        {
+            self.store.recipients(&ask)?
+        } else {
+            Vec::new()
+        };
+        if let Err(error) =
+            crate::domain::ask_routing::authorize(self.gate.actor, team, capability, &current)
+        {
+            super::record(
+                &*self.store,
+                &error,
+                &Resource::Ask {
+                    id,
+                    run: ask.run_id.clone(),
+                },
+            );
+            return Err(error.into());
+        }
         Ok(ask)
     }
 }
@@ -308,6 +365,9 @@ mod tests {
     /// `store: <what>`, so a test sees whether a command reached it.
     #[derive(Default)]
     struct Store {
+        current: Vec<crate::domain::ask_routing::Recipient>,
+        answered: bool,
+        closed: bool,
         ask_kind: Option<AskKind>,
         subject: Option<String>,
         denials: RefCell<Vec<Value>>,
@@ -351,13 +411,13 @@ mod tests {
                 run_id: Some(RunId::new("r1").unwrap()),
                 question: "q".into(),
                 options: Vec::new(),
-                answer: None,
+                answer: self.answered.then(|| "yes".into()),
                 asked_by: "supervisor".into(),
                 reason_category: AskReason::RecoveryFailed,
                 subject: self.subject.clone(),
                 affected: Vec::new(),
                 created_at: 0,
-                answered_at: None,
+                answered_at: self.answered.then_some(1),
                 closed_at: None,
                 finding_id: None,
                 request_id: None,
@@ -371,11 +431,22 @@ mod tests {
             self.writer = Some(ask.asked_by);
             Err(reached("ask"))
         }
-        fn answer(&mut self, _: AskId, _: &str, answerer: Answerer) -> Result<Ask> {
+        fn recipients(&self, _: &Ask) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+            Ok(self.current.clone())
+        }
+        fn answer(
+            &mut self,
+            _: AskId,
+            _: &str,
+            answerer: Answerer,
+            _: &ActorContext,
+            _: Option<bool>,
+        ) -> Result<Ask> {
             self.answerer = Some(answerer);
             Err(reached("answer"))
         }
-        fn close_ask(&mut self, _: AskId) -> Result<Ask> {
+        fn close_ask(&mut self, _: AskId, _: &ActorContext, _: Option<bool>) -> Result<Ask> {
+            self.closed = true;
             Err(reached("ask close"))
         }
         fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
@@ -555,6 +626,89 @@ mod tests {
 
     fn worker() -> ActorContext {
         ActorContext::worker(&RunId::new("r1").unwrap(), TaskId::new(1))
+    }
+
+    #[test]
+    fn human_answer_and_close_refuse_before_mutating_and_record_the_denial() {
+        use crate::domain::{
+            actor::HumanRole,
+            ask_routing::{Recipient, RecipientReason},
+            oidc::OidcIdentity,
+            queue_service::{Principal, TeamRole},
+        };
+        let identity = OidcIdentity {
+            issuer: "https://id.example".into(),
+            subject: "alice".into(),
+        };
+        for inbox in [false, true] {
+            for admin in [false, true] {
+                let human_role = HumanRole {
+                    role: if admin {
+                        TeamRole::Admin
+                    } else {
+                        TeamRole::Member
+                    },
+                    on_call: false,
+                };
+                let actor = if inbox {
+                    ActorContext::new(ActorRole::Inbox, "inbox")
+                        .with_parent_role(identity.clone(), human_role)
+                } else {
+                    Principal::human(identity.clone())
+                        .actor()
+                        .with_human_role(human_role)
+                        .with_human_login(true, Some(100))
+                };
+                for recipient in [
+                    None,
+                    Some(RecipientReason::Owner),
+                    Some(RecipientReason::Delegate),
+                ] {
+                    for close in [false, true] {
+                        let mut store = Store {
+                            answered: close,
+                            current: recipient
+                                .map(|reason| Recipient {
+                                    identity: identity.clone(),
+                                    reason,
+                                })
+                                .into_iter()
+                                .collect(),
+                            ..Default::default()
+                        };
+                        let before = serde_json::to_value(store.read_ask(ASK).unwrap()).unwrap();
+                        let policy =
+                            crate::domain::authorization::AnswerPolicy::new(Some(true), 101);
+                        let mut dialogue = Dialogue::new(&mut store, &actor, &policy);
+                        let error = if close {
+                            dialogue.close(ASK)
+                        } else {
+                            dialogue.answer(ASK, "yes")
+                        }
+                        .unwrap_err();
+                        if recipient.is_some() || admin {
+                            assert!(error.to_string().starts_with("store:"));
+                            assert_eq!(store.closed, close);
+                            assert_eq!(store.answerer.is_some(), !close);
+                        } else {
+                            assert_eq!(
+                                error.downcast_ref::<AuthorizationError>().unwrap().reason,
+                                DenyReason::Resource
+                            );
+                            assert!(!store.closed && store.answerer.is_none());
+                            assert_eq!(
+                                serde_json::to_value(store.read_ask(ASK).unwrap()).unwrap(),
+                                before
+                            );
+                            assert_eq!(
+                                store.denials.borrow()[0]["capability"],
+                                if close { "ask.close" } else { "ask.answer" }
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

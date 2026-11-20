@@ -22,6 +22,8 @@ A worker, a job and the observer get the queue service's address and a token, ne
 
 ## What each role is refused
 
+With an OIDC issuer configured, an OIDC-identified person and their inbox may answer or close an ask only as a current recipient or administrator (the inbox uses its human parent). Otherwise both operations are refused as `authorization_denied`. Changes to ownership or delegates apply to open asks too, including close after answer.
+
 HTTP-authenticated people remain `user`; the registry role narrows user grants before resource checks. Role changes and disabling apply on the next call without replacing the token. Local socket users have no registry role and keep their grants.
 
 | Human role | Restriction on user grants |
@@ -47,7 +49,7 @@ HTTP-authenticated people remain `user`; the registry role narrows user grants b
 | user | `credential.preference` (`me credentials`) for one's own credential choice only, with human authentication |
 | inbox, planner, worker, all jobs, observer, supervisor, wrapper, integrator, executor-telemetry, updater, runner, image-publisher | `credential.preference` is refused |
 
-With an OIDC issuer configured, approving landing in an `approve_landing` answer requires a person's token from a recent login. The inbox and a user without a human token are refused. Landing is also refused when the policy cannot determine the deployment. Non-approving answers and other asks remain available; without an issuer, ordinary landing approvals may still be relayed.
+With an OIDC issuer configured, approving landing in an `approve_landing` answer requires a person's token from a recent login. The inbox and a user without a human token are refused. Landing is also refused when the policy cannot determine the deployment. Other answers follow the recipient rule; without an issuer, ordinary landing approvals may still be relayed.
 
 An external `issue_token` authenticated with a person's token issues only that person's inbox token, returning the value only in its response. The inbox's capabilities are the intersection of its own permissions and its human parent's current registry role. Changes and disabling apply on the next call; a member can issue their own inbox without gaining other lifecycle operations.
 

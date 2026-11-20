@@ -40,6 +40,15 @@ use crate::domain::{
 pub use crate::application::AskQuery;
 
 impl<E: TransactionEntries> StoreQueue<E> {
+    /// Current recipients, derived rather than a stale copy on the ask.
+    pub(crate) fn ask_recipients(
+        &self,
+        ask: &Ask,
+    ) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+        let tx = self.read_entry("ask_recipients")?;
+        read_recipients(&tx, ask)
+    }
+
     /// Register an ask, or return the open one of the same task, run and
     /// kind unchanged. A new ask writes `ask_opened` (with the run when it
     /// has one) in the same transaction. A `blocked` ask may name neither a
@@ -225,6 +234,18 @@ impl<E: TransactionEntries> StoreQueue<E> {
     /// and record `ask_answered` (with the run when the ask has one)
     /// carrying them.
     pub fn answer_as(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
+        self.answer_for(id, text, answerer, None)
+    }
+
+    /// Dialogue's write path rechecks the current recipients inside the
+    /// transaction that writes both the answer and its event.
+    pub(crate) fn answer_for(
+        &mut self,
+        id: AskId,
+        text: &str,
+        answerer: Answerer,
+        caller: Option<(&crate::domain::ActorContext, Option<bool>)>,
+    ) -> Result<Ask> {
         ensure!(!text.trim().is_empty(), "answer must not be blank");
         // Read before the transaction: the host's `[update]` is a file.
         let releases = self.release_updates_on();
@@ -235,7 +256,9 @@ impl<E: TransactionEntries> StoreQueue<E> {
         let now = self.generators.clock.now();
         let mut payload =
             json!({"ask_id": id, "kind": ask.kind, "reason_category": ask.reason_category});
+        let human = authorize_human(&tx, &ask, caller, crate::domain::Capability::AskAnswer)?;
         write_answer(&tx, &ask, text, answerer, now, &mut payload)?;
+        record_human(&mut payload, human.as_ref());
         // A person's decision on a run that its next run (ADR-t4018-1) or
         // its next session (ADR-t4027-1) may have to be told: its whole
         // text, read off the events by `domain::unapplied_decisions` and
@@ -485,19 +508,19 @@ impl<E: TransactionEntries> StoreQueue<E> {
     /// an ask in `run_events` (what `stats` pairs with `ask_opened`), so an
     /// ask is withdrawn by answering it.
     pub fn close_ask(&mut self, id: AskId) -> Result<Ask> {
+        self.close_for(id, None)
+    }
+
+    /// A human close carries its current recipient reason; runtime close
+    /// calls close_ask directly and keeps the original event payload.
+    pub(crate) fn close_for(
+        &mut self,
+        id: AskId,
+        caller: Option<(&crate::domain::ActorContext, Option<bool>)>,
+    ) -> Result<Ask> {
         let tx = self.write_entry("ask_close")?;
         let ask = read_ask(&tx, id)?;
-        ensure!(ask.closed_at.is_none(), "ask {id} is already closed");
-        ensure!(
-            ask.answered_at.is_some(),
-            "ask {id} is not answered yet; answer it (for example that it is withdrawn) before closing it"
-        );
-        SqlWrite::execute(
-            &tx,
-            "UPDATE asks SET closed_at=?2 WHERE id=?1",
-            sql_params![id, self.generators.clock.now()],
-        )?;
-        record_ask_closed(&tx, &ask)?;
+        close_in(&tx, &ask, self.generators.clock.now(), caller)?;
         let closed = read_ask(&tx, id)?;
         tx.commit()?;
         Ok(closed)
@@ -1061,6 +1084,111 @@ impl<E: TransactionEntries> StoreQueue<E> {
     }
 }
 
+/// Close and record in the caller's transaction; an uncommitted transaction
+/// leaves both untouched. Runtime callers supply no human context.
+pub(crate) fn close_in(
+    tx: &impl SqlWrite,
+    ask: &Ask,
+    now: i64,
+    caller: Option<(&crate::domain::ActorContext, Option<bool>)>,
+) -> Result<()> {
+    ensure!(ask.closed_at.is_none(), "ask {} is already closed", ask.id);
+    ensure!(
+        ask.answered_at.is_some(),
+        "ask {} is not answered yet; answer it (for example that it is withdrawn) before closing it",
+        ask.id
+    );
+    let human = authorize_human(tx, ask, caller, crate::domain::Capability::AskClose)?;
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        sql_params![ask.id, now],
+    )?;
+    record_ask_closed_by(tx, ask, human.as_ref())
+}
+
+/// Resolve the target in the same snapshot as its owner and delegates.
+/// A run takes its task's current owner. Task-less goal-review asks use the
+/// review's goal link, never an untrusted string parsed from the question.
+pub(crate) fn read_recipients(
+    tx: &impl SqlRead,
+    ask: &Ask,
+) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+    let task = if let Some(run) = &ask.run_id {
+        Some(tx.query_row(
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![run],
+            |r| r.get::<_, TaskId>(0),
+        )?)
+    } else {
+        ask.task_id
+    };
+    let owner = if let Some(task) = task {
+        super::store_rows::read_task(tx, task)?
+            .owner()
+            .person()
+            .cloned()
+    } else if ask.finding_id.is_none() && ask.request_id.is_none() {
+        let goal = tx
+            .query_row(
+                "SELECT goal_id FROM goal_reviews WHERE ask_id=?1 ORDER BY id DESC LIMIT 1",
+                sql_params![ask.id],
+                |r| r.get::<_, crate::domain::GoalId>(0),
+            )
+            .optional()?;
+        goal.map(|goal| super::store_rows::goal_owner(tx, goal))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let delegates = owner
+        .as_ref()
+        .map(|o| super::delegates::read(tx, o))
+        .transpose()?
+        .unwrap_or_default();
+    let mut active = std::collections::HashSet::new();
+    for identity in owner.iter().map(|o| o.identity()).chain(delegates.iter()) {
+        if super::members::read(tx, identity)?.is_some_and(|m| m.disabled_at.is_none()) {
+            active.insert(identity.clone());
+        }
+    }
+    Ok(crate::domain::ask_routing::recipients(
+        owner.as_ref(),
+        &delegates,
+        &[],
+        |p| active.contains(p),
+    ))
+}
+
+/// Recheck the same pure answer/close rule on the writing transaction.
+pub(crate) fn authorize_human(
+    tx: &impl SqlRead,
+    ask: &Ask,
+    caller: Option<(&crate::domain::ActorContext, Option<bool>)>,
+    capability: crate::domain::Capability,
+) -> Result<Option<crate::domain::ask_routing::Recipient>> {
+    let Some((actor, team)) = caller else {
+        return Ok(None);
+    };
+    let current = if team == Some(true) && crate::domain::ask_routing::person(actor).is_some() {
+        read_recipients(tx, ask)?
+    } else {
+        Vec::new()
+    };
+    Ok(crate::domain::ask_routing::authorize(
+        actor, team, capability, &current,
+    )?)
+}
+
+pub(crate) fn record_human(
+    payload: &mut serde_json::Value,
+    human: Option<&crate::domain::ask_routing::Recipient>,
+) {
+    if let Some(human) = human {
+        payload["human_action"] = json!(human);
+    }
+}
+
 /// Refuse, before anything is written, an answer to the recovery job's
 /// `decide` ask of a run that ended that is only a runtime operation's name
 /// and none of its options ([`crate::domain::recovery::bare_action_answer`]):
@@ -1453,13 +1581,23 @@ pub(super) fn write_answer(
 /// transaction that closes it: `stats` reads it as the answer applied
 /// (task 468) when nothing else that names the ask applied it (task 568).
 pub(super) fn record_ask_closed(conn: &impl SqlWrite, ask: &Ask) -> Result<()> {
+    record_ask_closed_by(conn, ask, None)
+}
+
+pub(super) fn record_ask_closed_by(
+    conn: &impl SqlWrite,
+    ask: &Ask,
+    human: Option<&crate::domain::ask_routing::Recipient>,
+) -> Result<()> {
     audit_judgment(conn, ask, "applied", None, None)?;
+    let mut payload = json!({"ask_id": ask.id, "kind": ask.kind});
+    record_human(&mut payload, human);
     ask_event(
         conn,
         ask.task_id,
         ask.run_id.as_ref(),
         EventKind::AskClosed,
-        json!({"ask_id": ask.id, "kind": ask.kind}),
+        payload,
     )
 }
 
@@ -1492,7 +1630,7 @@ pub(super) fn audit_judgment(
 
 /// An ask's event: on its task (and run), or, for a task-less `blocked`
 /// ask, on nothing.
-fn ask_event(
+pub(super) fn ask_event(
     conn: &impl SqlWrite,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,

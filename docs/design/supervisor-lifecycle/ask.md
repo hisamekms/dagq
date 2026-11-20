@@ -121,3 +121,14 @@ AIが作るask（`planner_question`・`blocked`・`approve_landing`・`approve_p
   適用した`send_back`をsessionが直さずに`approve_landing`のaskになったものは`concern_send_back_escalated`を記録して数えない。
 - **集計**: [Stats](commands.md)の`recommendations`。
   askのkindごとの「推奨を持つaskの答えのうち、answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。
+
+## チームの宛先と操作
+
+OIDCの発行元のある配置では、taskとrunのaskは今のownerとその代理を宛先とし、goalに属するものはgoalのownerを継ぐ。
+taskに結びつかないgoalのaskもgoalのownerへ届き、無効な人は宛先に含めない。
+ownerの記録や対象の無いaskは宛先が空で、宛先の導出の入口は`domain::ask_routing`。
+人とそのinboxのanswerとcloseは、操作時の宛先か管理者に限り、外れた人の操作を拒む。
+ownerの付け替え・taskの移動・代理の解除は開いたaskにも効き、answer後に宛先から外れればcloseもできない。
+人の操作はその人と許した理由をeventに残し、runtimeの自動closeは人の操作として記録しない。
+着地承認は宛先でも最近のloginによる人のtokenだけで、inboxや管理者の役によって広げない。
+hostのsocketの人と親の無いinbox、および発行元の無い配置の動作は保つ。

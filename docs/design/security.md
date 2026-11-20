@@ -174,11 +174,13 @@ Codexのplannerのsandboxは[判定の場所](#判定の場所)を参照する�
 
 ## answerと代行の記録
 
-inboxはaskのanswerと`dagq-recover`の手作業を代行でき、人の役割を持つOIDCの発行元のある配置だけ、権限は親の人の役割で狭まる（[AuthorizationのPolicy](authorization.md#policy)）。
+OIDCの人・そのinboxのanswerとcloseは今の宛先か管理者だけで、人と理由を記録する。
+
+inboxはanswerと`dagq-recover`を代行し、OIDCの配置は親の役割で狭まる（[Policy](authorization.md#policy)）。
 弱める操作と守るpathの承認はinboxを拒み、普通の承認はローカルで中継できる。
 hostではDAGQ_ROLEの無いTTYの確認をhuman_attestedと記録するが、同じUIDのagentはこの経路を偽れる。
 
-- eventのactorとanswerの`AnswerAuthority`は人自身とinboxの代行を区別し、answerには承認の分類（`answer_approves`）も残す
+- eventのactorとanswerの`AnswerAuthority`は人自身とinboxの代行を区別し、answerには承認の分類も残す
 - 監査の回答経路は`AnswerAuthority`から決め、answerの文やpromptから推さない。
   人自身とinboxの中継を区別し、中継では人の原文を渡した場合のhashと、渡していない場合を残す。
   判断の前提・回答・適用の成否の記録は[監査](audit.md)が持つ

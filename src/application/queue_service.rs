@@ -3472,6 +3472,9 @@ impl super::commands::delegates::DelegateStore for Store<'_> {
 }
 
 impl DialogueStore for Store<'_> {
+    fn recipients(&self, ask: &Ask) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+        self.0.recipients(ask)
+    }
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.0.read_ask(id)
     }
@@ -3481,11 +3484,23 @@ impl DialogueStore for Store<'_> {
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
         self.0.open_ask(ask)
     }
-    fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
-        self.0.answer(id, text, answerer)
+    fn answer(
+        &mut self,
+        id: AskId,
+        text: &str,
+        answerer: Answerer,
+        actor: &crate::domain::ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask> {
+        self.0.answer(id, text, answerer, actor, team)
     }
-    fn close_ask(&mut self, id: AskId) -> Result<Ask> {
-        self.0.close_ask(id)
+    fn close_ask(
+        &mut self,
+        id: AskId,
+        actor: &crate::domain::ActorContext,
+        team: Option<bool>,
+    ) -> Result<Ask> {
+        self.0.close_ask(id, actor, team)
     }
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
         self.0.add_note(note)
@@ -4892,6 +4907,9 @@ pub(crate) mod tests {
     }
 
     impl DialogueStore for Queue {
+        fn recipients(&self, _: &Ask) -> Result<Vec<crate::domain::ask_routing::Recipient>> {
+            Ok(Vec::new())
+        }
         fn read_ask(&self, id: AskId) -> Result<Ask> {
             self.human
                 .lock()
@@ -4918,7 +4936,14 @@ pub(crate) mod tests {
             self.log.lock().unwrap().push(value.clone());
             Ok(value)
         }
-        fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
+        fn answer(
+            &mut self,
+            id: AskId,
+            text: &str,
+            answerer: Answerer,
+            _: &ActorContext,
+            _: Option<bool>,
+        ) -> Result<Ask> {
             let mut memory = self.human.lock().unwrap();
             let ask = memory
                 .ask
@@ -4929,7 +4954,7 @@ pub(crate) mod tests {
             ask.answer_authority = Some(answerer.authority);
             Ok(ask.clone())
         }
-        fn close_ask(&mut self, _: AskId) -> Result<Ask> {
+        fn close_ask(&mut self, _: AskId, _: &ActorContext, _: Option<bool>) -> Result<Ask> {
             Err(anyhow!("close"))
         }
         fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
