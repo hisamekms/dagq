@@ -735,6 +735,62 @@ mod tests {
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
     const BASE: i64 = 1_790_000_000_000;
 
+    #[test]
+    fn wrapper_commands_count_like_direct_commands() {
+        use crate::domain::command_rules::{CommandWrapper, TelemetrySettings, work_rules};
+        use crate::domain::toolchain::Toolchains;
+
+        let toolchains = Toolchains::this_repository().with_telemetry(TelemetrySettings {
+            commands: crate::domain::command_rules::project_rules(),
+            wrappers: vec![CommandWrapper {
+                script: "scripts/wrap.sh".into(),
+                takes_value: vec!["--log".into()],
+            }],
+            ..Default::default()
+        });
+        let rules = work_rules(&toolchains);
+        let direct_rules = cargo_rules();
+        let mut lines = vec![input(0, "do the task")];
+        for (index, (command, category)) in [
+            (
+                "cargo llvm-cov nextest --locked --workspace --fail-under-lines 80",
+                LLVM_COV,
+            ),
+            ("cargo test --locked", TEST),
+            ("cargo test --locked --lib x", TEST),
+            ("cargo clippy --all-targets", BUILD),
+            ("cargo fmt --all --check", FMT),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = index.to_string();
+            let start = 2 * i64::try_from(index).unwrap() + 1;
+            let wrapped = format!(r#"sh scripts/wrap.sh --log "$TMPDIR/x.log" {command}"#);
+            let command_text = if index == 0 {
+                format!("/bin/zsh -lc '{wrapped}'")
+            } else {
+                wrapped
+            };
+            assert_eq!(label(command, &direct_rules).0, category);
+            assert_eq!(label(&command_text, &rules), label(command, &direct_rules));
+            let checks = check_classes(&command_text, &rules);
+            assert_eq!(checks, check_classes(command, &direct_rules));
+            assert_eq!(checks.contains(&FULL_TEST), index == 1);
+            lines.push(bash(start, &id, &command_text, false));
+            lines.push(result(start + 1, &id, "ok", false));
+        }
+        let work = breakdown(&records(&lines), ms(0), ms(11), &[], &rules);
+        assert_eq!(work.llvm_cov_runs, Some(1));
+        assert_eq!(work.full_tests, Some(1));
+        let categories: Vec<_> = work
+            .commands
+            .iter()
+            .map(|command| command.category)
+            .collect();
+        assert_eq!(categories, [LLVM_COV, TEST, TEST, BUILD, FMT]);
+    }
+
     fn at(secs: i64) -> String {
         millis_text(BASE + secs * 1000)
     }

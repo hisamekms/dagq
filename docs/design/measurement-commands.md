@@ -24,6 +24,7 @@ related:
 
 - shapeは`domain::command_shape`の副作用の無い関数が作り、executorがstepに付ける（語の扱いと上限はそのmodule doc）。
   shellの`-c`のscript（Codexのコマンド）はその中身の部分として持つ。
+  宣言したwrapperに中のコマンドがあればそのコマンドの形を持ち、wrapperのpathとflagの値は残さない。
 - shapeは部分（パイプ・`&&`・`||`・`;`で分けたもの）ごとに先頭の予約語・代入の名前・プログラム・引数を持つ。
   平文で持つのは決まった一覧にあるプログラム名とそのサブコマンドだけで、一覧に無いプログラムは名前もその後の語もdigestにする（[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）。
   一覧にあるプログラムのflagの名前は、その一覧が知るoptionのときだけ平文で、ほかはflagの形のまま名前をdigestにする。

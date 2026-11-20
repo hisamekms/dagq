@@ -60,6 +60,8 @@
 //! (a quote, a substitution, a subshell, a `case` or a `[[` open at its
 //! end, or a `)` that closes nothing) keeps no word in plain at all: each
 //! of its parts is its words' digests.
+//! A declared wrapper with an inner command keeps the shape of that
+//! command, dropping the wrapper path and its flags and values (ADR-t4197-1).
 //!
 //! Redirections (`2>&1`, `> out`, a heredoc and its body) and comments are
 //! dropped. A shell's script (`bash -lc '…'`, as Codex runs its commands)
@@ -75,7 +77,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::command_rules::CommandDetail;
+use super::command_rules::{CommandDetail, CommandWrapper};
 
 /// What every digested word starts with: its version, so that another
 /// way of making them never matches these.
@@ -106,7 +108,7 @@ const SECRET_SUBS: [&str; 10] = [
     "credentials",
 ];
 
-/// How deep a shell's script inside a shell's script is shaped.
+/// How deep scripts and declared wrappers can nest when shaped.
 const MAX_SCRIPT_DEPTH: usize = 3;
 
 /// The shell's reserved words a part may start with.
@@ -1112,7 +1114,7 @@ fn assigned(text: &str) -> Option<&str> {
 
 /// Whether `name` is a flag's name: `-` or `--`, then a letter or digit
 /// and letters, digits, `_`, `-` and `.`.
-fn flag_name(name: &str) -> bool {
+pub(crate) fn flag_name(name: &str) -> bool {
     let rest = name.strip_prefix("--").or_else(|| name.strip_prefix('-'));
     rest.is_some_and(|rest| {
         rest.chars()
@@ -2616,6 +2618,7 @@ pub struct Subcommands {
     /// The variables whose names a part's assignment keeps in plain: the
     /// common ones and those of the declared profiles.
     variables: Vec<VariableList>,
+    wrappers: Vec<CommandWrapper>,
     key: Option<DigestKey>,
     detail: CommandDetail,
 }
@@ -2633,13 +2636,15 @@ impl Subcommands {
         Self {
             lists: COMMON_SUBCOMMANDS.to_vec(),
             variables: vec![COMMON_VARIABLES],
+            wrappers: Vec::new(),
             key: None,
             detail: CommandDetail::Shape,
         }
     }
 
     /// The common ones and those of each profile `toolchains` declares, at
-    /// the detail its `[telemetry] command_detail` asks.
+    /// the detail its `[telemetry] command_detail` asks and with its
+    /// declared wrappers.
     pub fn of(toolchains: &super::toolchain::Toolchains) -> Self {
         let mut lists = COMMON_SUBCOMMANDS.to_vec();
         let mut variables = vec![COMMON_VARIABLES];
@@ -2650,6 +2655,7 @@ impl Subcommands {
         Self {
             lists,
             variables,
+            wrappers: toolchains.telemetry().wrappers.clone(),
             key: None,
             detail: toolchains.telemetry().command_detail,
         }
@@ -2801,35 +2807,45 @@ fn shape_part(words: &[Word], depth: usize, known: &Subcommands) -> Vec<ShapePar
             vec![part]
         };
     };
+    shape_program(part, program, args, depth, known)
+}
+
+fn shape_program(
+    mut part: ShapePart,
+    program: &Word,
+    args: &[Word],
+    depth: usize,
+    known: &Subcommands,
+) -> Vec<ShapePart> {
     let name = program
         .text
         .rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
-        .unwrap_or(&program.text)
-        .to_owned();
-    if depth < MAX_SCRIPT_DEPTH
-        && SHELLS.contains(&name.as_str())
-        && let Some(script) = shell_script(args)
-    {
-        let mut parts = parts_of(script, depth + 1, known);
-        if let Some(first) = parts.first_mut() {
-            let mut lead = std::mem::take(&mut part.lead);
-            lead.append(&mut first.lead);
-            first.lead = lead;
-            let mut assigns = std::mem::take(&mut part.assigns);
-            assigns.append(&mut first.assigns);
-            first.assigns = assigns;
+        .unwrap_or(&program.text);
+    if depth < MAX_SCRIPT_DEPTH {
+        let shell = SHELLS.contains(&name);
+        if shell && let Some(script) = shell_script(args) {
+            let mut parts = parts_of(script, depth + 1, known);
+            if let Some(first) = parts.first_mut() {
+                part.lead.append(&mut first.lead);
+                first.lead = part.lead;
+                part.assigns.append(&mut first.assigns);
+                first.assigns = part.assigns;
+            }
+            return parts;
         }
-        return parts;
+        if let Some((inner, args)) = wrapper_command(program, args, shell, &known.wrappers) {
+            return shape_program(part, inner, args, depth + 1, known);
+        }
     }
     // Only a program a list names keeps its name, and its flags' names and
     // its known subcommands; any other first word (an unknown program, a
     // substitution, a quoted text, or a word a misread split put there) is
     // its digest, and so is every word after it.
-    match known.of_program(&name) {
+    match known.of_program(name) {
         Some(list) => {
-            part.program = Some(name);
+            part.program = Some(name.to_owned());
             part.args = shape_args(list, args, known);
         }
         None => {
@@ -2838,6 +2854,48 @@ fn shape_part(words: &[Word], depth: usize, known: &Subcommands) -> Vec<ShapePar
         }
     }
     vec![part]
+}
+
+/// Pick out the inner argv of a declared wrapper without re-lexing its
+/// arguments as shell text.
+fn wrapper_command<'a>(
+    program: &'a Word,
+    args: &'a [Word],
+    shell: bool,
+    wrappers: &[CommandWrapper],
+) -> Option<(&'a Word, &'a [Word])> {
+    let declared = |word: &Word| {
+        wrappers
+            .iter()
+            .find(|wrapper| wrapper.matches_script(&word.text))
+    };
+    let (wrapper, mut rest) = if let Some(wrapper) = declared(program) {
+        (wrapper, args)
+    } else if shell {
+        let (script, rest) = args.split_first()?;
+        (declared(script)?, rest)
+    } else {
+        return None;
+    };
+    while let Some((word, after)) = rest.split_first() {
+        let (name, attached) = word
+            .text
+            .split_once('=')
+            .map_or((word.text.as_str(), false), |(name, _)| (name, true));
+        if word.text == "--" {
+            rest = after;
+            break;
+        }
+        if !flag_name(name) {
+            break;
+        }
+        rest = if !attached && wrapper.takes_value.iter().any(|flag| flag == name) {
+            after.get(1..)?
+        } else {
+            after
+        };
+    }
+    rest.split_first().filter(|(word, _)| !word.text.is_empty())
 }
 
 /// The words of an unknown program, each its digest, up to a `--`, kept
@@ -3036,6 +3094,105 @@ mod tests {
 
     fn d(word: &str) -> String {
         DigestKey::test().digest(word)
+    }
+
+    fn with_wrappers() -> Subcommands {
+        let toolchains = crate::domain::toolchain::Toolchains::this_repository().with_telemetry(
+            super::super::command_rules::TelemetrySettings {
+                wrappers: vec![CommandWrapper {
+                    script: "./scripts/wrap.sh".into(),
+                    takes_value: vec!["--log".into()],
+                }],
+                ..Default::default()
+            },
+        );
+        Subcommands::of(&toolchains).keyed(Some(DigestKey::test()))
+    }
+
+    #[test]
+    fn a_declared_wrapper_keeps_only_the_inner_command() {
+        let known = with_wrappers();
+        let direct = "cargo llvm-cov nextest --locked --workspace --fail-under-lines 80";
+        let wrapped = format!(r#"sh scripts/wrap.sh --log "$TMPDIR/x.log" {direct}"#);
+        // The reference has no wrapper support enabled.
+        let expected = shape_value_with(direct, &Subcommands::rust()).unwrap();
+        assert_eq!(expected["parts"][0]["program"], "cargo");
+        for command in [
+            wrapped.clone(),
+            format!("/bin/zsh -lc '{wrapped}'"),
+            format!("./scripts/wrap.sh --log=hidden -- {direct}"),
+            format!(r#"sh ./scripts/wrap.sh --log --value sh -c '{direct}'"#),
+        ] {
+            assert_eq!(
+                shape_value_with(&command, &known).unwrap(),
+                expected,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapper_preserves_fallbacks_and_the_inner_programs_privacy() {
+        let known = with_wrappers();
+        let ordinary = Subcommands::rust();
+        for (command, words) in [
+            (
+                "sh scripts/wrap.sh --self-test",
+                &["scripts/wrap.sh", "--self-test"][..],
+            ),
+            (
+                "sh scripts/wrap.sh --log private",
+                &["scripts/wrap.sh", "--log", "private"][..],
+            ),
+        ] {
+            let expected = json!({"parts": [{"program": "sh", "args": words
+                .iter().map(|word| json!({"word": d(word)})).collect::<Vec<_>>()
+            }]});
+            assert_eq!(shape_value_with(command, &known).unwrap(), expected);
+            assert_eq!(shape_value_with(command, &ordinary).unwrap(), expected);
+        }
+
+        assert_eq!(
+            shape_value_with("sh scripts/wrap.sh cargo clippy --locked", &ordinary).unwrap(),
+            json!({"parts": [{"program": "sh", "args": [
+                {"word": d("scripts/wrap.sh")}, {"word": d("cargo")},
+                {"word": d("clippy")}, {"word": d("--locked")}
+            ]}]}),
+        );
+        assert_eq!(
+            shape_value_with("./scripts/wrap.sh --self-test", &known).unwrap(),
+            json!({"parts": [{"program": d("./scripts/wrap.sh"), "args": [
+                {"word": d("--self-test")}
+            ]}]}),
+        );
+        assert_eq!(
+            shape_value_with(
+                "sh scripts/wrap.sh --log secret unknown-tool --locked 'a | git status'",
+                &known,
+            )
+            .unwrap(),
+            json!({"parts": [{"program": d("unknown-tool"), "args": [
+                {"word": d("--locked")}, {"word": d("a | git status")}
+            ]}]}),
+        );
+    }
+
+    #[test]
+    fn wrappers_and_shell_scripts_share_the_depth_limit() {
+        let known = with_wrappers();
+        let wrapper = "sh scripts/wrap.sh ";
+        let deepest = format!("{}cargo test --locked", wrapper.repeat(MAX_SCRIPT_DEPTH));
+        assert_eq!(
+            shape_value_with(&deepest, &known),
+            shape_value_with("cargo test --locked", &Subcommands::rust()),
+        );
+        assert_eq!(
+            shape_value_with(&format!("zsh -lc '{deepest}'"), &known),
+            shape_value_with(
+                "sh scripts/wrap.sh cargo test --locked",
+                &Subcommands::rust()
+            ),
+        );
     }
 
     fn rust() -> Subcommands {

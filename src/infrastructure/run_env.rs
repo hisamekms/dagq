@@ -121,7 +121,9 @@ use crate::{
     },
     infrastructure::kpi_config::KpiTables,
     infrastructure::recurring_config::{RECURRING_TABLE, RecurringTables},
-    infrastructure::telemetry_config::{COMMANDS_TABLE, TELEMETRY_TABLE, TelemetryTables},
+    infrastructure::telemetry_config::{
+        COMMANDS_TABLE, TELEMETRY_TABLE, TelemetryTables, WRAPPERS_TABLE,
+    },
 };
 
 pub const CONFIG_FILE_NAME: &str = "dagq.toml";
@@ -757,7 +759,7 @@ pub struct Config {
     /// `[local_checks]` and its `[local_checks.gates.<name>]` in file
     /// order ([`LOCAL_GATES_PREFIX`]); `None` without a gate.
     pub local_gates: Option<LocalGates>,
-    /// `[telemetry]` and `[[telemetry.commands]]`
+    /// `[telemetry]` tables
     /// ([`crate::domain::command_rules::TelemetrySettings`]); the defaults
     /// and no rule without them.
     pub telemetry: crate::domain::command_rules::TelemetrySettings,
@@ -1209,7 +1211,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{WORKER_CODEX_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{WORKER_CODEX_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{WRAPPERS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -2635,7 +2637,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{WORKER_CODEX_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{WORKER_CODEX_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{WRAPPERS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -3541,7 +3543,7 @@ pub fn load_verification_config(root: &Path) -> Result<VerificationConfig> {
 /// The toolchain profiles the `dagq.toml` in `root` declares
 /// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`, with the
 /// project's own marks it declares ([`VERIFY_MARKS_PREFIX`]) and its
-/// `[telemetry]` and `[[telemetry.commands]]`
+/// `[telemetry]` tables
 /// ([`crate::infrastructure::telemetry_config`]): no file or no
 /// declaration is no profile (ADR-t2268-1 decision 3), and a profile
 /// `registry` does not have is a mistake of the file.
@@ -10649,7 +10651,7 @@ enabled = true
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [throughput_review], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification], [telemetry], [[telemetry.commands]], [[recurring]] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [throughput_review], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification], [telemetry], [[telemetry.commands]], [[telemetry.wrappers]], [[recurring]] and [kpi]"
             ),
             "{error}"
         );

@@ -1,4 +1,4 @@
-//! `[telemetry]` and `[[telemetry.commands]]` of `dagq.toml`, read line by
+//! `[telemetry]` and its array tables in `dagq.toml`, read line by
 //! line with the rest of the file ([`super::run_env::parse_config`]) into
 //! [`TelemetrySettings`], whose doc comment has their format and the
 //! meaning of each key. A mistake (an unknown key or value, a key twice,
@@ -9,14 +9,16 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::run_env::{parse_bool, parse_string, parse_string_array, strip_comment};
 use crate::domain::command_rules::{
-    CommandDetail, CommandRule, LEAD_WORDS, Positional, RESERVED_CLASSES, TelemetrySettings,
-    valid_class,
+    CommandDetail, CommandRule, CommandWrapper, LEAD_WORDS, Positional, RESERVED_CLASSES,
+    TelemetrySettings, valid_class,
 };
 
 /// `[telemetry]`.
 pub const TELEMETRY_TABLE: &str = "telemetry";
 /// `[[telemetry.commands]]`, one table per rule.
 pub const COMMANDS_TABLE: &str = "telemetry.commands";
+/// `[[telemetry.wrappers]]`, one table per script.
+pub const WRAPPERS_TABLE: &str = "telemetry.wrappers";
 
 const COMMAND_DETAIL: &str = "command_detail";
 const FAILED_TESTS: &str = "failed_tests";
@@ -46,12 +48,14 @@ pub struct TelemetryTables {
     keys: Vec<String>,
     /// The rule being read, finished at the next table or the file's end.
     open: Option<CommandRule>,
+    open_wrapper: Option<(usize, CommandWrapper)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Table {
     Telemetry,
     Command,
+    Wrapper,
 }
 
 impl TelemetryTables {
@@ -66,15 +70,21 @@ impl TelemetryTables {
                 .strip_suffix(']')
                 .with_context(|| format!("dagq.toml:{number}: unclosed table header [{header}]"))?
                 .trim();
-            if name != COMMANDS_TABLE {
-                return Ok(false);
-            }
-            self.open = Some(CommandRule {
-                line: Some(number),
-                ..CommandRule::new("", "")
-            });
+            self.in_table = match name {
+                COMMANDS_TABLE => {
+                    self.open = Some(CommandRule {
+                        line: Some(number),
+                        ..CommandRule::new("", "")
+                    });
+                    Some(Table::Command)
+                }
+                WRAPPERS_TABLE => {
+                    self.open_wrapper = Some((number, CommandWrapper::default()));
+                    Some(Table::Wrapper)
+                }
+                _ => return Ok(false),
+            };
             self.keys.clear();
-            self.in_table = Some(Table::Command);
             return Ok(true);
         }
         match header {
@@ -90,6 +100,9 @@ impl TelemetryTables {
             }
             COMMANDS_TABLE => bail!(
                 "dagq.toml:{number}: [{COMMANDS_TABLE}] holds one rule per table; write [[{COMMANDS_TABLE}]]"
+            ),
+            WRAPPERS_TABLE => bail!(
+                "dagq.toml:{number}: [{WRAPPERS_TABLE}] holds one script per table; write [[{WRAPPERS_TABLE}]]"
             ),
             _ => Ok(false),
         }
@@ -214,14 +227,59 @@ impl TelemetryTables {
                     ))),
                 }
             }
+            Some(Table::Wrapper) => {
+                let (_, wrapper) = self.open_wrapper.as_mut().expect("a wrapper is open");
+                match key {
+                    "script" => {
+                        let script = parse_string(rest).with_context(value)?;
+                        ensure!(
+                            !script
+                                .strip_prefix("./")
+                                .unwrap_or(&script)
+                                .trim()
+                                .is_empty(),
+                            at("script must name a nonblank path".into())
+                        );
+                        wrapper.script = script;
+                    }
+                    "takes_value" => {
+                        let flags = parse_string_array(rest).with_context(value)?;
+                        for flag in &flags {
+                            ensure!(
+                                crate::domain::command_shape::flag_name(flag),
+                                at(format!("{key} names {flag:?}, which is no flag's name"))
+                            );
+                        }
+                        wrapper.takes_value = flags;
+                    }
+                    _ => bail!(at(format!(
+                        "unknown key {key} in [[{WRAPPERS_TABLE}]]; the keys are script and takes_value"
+                    ))),
+                }
+            }
             None => unreachable!("an entry outside these tables"),
         }
         Ok(())
     }
 
-    /// End the rule being read: it has its class and its program, and is
-    /// not one read before.
+    /// Finish the open declaration and check its required keys and uniqueness.
     fn close(&mut self) -> Result<()> {
+        if let Some((line, wrapper)) = self.open_wrapper.take() {
+            ensure!(
+                !wrapper.script.is_empty(),
+                "dagq.toml:{line}: [[{WRAPPERS_TABLE}]] has no script"
+            );
+            ensure!(
+                !self
+                    .settings
+                    .wrappers
+                    .iter()
+                    .any(|earlier| earlier.matches_script(&wrapper.script)),
+                "dagq.toml:{line}: [[{WRAPPERS_TABLE}]] repeats script {:?}",
+                wrapper.script
+            );
+            self.settings.wrappers.push(wrapper);
+        }
         let Some(rule) = self.open.take() else {
             return Ok(());
         };

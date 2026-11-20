@@ -229,7 +229,10 @@ fn doctor_and_status_show_the_declared_profiles() {
     let (_dir, db, repo) = awaiting();
     declare(
         &repo,
-        &format!("{MADE_UP_ONLY}[toolchains.core]\nprofile = \"rust\"\n{WITHIN_MARK}"),
+        &format!(
+            "{MADE_UP_ONLY}[toolchains.core]\nprofile = \"rust\"\n{WITHIN_MARK}\
+             [[telemetry.wrappers]]\nscript = \"scripts/wrap.sh\"\ntakes_value = [\"--log\"]\n"
+        ),
     );
     let declared = json!({
         "declared": [
@@ -243,9 +246,11 @@ fn doctor_and_status_show_the_declared_profiles() {
         }],
     });
     let one_shot = with_made_up();
+    let doctor = one_shot.doctor(&db, false, None).unwrap();
+    assert_eq!(doctor["toolchains"], declared);
     assert_eq!(
-        one_shot.doctor(&db, false, None).unwrap()["toolchains"],
-        declared
+        doctor["command_rules"]["wrappers"],
+        json!([{"script": "scripts/wrap.sh", "takes_value": ["--log"]}]),
     );
     assert_eq!(
         one_shot.status_for(&db, None).unwrap()["toolchains"],

@@ -107,7 +107,7 @@ impl CommandDetail {
     }
 }
 
-/// `[telemetry]` and `[[telemetry.commands]]` of `dagq.toml`: how much of
+/// `[telemetry]` and its tables in `dagq.toml`: how much of
 /// its commands a session's steps keep and the project's rules that
 /// classify them. Read with the rest of the file
 /// (`crate::infrastructure::telemetry_config`); a mistake is an error with
@@ -126,6 +126,10 @@ impl CommandDetail {
 /// flag_values = { "--test" = ["it"] }
 /// takes_value = ["--test"]
 /// positional = "none"
+///
+/// [[telemetry.wrappers]]      # one table per script
+/// script = "scripts/wrap.sh"
+/// takes_value = ["--log"]
 /// ```
 ///
 /// - `command_detail`: what an executor's step keeps of a command
@@ -139,9 +143,16 @@ impl CommandDetail {
 ///   rule's fields of the same name). The project writes only the rules
 ///   that add to or override those of the profiles it declares, which
 ///   work by the declaration alone; [`effective_rules`] lays them out.
+/// - each `[[telemetry.wrappers]]` names a nonblank `script` path, matched
+///   with or without a leading `./` in a direct call or as a shell's first
+///   argument. Before the inner command, flags stand alone except those in
+///   `takes_value` (empty by default), which take the next word or an
+///   attached `=value`. A `--` ends the wrapper's flags. With no command
+///   left, the wrapper invocation keeps its ordinary shape. By default
+///   there are no wrapper declarations.
 ///
-/// Without either table nothing changes: the default detail, no failed
-/// test, and the profiles' and the common rules alone. A binary older than
+/// Without these tables the default detail, no failed test, and the
+/// profiles' and the common rules alone apply. A binary older than
 /// the tables refuses them, so a repository writes them only once the
 /// binary that runs its queue reads them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -150,6 +161,24 @@ pub struct TelemetrySettings {
     pub failed_tests: bool,
     /// The project's rules, in file order.
     pub commands: Vec<CommandRule>,
+    pub wrappers: Vec<CommandWrapper>,
+}
+
+/// A script declared to forward an inner command (see [`TelemetrySettings`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CommandWrapper {
+    pub script: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub takes_value: Vec<String>,
+}
+
+impl CommandWrapper {
+    pub(crate) fn matches_script(&self, script: &str) -> bool {
+        fn relative(path: &str) -> &str {
+            path.strip_prefix("./").unwrap_or(path)
+        }
+        relative(&self.script) == relative(script)
+    }
 }
 
 /// Whether a rule asks a part for no word beside those it names.
@@ -610,7 +639,8 @@ impl CommandClassifier {
     }
 
     /// `rules` for commands read as text (a transcript's): shaped with the
-    /// known subcommands of `toolchains`' profiles, whole, under a key of
+    /// known subcommands of `toolchains`' profiles and the declared
+    /// wrappers, whole, under a key of
     /// the process's own ([`DigestKey::local`]), since neither the shapes
     /// nor their digests leave it. It names the failed tests of a command
     /// only when `toolchains`' `[telemetry] failed_tests` is on and it
@@ -858,14 +888,19 @@ pub fn reads_failed_tests(toolchains: &Toolchains) -> bool {
 /// What `doctor` shows of the classification: the rules that work, each
 /// with its source (`rules`), which a run's work breakdown classifies by
 /// too; the detail of the steps' commands (`command_detail`) and whether
-/// they name failed tests (`failed_tests`).
+/// they name failed tests (`failed_tests`). Reports the declared wrappers
+/// when present.
 pub fn doctor_view(toolchains: &Toolchains) -> Value {
     let settings = toolchains.telemetry();
-    json!({
+    let mut view = json!({
         "rules": effective_rules(toolchains).view(),
         "command_detail": settings.command_detail.as_str(),
         "failed_tests": settings.failed_tests,
-    })
+    });
+    if !settings.wrappers.is_empty() {
+        view["wrappers"] = json!(settings.wrappers);
+    }
+    view
 }
 
 /// The project rules this repository's own `dagq.toml` has for its test

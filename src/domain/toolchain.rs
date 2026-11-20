@@ -493,16 +493,14 @@ impl Toolchains {
         &self.marks
     }
 
-    /// With `dagq.toml`'s `[telemetry]` and `[[telemetry.commands]]` as
-    /// read.
+    /// With the `[telemetry]` tables read from `dagq.toml`.
     #[must_use]
     pub fn with_telemetry(mut self, telemetry: TelemetrySettings) -> Self {
         self.telemetry = telemetry;
         self
     }
 
-    /// `dagq.toml`'s `[telemetry]` and `[[telemetry.commands]]`: the
-    /// defaults and no project rule without them.
+    /// The settings read from `dagq.toml`'s `[telemetry]` tables.
     pub fn telemetry(&self) -> &TelemetrySettings {
         &self.telemetry
     }

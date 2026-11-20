@@ -508,7 +508,12 @@ fn review_period<Q: AskStore + RunLog>(
             let (ran, watched) = steps.watch(
                 provider,
                 launch.model.as_deref(),
-                (db, review_target(started), session_id.as_deref()),
+                (
+                    db,
+                    review_target(started),
+                    session_id.as_deref(),
+                    checkout.as_deref(),
+                ),
                 &dir.join("output.out"),
                 &*generators.clock,
                 run,

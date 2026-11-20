@@ -397,7 +397,12 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
             let (ran, watched) = steps.watch(
                 provider,
                 launch.model.as_deref(),
-                (db, target.clone(), session_id.as_deref()),
+                (
+                    db,
+                    target.clone(),
+                    session_id.as_deref(),
+                    checkout.as_deref(),
+                ),
                 &host.stdout(&dir),
                 &*generators.clock,
                 run,

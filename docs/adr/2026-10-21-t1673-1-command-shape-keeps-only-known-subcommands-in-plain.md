@@ -10,6 +10,7 @@ amends:
   - adr-t1662-3 decision 15
 amended_by:
   - adr-t3201-1
+  - adr-t4197-1
 owners:
   - hisamekms
 tags:

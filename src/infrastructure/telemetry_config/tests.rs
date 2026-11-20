@@ -70,6 +70,81 @@ fn without_the_tables_the_defaults_hold() {
     assert_eq!(telemetry.command_detail, CommandDetail::Shape);
     assert!(!telemetry.failed_tests);
     assert!(telemetry.commands.is_empty());
+    assert!(telemetry.wrappers.is_empty());
+}
+
+#[test]
+fn wrapper_tables_supply_the_keyed_executor_shape_and_doctor_view() {
+    use crate::application::StepReader;
+    use crate::domain::command_rules::doctor_view;
+    use crate::domain::toolchain::Toolchains;
+    use crate::infrastructure::codex_steps::CodexStepReader;
+    use serde_json::json;
+
+    let config = parse_config(
+        r#"
+[[telemetry.wrappers]]
+script = "./scripts/wrap.sh"
+takes_value = ["--log"]
+
+[[telemetry.wrappers]]
+script = "other.sh"
+"#,
+    )
+    .unwrap();
+    let toolchains = Toolchains::this_repository().with_telemetry(config.telemetry);
+    let known = Subcommands::of(&toolchains).keyed(Some(DigestKey::test()));
+    let mut reader = CodexStepReader::new(None).knowing(known);
+    let event = json!({
+        "type": "item.completed",
+        "item": {
+            "id": "command",
+            "type": "command_execution",
+            "command": "/bin/zsh -lc 'sh scripts/wrap.sh --log private cargo test --locked'",
+            "exit_code": 0
+        }
+    });
+    let steps = reader.line(&event.to_string(), 1);
+    assert_eq!(
+        steps[0].command_shape,
+        Some(
+            json!({"parts": [{"program": "cargo", "args": [{"sub": "test"}, {"flag": "--locked"}]}]})
+        ),
+    );
+    assert_eq!(
+        doctor_view(&toolchains)["wrappers"],
+        json!([
+            {"script": "./scripts/wrap.sh", "takes_value": ["--log"]},
+            {"script": "other.sh"},
+        ]),
+    );
+    assert!(doctor_view(&Toolchains::none()).get("wrappers").is_none());
+}
+
+#[test]
+fn wrapper_errors_report_the_line() {
+    for (text, wanted) in [
+        (
+            "script = ' '",
+            "dagq.toml:2: script must name a nonblank path",
+        ),
+        (
+            "alias = 'wrap.sh'",
+            "dagq.toml:2: unknown key alias in [[telemetry.wrappers]]",
+        ),
+        ("takes_value = ['--']", "dagq.toml:2: takes_value names"),
+        (
+            "takes_value = []",
+            "dagq.toml:1: [[telemetry.wrappers]] has no script",
+        ),
+        (
+            "script = 'wrap.sh'\n[[telemetry.wrappers]]\nscript = './wrap.sh'",
+            "dagq.toml:3: [[telemetry.wrappers]] repeats script",
+        ),
+    ] {
+        let got = error(&format!("[[telemetry.wrappers]]\n{text}\n"));
+        assert!(got.contains(wanted), "{got}");
+    }
 }
 
 /// (5) Every mistake of the tables is an error with its line.

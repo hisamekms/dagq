@@ -1051,6 +1051,30 @@ pub fn observe(
     observe_on_db(&db, provider, signals, options)
 }
 
+/// Step reporting for the observer and throughput review commands.
+fn command_steps() -> crate::application::step_report::CommandSteps<'static> {
+    use crate::domain::command_shape::Subcommands;
+
+    crate::application::step_report::CommandSteps::new(
+        &crate::infrastructure::run_files::LocalRunFiles,
+        Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+        |checkout| {
+            let toolchains = checkout.map(|path| {
+                crate::infrastructure::run_env::toolchains_in_use(
+                    path,
+                    &crate::domain::toolchain::BUILTIN,
+                )
+            });
+            match toolchains {
+                Some(toolchains) if !toolchains.telemetry().wrappers.is_empty() => {
+                    Subcommands::of(&toolchains)
+                }
+                _ => Subcommands::common(),
+            }
+        },
+    )
+}
+
 /// [`observe`] on the queue at `db` (canonical) opened in this process: a
 /// test's, which a library call runs. A process of the binary opens no
 /// queue, and one not started by a supervisor is refused.
@@ -1102,10 +1126,7 @@ fn observe_on_db(
                 db: &db,
                 lease: None,
             }),
-            steps: Some(crate::application::step_report::CommandSteps {
-                files: &crate::infrastructure::run_files::LocalRunFiles,
-                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
-            }),
+            steps: Some(command_steps()),
         },
     )
 }
@@ -1155,10 +1176,7 @@ pub(super) fn observe_with(
                 db,
                 lease: None,
             }),
-            steps: Some(crate::application::step_report::CommandSteps {
-                files: &crate::infrastructure::run_files::LocalRunFiles,
-                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
-            }),
+            steps: Some(command_steps()),
         },
     )
 }
@@ -1204,10 +1222,7 @@ pub(super) fn throughput_review_with(
                 db,
                 lease: None,
             }),
-            steps: Some(crate::application::step_report::CommandSteps {
-                files: &crate::infrastructure::run_files::LocalRunFiles,
-                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
-            }),
+            steps: Some(command_steps()),
         },
     )
 }
@@ -1363,10 +1378,7 @@ fn throughput_review_on_db(
                 db: &db,
                 lease: None,
             }),
-            steps: Some(crate::application::step_report::CommandSteps {
-                files: &crate::infrastructure::run_files::LocalRunFiles,
-                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
-            }),
+            steps: Some(command_steps()),
         },
     )
 }

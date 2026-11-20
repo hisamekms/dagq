@@ -958,8 +958,10 @@ const LOOK_MS: u64 = 500;
 /// tokens.
 #[derive(Clone)]
 pub struct CommandSteps<'a> {
-    pub files: &'a dyn RunFiles,
-    pub sinks: std::sync::Arc<dyn TelemetrySinks>,
+    files: &'a dyn RunFiles,
+    sinks: std::sync::Arc<dyn TelemetrySinks>,
+    subcommands: fn(Option<&Path>) -> Subcommands,
+    look_interval: std::time::Duration,
 }
 
 /// The steps a [`CommandSteps::watch`] read, to end once its agent's
@@ -975,6 +977,20 @@ pub struct WatchedSteps<'a> {
 }
 
 impl<'a> CommandSteps<'a> {
+    /// Use `subcommands` to read the shape settings of a queue's checkout.
+    pub fn new(
+        files: &'a dyn RunFiles,
+        sinks: std::sync::Arc<dyn TelemetrySinks>,
+        subcommands: fn(Option<&Path>) -> Subcommands,
+    ) -> Self {
+        Self {
+            files,
+            sinks,
+            subcommands,
+            look_interval: std::time::Duration::from_millis(LOOK_MS),
+        }
+    }
+
     /// Run `run` (the wait for the agent `agent` starts, of `model`, whose
     /// stdout goes to `stdout`) while a thread of its own reads that
     /// stdout every [`LOOK_MS`] by `agent`'s [`StepReader`] into the steps
@@ -986,12 +1002,13 @@ impl<'a> CommandSteps<'a> {
     /// and held while the agent runs, as the command registers it only
     /// once its agent ended, and is sent at [`WatchedSteps::finish`], after
     /// that registration: nothing of it is refused before it is the
-    /// target's. Its value, and the steps to end.
+    /// target's. Shapes use the settings of the bound `checkout`. Returns
+    /// the run's value and the steps to end.
     pub fn watch<T>(
         &self,
         agent: &dyn super::AgentProvider,
         model: Option<&str>,
-        (db, target, session): (&Path, StepTarget, Option<&str>),
+        (db, target, session, checkout): (&Path, StepTarget, Option<&str>, Option<&Path>),
         stdout: &Path,
         clock: &dyn super::Clock,
         run: impl FnOnce() -> T,
@@ -1000,7 +1017,7 @@ impl<'a> CommandSteps<'a> {
         let mut steps = JobSteps::new(
             agent.step_reader(
                 model,
-                Subcommands::common().keyed(self.sinks.digest_key(db)),
+                (self.subcommands)(checkout).keyed(self.sinks.digest_key(db)),
             ),
             VerificationSteps::new(
                 self.sinks.clone(),
@@ -1012,6 +1029,7 @@ impl<'a> CommandSteps<'a> {
         );
         let started = clock.monotonic();
         let files = self.files;
+        let look_interval = self.look_interval;
         let registered = session.is_some();
         let (value, ended) = std::thread::scope(|scope| {
             let (stop, stopped) = std::sync::mpsc::channel::<()>();
@@ -1023,7 +1041,7 @@ impl<'a> CommandSteps<'a> {
                 .spawn_scoped(scope, move || {
                     // Until `run` returns and drops `stop`.
                     while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                        stopped.recv_timeout(std::time::Duration::from_millis(LOOK_MS))
+                        stopped.recv_timeout(look_interval)
                     {
                         let now = millis_since(started, clock.monotonic());
                         if registered {
@@ -1715,11 +1733,13 @@ mod tests {
         let watch = CommandSteps {
             files: &files,
             sinks: tokens.clone(),
+            subcommands: |_| Subcommands::common(),
+            look_interval: std::time::Duration::from_millis(1),
         };
         let ((), watched) = watch.watch(
             &NamingAgent,
             None,
-            (Path::new("/q/queue.db"), target(), None),
+            (Path::new("/q/queue.db"), target(), None, None),
             stdout,
             &clock,
             || {

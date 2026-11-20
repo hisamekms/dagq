@@ -41,10 +41,11 @@ pub fn observe_with_generators(
                 db,
                 lease: None,
             }),
-            steps: Some(dagq::application::step_report::CommandSteps {
-                files: &dagq::infrastructure::run_files::LocalRunFiles,
-                sinks: Arc::new(dagq::infrastructure::queue_service::SystemServiceAccess),
-            }),
+            steps: Some(dagq::application::step_report::CommandSteps::new(
+                &dagq::infrastructure::run_files::LocalRunFiles,
+                Arc::new(dagq::infrastructure::queue_service::SystemServiceAccess),
+                |_| dagq::domain::command_shape::Subcommands::common(),
+            )),
         },
     )
 }
