@@ -67,7 +67,7 @@ effort = "high"         # 省けば既定
 ```
 
 - **既定**: `provider`を書かない役割はClaude（`domain::actor_model::ROLE_PROVIDER`）で、失敗のときはClaudeの控えのaskで待つ
-- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`（observerは[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。
+- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`に[非対話のruntimeのplanner](plan-planners.md#runtimeのplannerの経路)を含む。
   それ以外の役割に`codex`を書くと、`dagq.toml`を読むときの検査（`RoleModels::check`）がエラーにする。
   warnを出してClaudeで起動する形にしなかったのは、ADR-t1063-1の決定1が「起動せずに設定の誤りとして知らせる」と決めたため。
   エラーの間は他の`dagq.toml`の誤りと同じく、supervisorとobserverは全ての役割を表が無いときと同じ起動にし（`Supervisor::role_models`のwarn）、`doctor`の`roles.error`に出る。
@@ -90,7 +90,8 @@ effort = "high"         # 省けば既定
 ## 差し戻しで開き直すplannerの段上げ
 
 plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のplannerが居ないのでruntimeが新しくplannerを立てる（`open_runtime_planner`、[Plan review](plan-review.md#reviseの配送)）と、そのplannerのeffortを`[roles.runtime_planner]`の値（無ければ既定）から1段上げる（`domain::actor_model::raise`）。
-modelは表の値（無ければ既定を明示）のまま変えない。
+modelは選んだproviderの値を保つ。
+Codexのeffortへの対応は`infrastructure::codex::reasoning_effort`が持つ。
 
 生きているplannerへの配送（指摘を次のturnの依頼として`turns/`に置く）は上げず、理由と記録は`infrastructure::plan_reviews`の`revise_sent`のdoc commentが持つ。
 
@@ -108,8 +109,8 @@ runtimeのplannerの試し（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-producti
 - **inbox**: `dagq inbox`が起動の記録（`inbox_opened`）に`launch`を残し、同じ`launch`をinboxのhookに渡して区間に写させる（ADR-t1181-1決定5。欄は`lifecycle::inbox`と`domain::sessions::hook_changes`のdoc comment）。
   区間の境界と記録の欠けの読み方は[Provider lifecycle](../provider-lifecycle.md#inboxの区間)が持つ
 
-計測の層別はtranscriptから読んだ`session_closed`の値を使う。
-`launch`は起動の意図と出どころで、既定で起動したsessionの実際の値はtranscriptが持つ。
+計測の層別は区間の実測を使う。
+`launch`は起動の意図と出どころを持つ。
 
 - **実際のmodelをjobの終わりのeventに写さない**: 実際の`model` / `effort`は区間の`session_closed`だけが持ち、jobの終わりのeventには写さない。
   `session_closed`はjobの終わりのeventと同じトランザクション・同じ時刻に書かれ、開始のevent（`launch`）ともjobとも結べる（`domain::sessions`）ので、写すと同じ値を2か所に持つだけになる。
@@ -131,7 +132,7 @@ runtimeのplannerは経路（対話か非対話。[ADR-t1394-2](../../adr/2026-1
 - `route`だけを書いた表は起動に何も渡さない（`RoleModels::launch`は表の無い役割と同じに扱い、既定の起動のまま）。
 - 開くruntimeのplannerの`planners.route`には常に`headless`を書く（[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)）。
   `planners.route`は、過去の対話のplannerの行を`interactive`のまま読むために残る（`stats` / `kpi`の経路ごとの集計）。
-- `dagq doctor`の`roles.runtime_planner`は`route: "headless"`だけを示す（`application::health::roles`）。
+- `dagq doctor`の`roles.runtime_planner`は起動の設定に加え、経路を常に`headless`と示す（`application::health::roles`）。
 
 非対話のplannerの区間はturnから開いて閉じ、`route: headless`を持ち、`stats` / `kpi`で経路ごとに読む（ADR-t1394-2決定4。[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)、[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
 wrapperはplannerのturnの`turn_started`に起動の`model`と`effort`を`launch`として書き、区間はそれを持つ。

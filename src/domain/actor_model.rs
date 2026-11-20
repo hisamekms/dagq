@@ -54,9 +54,10 @@ pub const ROLE_PROVIDER: Provider = Provider::Claude;
 /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
 /// and 7): goal, run and plan reviews, the throughput review, the
 /// observer (ADR-t1222-1, task 1223), the recovery job (task 1225) and
-/// the job of `setup-review` (ADR-t2259-1 decision 7) and the inbox
-/// (ADR-t1181-1 decision 2). Claude runs every role.
-pub const CODEX_ROLES: [ModelRole; 8] = [
+/// the job of `setup-review` (ADR-t2259-1 decision 7), the inbox
+/// (ADR-t1181-1 decision 2) and the runtime's planner (ADR-t2930-1).
+/// Claude runs every role.
+pub const CODEX_ROLES: [ModelRole; 9] = [
     ModelRole::GoalReview,
     ModelRole::Review,
     ModelRole::PlanReview,
@@ -65,6 +66,7 @@ pub const CODEX_ROLES: [ModelRole; 8] = [
     ModelRole::Recovery,
     ModelRole::SetupReview,
     ModelRole::Inbox,
+    ModelRole::RuntimePlanner,
 ];
 
 /// Whether `provider` can run a session of `role`.
@@ -742,6 +744,8 @@ pub struct ActorLaunch {
     pub role: ModelRole,
     #[serde(default = "claude")]
     pub provider: Provider,
+    /// The requested model. When a Codex planner's effort is raised, an
+    /// omitted model still uses Codex's default.
     pub model: Option<String>,
     pub effort: Option<String>,
     pub source: LaunchSource,
@@ -813,13 +817,17 @@ impl ActorLaunch {
 
     /// This launch one effort step higher for `reason` (ADR-0079 decision 7
     /// (c)): the effort it gives, or `medium` when it gives none, raised
-    /// ([`raise`]); the model it gives, or Opus 5.5, unchanged.
+    /// ([`raise`]). Keep the chosen model, using Opus when Claude's is
+    /// omitted. Codex keeps its default model and maps `max` to `xhigh`
+    /// when the adapter writes its reasoning effort.
     pub fn escalated(self, reason: &str) -> Self {
         let from = self.effort.unwrap_or_else(|| MEDIUM.to_owned());
         Self {
             role: self.role,
             provider: self.provider,
-            model: Some(self.model.unwrap_or_else(|| OPUS.to_owned())),
+            model: self
+                .model
+                .or_else(|| (self.provider == Provider::Claude).then(|| OPUS.to_owned())),
             effort: Some(raise(&from).to_owned()),
             source: LaunchSource::ReviseEscalation,
             escalated_from: Some(from),
@@ -1185,12 +1193,9 @@ mod tests {
         review.entry(ModelRole::Observer).provider = Some(Provider::Codex);
         review.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
         assert!(review.check().is_ok());
-        review.entry(ModelRole::RuntimePlanner).provider = Some(Provider::Codex);
+        review.entry(ModelRole::Planner).provider = Some(Provider::Codex);
         let error = review.check().unwrap_err();
-        assert!(
-            error.contains("cannot run the runtime_planner role"),
-            "{error}"
-        );
+        assert!(error.contains("cannot run the planner role"), "{error}");
         for role in ModelRole::ALL {
             assert!(runs_on(role, Provider::Claude));
             assert_eq!(
@@ -1205,6 +1210,7 @@ mod tests {
                         | ModelRole::Recovery
                         | ModelRole::SetupReview
                         | ModelRole::Inbox
+                        | ModelRole::RuntimePlanner
                 )
             );
         }
@@ -1215,6 +1221,44 @@ mod tests {
         assert_eq!(
             claude.launch(ModelRole::Observer).arguments(),
             Some((OPUS, MEDIUM))
+        );
+    }
+
+    #[test]
+    fn runtime_planner_validates_codex_models_and_raises_revise_effort() {
+        let mut roles = RoleModels::default();
+        roles.entry(ModelRole::RuntimePlanner).provider = Some(Provider::Codex);
+        assert!(roles.check().is_ok());
+        let escalated = |roles: &RoleModels| {
+            roles
+                .launch(ModelRole::RuntimePlanner)
+                .escalated(REVISE_ESCALATION)
+        };
+        let default = escalated(&roles);
+        assert_eq!(default.provider, Provider::Codex);
+        assert_eq!(default.model, None);
+        assert_eq!(default.effort.as_deref(), Some("high"));
+
+        for (effort, raised) in [
+            ("low", "medium"),
+            ("medium", "high"),
+            ("high", "xhigh"),
+            ("xhigh", "xhigh"),
+            ("max", "max"),
+        ] {
+            let table = roles.entry(ModelRole::RuntimePlanner);
+            table.model = Some("gpt-6-astra".into());
+            table.effort = Some(effort.into());
+            assert!(roles.check().is_ok());
+            let launch = escalated(&roles);
+            assert_eq!(launch.arguments(), Some(("gpt-6-astra", raised)));
+            assert_eq!(launch.escalated_from.as_deref(), Some(effort));
+        }
+        roles.entry(ModelRole::RuntimePlanner).model = Some("claude-sonnet-5".into());
+        let error = roles.check().unwrap_err();
+        assert!(
+            error.contains("[roles.runtime_planner]") && error.contains("Claude's"),
+            "{error}"
         );
     }
 
@@ -1307,9 +1351,9 @@ mod tests {
             panic!("moved the recovery job to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
-        let planner = ActorLaunch::default_of(ModelRole::RuntimePlanner);
+        let person_planner = ActorLaunch::default_of(ModelRole::Planner);
         assert!(matches!(
-            job_route(&planner, true, true, no_claude),
+            job_route(&person_planner, true, true, no_claude),
             JobRoute::Wait { .. }
         ));
     }

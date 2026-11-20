@@ -622,18 +622,13 @@ pub trait AgentProvider {
     fn review_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(600)
     }
-    /// One turn of a headless worker (ADR-t813-1 decision 1): a
-    /// non-interactive call in the run's worktree with `prompt` as its only
-    /// input, starting a new session (named as `session` says, for a
-    /// provider that takes the name) or going on with the session of that
-    /// id, under the run's settings. Its stdout is the turn's output for
-    /// [`AgentProvider::turn_reader`]. The caller gives it no other stdin
-    /// than the prompt the command holds, says where the output goes and starts it in a process group of its own. A
-    /// provider without one refuses. A provider whose agent reads the
-    /// prompt on stdin gives it there ([`CommandSpec::stdin`]) rather than
-    /// as an argument, which a `pgrep -f` pattern of a check it names would
-    /// match (Claude's); one that takes it as a positional argument
-    /// (Codex's) leaves stdin unset.
+    /// One non-interactive turn of a worker or runtime planner. Start a
+    /// new session or resume the one identified by `session`. The caller
+    /// directs stdout to [`AgentProvider::turn_reader`] and gives the turn
+    /// its own process group. Worker and planner commands can deliver the
+    /// prompt on stdin with [`CommandSpec::stdin`]. A Codex planner also
+    /// receives the bundled planner instructions on its first turn
+    /// (ADR-t2930-1).
     ///
     /// `target` says where the turn runs: a run's worktree and directory,
     /// or a headless planner's checkout and directory (ADR-t1394-2

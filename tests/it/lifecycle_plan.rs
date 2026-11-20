@@ -197,6 +197,8 @@ fn launch<'a>(
         repo_root: root,
         runner,
         claude: &fixture.options.claude,
+        codex: Path::new("/nonexistent/codex"),
+        codex_home: None,
         plugin_dir: plugin_dir.as_deref(),
         language,
         roles: Default::default(),

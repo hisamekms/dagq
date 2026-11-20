@@ -13,7 +13,9 @@
 //! one `codex exec --json` in the read-only sandbox, or for a job that
 //! edits files ([`JobAccess::EditFiles`]) the sandbox that writes only its
 //! directory, whose reply, thread and model are read from its JSONL and
-//! its rollout the way a turn's are.
+//! its rollout the way a turn's are. The runtime planner uses that same
+//! reader for its turns, and the read-only job profile narrowed to the
+//! checkout and its own planning material, with the queue service socket.
 
 use anyhow::{Context, Result};
 use std::{
@@ -585,6 +587,107 @@ pub fn write_rules(worktree: &Path) -> Result<()> {
     Ok(())
 }
 
+const PLANNER_REFERENCES_DIR: &str = "references";
+const PLANNER_SKILL: &str = include_str!("../../plugins/claude-dagq/skills/dagq-planner/SKILL.md");
+const PLANNER_REFERENCES: &[(&str, &str)] =
+    include!(concat!(env!("OUT_DIR"), "/planner_references.rs"));
+
+/// Resolve the plugin variables to the wrapper's own CLI and the copy of the
+/// instructions that accompanies it. The agent only reads these files.
+fn planner_instructions(text: &str, references: &Path, dagq: &Path) -> Result<String> {
+    Ok(text
+        .replace("${CLAUDE_PLUGIN_ROOT}/bin/dagq", utf8(dagq)?)
+        .replace("${CLAUDE_PLUGIN_ROOT}", utf8(references)?))
+}
+
+/// Stage the references beside the handoff files. A stale entry cannot
+/// redirect a write outside the planner's directory.
+fn write_planner_references(planner: &Path) -> Result<()> {
+    use super::agent_dir::Directory;
+    use std::io::ErrorKind;
+
+    let references = planner.join(PLANNER_REFERENCES_DIR);
+    let dagq = planner.join(crate::application::planner::PLANNER_RUNNER_FILE);
+    let (parent, name) = Directory::parent(planner)?;
+    let planner = parent.child(name)?;
+    let open_or_make = |dir: &Directory, name: &std::ffi::OsStr| {
+        match dir.mkdir(name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        dir.child(name)
+    };
+    let root = open_or_make(&planner, PLANNER_REFERENCES_DIR.as_ref())?;
+    for (name, text) in PLANNER_REFERENCES {
+        let path = Path::new(name);
+        let mut dir = None;
+        for part in path.parent().context("a skill file has a directory")? {
+            dir = Some(open_or_make(dir.as_ref().unwrap_or(&root), part)?);
+        }
+        let text = planner_instructions(text, &references, &dagq)?;
+        dir.as_ref()
+            .unwrap_or(&root)
+            .write(
+                path.file_name().context("a skill file has a name")?,
+                text.as_bytes(),
+            )
+            .with_context(|| format!("write planner reference {name}"))?;
+    }
+    Ok(())
+}
+
+impl Codex {
+    /// The first turn prepends the shared `dagq-planner` skill to the
+    /// prompt, which carries the configured language instruction. A
+    /// resume sends its request to the existing thread.
+    ///
+    /// The same read-only profile is added by the executor on each turn,
+    /// together with the socket and the planner's own credential.
+    fn planner_turn_command(
+        &self,
+        target: &TurnTarget<'_>,
+        prompt: &str,
+        session: TurnSession<'_>,
+    ) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(&self.executable);
+        command
+            .current_dir(target.cwd)
+            .args(["exec", "--sandbox", JOB_SANDBOX]);
+        if session.resumed().is_some() {
+            command.arg("resume");
+        }
+        command
+            .args(["--json", "--ignore-user-config", "--ignore-rules"])
+            .args(["-c", "approval_policy=\"never\""])
+            .arg("-c")
+            .arg(distrust_config(target.cwd)?)
+            .args(["-c", r#"shell_environment_policy.include_only=["PATH","LANG","LC_*","DAGQ_ROLE","DAGQ_ACTOR_ID","DAGQ_SERVICE_SOCKET","DAGQ_SERVICE_CREDENTIAL_FILE"]"#])
+            .arg("--");
+        if let Some(home) = &self.home {
+            command.env("CODEX_HOME", home);
+        }
+        if let Some(thread) = session.resumed() {
+            command.arg(thread).stdin(prompt);
+        } else {
+            let references = target.dir.join(PLANNER_REFERENCES_DIR);
+            let dagq = target
+                .dir
+                .join(crate::application::planner::PLANNER_RUNNER_FILE);
+            let skill = planner_instructions(PLANNER_SKILL, &references, &dagq)?;
+            let references = references.display();
+            command.stdin(format!(
+                "Follow the dagq-planner skill below. Resolve relative skill paths under {references}. \
+                 The queue is already connected through the service. Use the supplied DAGQ executable \
+                 with no database arguments. Skip local queue setup and save planning work through the CLI. To submit a replacement, \
+                 pipe the JSON to dagq submit with --replacement /dev/stdin.\n\n{skill}\n\n{prompt}"
+            ));
+        }
+        command.arg("-").new_session();
+        Ok(command)
+    }
+}
+
 impl AgentProvider for Codex {
     fn preflight(&self) -> Result<()> {
         output(Command::new(&self.executable).arg("--version"))?;
@@ -665,6 +768,12 @@ impl AgentProvider for Codex {
         prompt: &str,
         session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
+        if target.role == crate::domain::ActorRole::Planner {
+            if session.resumed().is_none() {
+                write_planner_references(target.dir)?;
+            }
+            return self.planner_turn_command(target, prompt, session);
+        }
         // Codex names a new thread itself.
         let resume = session.resumed();
         let (worktree, run_dir) = (target.cwd, target.dir);
@@ -941,6 +1050,92 @@ mod tests {
         )
         .unwrap();
         (common.canonicalize().unwrap(), worktree)
+    }
+
+    #[test]
+    fn planner_turns_use_stdin_and_the_same_read_only_service_profile() {
+        use crate::domain::{
+            ActorRole, Provider,
+            actor_model::{ActorLaunch, ModelRole},
+        };
+        let codex = Codex::new("/bin/codex".into());
+        let target = TurnTarget {
+            role: ActorRole::Planner,
+            dir: Path::new("/queue/planners/7"),
+            cwd: Path::new("/checkout"),
+            debug_log: None,
+            plugin_dir: None,
+        };
+        let reads = AgentReads {
+            readable: [
+                target.cwd,
+                target.dir,
+                Path::new("/queue/service/credentials/planner-7"),
+            ]
+            .map(Path::to_path_buf)
+            .to_vec(),
+            unreadable: vec!["/queue".into()],
+        };
+        let launch = ActorLaunch {
+            provider: Provider::Codex,
+            effort: Some("max".into()),
+            ..ActorLaunch::default_of(ModelRole::RuntimePlanner)
+        };
+        let prompt = "Plan the change.\n\nLanguage: write in BCP 47 tag `ja`.";
+        for (session, prefix, end) in [
+            (
+                TurnSession::New("ignored"),
+                &["exec", "--json"][..],
+                &["--", "-"][..],
+            ),
+            (
+                TurnSession::Resume("thread-7"),
+                &["exec", "resume", "--json"][..],
+                &["--", "thread-7", "-"][..],
+            ),
+        ] {
+            let mut command = codex
+                .planner_turn_command(&target, prompt, session)
+                .unwrap();
+            codex.apply_launch(&mut command, &launch);
+            codex.restrict_role_job_reads(&mut command, &reads).unwrap();
+            codex.reach_queue_service(&mut command, Path::new("/queue/service/queue.sock"));
+            assert_eq!(command.get_current_dir(), Some(target.cwd));
+            assert!(command.get_new_session());
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            assert!(args.starts_with(prefix) && args.ends_with(end), "{args:?}");
+            assert!(args.contains(&r#"approval_policy="never""#));
+            assert!(args.contains(&r#"model_reasoning_effort="xhigh""#));
+            assert!(!args.contains(&"-m"));
+            assert!(args.contains(&r#"permissions.dagq_job.extends=":read-only""#));
+            assert!(args.contains(&r#"permissions.dagq_job.network.unix_sockets={"/queue/service/queue.sock"="allow"}"#));
+            let filesystem = args
+                .iter()
+                .find(|arg| arg.starts_with("permissions.dagq_job.filesystem="))
+                .unwrap();
+            for entry in [
+                r#"":root"="none""#,
+                r#""/queue"="none""#,
+                r#""/checkout"="read""#,
+                r#""/queue/planners/7"="read""#,
+                r#""/queue/service/credentials/planner-7"="read""#,
+            ] {
+                assert!(filesystem.contains(entry), "{filesystem}");
+            }
+            assert!(!filesystem.contains(r#"="write""#));
+            let input = command.get_stdin().unwrap();
+            if session.resumed().is_none() {
+                assert!(input.contains("Basic policy"));
+                assert!(input.contains(r#"DAGQ="/queue/planners/7/runner""#));
+                assert!(input.contains("/queue/planners/7/references/skills/dagq/SKILL.md"));
+                assert!(input.ends_with(prompt));
+            } else {
+                assert_eq!(input, prompt);
+            }
+        }
     }
 
     #[test]

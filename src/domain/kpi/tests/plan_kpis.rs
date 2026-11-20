@@ -3,6 +3,65 @@
 use super::*;
 use crate::domain::EventKind;
 
+#[test]
+fn runtime_planner_session_kpis_split_by_provider_when_requested() {
+    let mut queue = Queue::default();
+    for (start, active_secs, provider) in [
+        (MONDAY + HOUR, 15, None),
+        (MONDAY + 2 * HOUR, 40, Some("codex")),
+    ] {
+        let mut opened = json!({"kind": "runtime_planner", "route": "headless"});
+        // Older Claude spans can name no provider.
+        if let Some(provider) = provider {
+            opened["provider"] = json!(provider);
+        }
+        queue.queue_event("session_opened", opened, start);
+        let opened_event_id = queue.events.last().unwrap().id.as_i64();
+        let turn = [
+            marks::utc_text(start * 1000),
+            marks::utc_text((start + active_secs) * 1000),
+        ];
+        queue.queue_event(
+            "session_turns",
+            json!({"opened_event_id": opened_event_id, "turns": [turn]}),
+            start + active_secs,
+        );
+        queue.queue_event(
+            "session_closed",
+            json!({"opened_event_id": opened_event_id, "active_secs": active_secs}),
+            start + 60,
+        );
+    }
+    let config = KpiConfig::default();
+    let now = MONDAY + 3 * HOUR;
+    let query = KpiQuery {
+        last: 1,
+        ..KpiQuery::default()
+    };
+    let default = queue.kpi(now, &config, &query);
+    let name = "session_active.runtime_planner";
+    let measures = &default.periods[0].window.kpis[name];
+    assert_eq!(
+        measures.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["all", "route=headless"]
+    );
+    assert_eq!(measures["all"].value, Some(55.0));
+    assert_eq!(measures["route=headless"].value, Some(55.0));
+
+    let split = queue.kpi(
+        now,
+        &config,
+        &KpiQuery {
+            by: vec![Axis::PROVIDER],
+            ..query
+        },
+    );
+    for (stratum, seconds) in [("provider=claude", 15.0), ("provider=codex", 40.0)] {
+        let active = measure(&split.periods[0], name, stratum);
+        assert_eq!((active.n, active.value), (1, Some(seconds)));
+    }
+}
+
 /// The quality of the plans per day (ADR-0079 decision 7): the revises of
 /// plan review split by the model and effort of its session, and the
 /// proposal's tasks' rework and duplicates by the review that judged it and

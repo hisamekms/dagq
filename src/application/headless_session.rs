@@ -188,13 +188,14 @@ pub(super) enum TurnOwner<'a> {
     /// directory (prompt, requests, turns, idle marker), the checkout it
     /// works in, the plugin directory it loads, the model and effort its
     /// opener chose, and the name of its session. Its turn events are queue
-    /// events naming the planner; its provider stays Claude without fallback.
+    /// events naming the planner; its provider stays fixed.
     Planner {
         id: PlannerId,
         dir: &'a Path,
         cwd: &'a Path,
         plugin_dir: Option<&'a Path>,
-        model: Option<(&'a str, &'a str)>,
+        launch: &'a crate::domain::actor_model::ActorLaunch,
+        read_snapshot: Option<&'a Path>,
         session: String,
     },
 }
@@ -211,9 +212,8 @@ pub(super) struct Turns<'a> {
     /// binary has none.
     pub(super) other: Option<&'a dyn AgentProvider>,
     pub(super) spawner: &'a dyn Spawner,
-    /// The queue service's socket and the worker's token, which each turn
-    /// is given instead of the queue's path (goal 82's stage (3)).
-    /// `None` for a planner, whose `dagq` opens the queue itself.
+    /// The queue service's socket and the agent's token. A Codex planner,
+    /// like a worker, needs both and sends its commands in client mode.
     pub(super) queue_service: Option<&'a dyn super::queue_service::ServiceAccess>,
     /// Lists the turn's descendants and signals them ([`stop_turn`]).
     pub(super) processes: &'a dyn ProcessControl,
@@ -528,12 +528,12 @@ impl<'a> Turns<'a> {
         }
     }
 
-    /// The provider it started on: the run's, or Claude for a planner,
+    /// The provider it started on: the run's, or the planner's choice,
     /// which never moves (ADR-t1394-2 decision 5).
     fn start_provider(&self) -> Provider {
         match &self.owner {
             TurnOwner::Run(run) => run.actual_provider(),
-            TurnOwner::Planner { .. } => Provider::Claude,
+            TurnOwner::Planner { launch, .. } => launch.provider,
         }
     }
 
@@ -542,7 +542,7 @@ impl<'a> Turns<'a> {
     fn provider_now(&self) -> Result<Provider> {
         match &self.owner {
             TurnOwner::Run(run) => Ok(self.queue.run(run.id())?.actual_provider()),
-            TurnOwner::Planner { .. } => Ok(Provider::Claude),
+            TurnOwner::Planner { launch, .. } => Ok(launch.provider),
         }
     }
 
@@ -603,17 +603,15 @@ impl<'a> Turns<'a> {
 
     /// The model and effort turn's agent starts with: the session the run
     /// recorded last (the claim's, a resume's or a revise's, raised after a
-    /// failure the task caused; ADR-0079 decisions 3 and 5), or the
-    /// planner's opener's.
+    /// failure the task caused; ADR-0079 decisions 3 and 5). A planner
+    /// takes its opener's launch instead.
     fn model(&self) -> Result<Option<(String, String)>> {
         match &self.owner {
             TurnOwner::Run(_) => {
                 let session = WorkerSession::current(&self.events()?);
                 Ok(Some((session.model, session.effort)))
             }
-            TurnOwner::Planner { model, .. } => {
-                Ok(model.map(|(model, effort)| (model.to_owned(), effort.to_owned())))
-            }
+            TurnOwner::Planner { .. } => Ok(None),
         }
     }
 }
@@ -1052,7 +1050,10 @@ impl<'a> Turns<'a> {
             .map_or_else(crate::domain::toolchain::Toolchains::none, |read| read());
         let mut reader = agent.turn_reader(&toolchains)?;
         let step_reader = agent.step_reader(
-            model.as_ref().map(|(model, _)| model.as_str()),
+            match &self.owner {
+                TurnOwner::Planner { launch, .. } => launch.model.as_deref(),
+                TurnOwner::Run(_) => model.as_ref().map(|(model, _)| model.as_str()),
+            },
             crate::domain::command_shape::Subcommands::of(&toolchains)
                 .keyed(self.telemetry.and_then(|sinks| sinks.digest_key(self.db))),
         );
@@ -1079,9 +1080,17 @@ impl<'a> Turns<'a> {
                     with_env: &with_env,
                 },
             ),
-            TurnOwner::Planner { id, plugin_dir, .. } => (
+            TurnOwner::Planner {
+                id,
+                plugin_dir,
+                launch,
+                read_snapshot,
+                ..
+            } => (
                 ActorContext::instance(ActorRole::Planner, *id),
                 SessionAgent::PlannerTurn {
+                    launch,
+                    read_snapshot: *read_snapshot,
                     target: TurnTarget {
                         role: ActorRole::Planner,
                         dir: run_dir,
@@ -1133,7 +1142,12 @@ impl<'a> Turns<'a> {
         }
         let spec = ActorExecutionSpec::new(
             actor,
-            WorkspaceAccess::Write(cwd.clone()),
+            match &self.owner {
+                TurnOwner::Planner { launch, .. } if launch.provider == Provider::Codex => {
+                    WorkspaceAccess::Read(cwd.clone())
+                }
+                _ => WorkspaceAccess::Write(cwd.clone()),
+            },
             ActorProgram::SessionAgent {
                 agent: agent_program,
                 model: model
@@ -1416,9 +1430,10 @@ impl<'a> Turns<'a> {
         // A planner's turn names the model and effort its opener started
         // it with, which its session span keeps (ADR-t1394-2 decision 4).
         let launch = match &self.owner {
-            TurnOwner::Planner { .. } => self
-                .model()?
-                .map(|(model, effort)| json!({"model": model, "effort": effort})),
+            TurnOwner::Planner { launch, .. } if launch.effort.is_some() => {
+                Some(json!({"model": launch.model, "effort": launch.effort}))
+            }
+            TurnOwner::Planner { .. } => None,
             TurnOwner::Run(_) => None,
         };
         let mut payload = json!({

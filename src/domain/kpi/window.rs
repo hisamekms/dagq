@@ -33,6 +33,7 @@ use crate::domain::{
     plan_quality::plan_quality,
     recovery::FailureCause,
     satisfied,
+    sessions::RUNTIME_PLANNER,
     stats::{
         self, LiveSnapshot, RunStats,
         ask_seen::seen_waits,
@@ -1293,6 +1294,7 @@ impl<'a> Context<'a> {
         // Sessions of the kinds no run is measured by one of (decision 1):
         // their totals over the window, over all of them and per route
         // (ADR-t1394-2 decision 4), so that the routes compare side by side.
+        // An explicit provider split also compares the runtime planners.
         let groups = stats
             .sessions
             .by_kind
@@ -1302,7 +1304,20 @@ impl<'a> Context<'a> {
                 routes
                     .iter()
                     .map(|(route, sessions)| (*kind, format!("route={route}"), sessions))
-            }));
+            }))
+            .chain(
+                stats
+                    .sessions
+                    .by_provider
+                    .get(RUNTIME_PLANNER)
+                    .filter(|_| axes.contains(&Axis::PROVIDER))
+                    .into_iter()
+                    .flat_map(|providers| {
+                        providers.iter().map(|(provider, sessions)| {
+                            (RUNTIME_PLANNER, format!("provider={provider}"), sessions)
+                        })
+                    }),
+            );
         for (kind, stratum, sessions) in groups {
             if kind != "worker" {
                 put(

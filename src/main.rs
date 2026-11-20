@@ -1958,15 +1958,21 @@ enum Command {
     PlannerSession {
         #[arg(long)]
         planner: i64,
-        #[arg(long)]
-        claude: PathBuf,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        claude: Option<PathBuf>,
+        #[arg(long, requires = "headless")]
+        codex: Option<PathBuf>,
+        #[arg(long, requires = "codex")]
+        codex_home: Option<PathBuf>,
+        #[arg(long, requires = "codex")]
+        read_snapshot: Option<PathBuf>,
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
         // ADR-0079 decision 7.
-        /// The model its agent starts with, given with `--effort`.
+        /// The model its agent starts with.
         #[arg(long, requires = "effort")]
         model: Option<String>,
-        #[arg(long, requires = "model")]
+        #[arg(long)]
         effort: Option<String>,
 
         #[command(flatten)]
@@ -6336,6 +6342,9 @@ fn session_wrapper(cli: Cli) -> Result<Value> {
         Command::PlannerSession {
             planner,
             claude,
+            codex,
+            codex_home,
+            read_snapshot,
             plugin_dir,
             model,
             effort,
@@ -6345,12 +6354,20 @@ fn session_wrapper(cli: Cli) -> Result<Value> {
         } => dagq::compose::planner_session(
             &db,
             dagq::domain::PlannerId::new(planner),
-            &claude,
+            match &codex {
+                Some(path) => (dagq::domain::Provider::Codex, path, codex_home),
+                None => (
+                    dagq::domain::Provider::Claude,
+                    claude.as_ref().expect("clap requires a provider"),
+                    None,
+                ),
+            },
             plugin_dir.as_deref(),
-            model.as_deref().zip(effort.as_deref()),
+            (model, effort),
             dagq::compose::PlannerEntry {
                 headless,
                 background,
+                read_snapshot,
             },
         ),
         _ => unreachable!("only a session wrapper's command comes here"),

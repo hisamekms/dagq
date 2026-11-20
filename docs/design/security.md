@@ -120,8 +120,11 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
   principalはtokenから、tokenもroleも無い要求ではhostのsocketのpeerの資格からuserとして決める（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定1）。
   拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
   同じ拒否の事実を監査にも送り、記録が書けなくても拒否のerrorは変えず、書けなかった件数を数える。
-  worker（resumeも）・headlessのjob・observerはserviceだけを使い（[クライアントモード](queue-service.md#クライアントモード)）、人・inbox・plannerはserviceが答えるコマンドをDBを開かず送る（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
-  閉じたのはCLIの経路で、同じユーザーのプロセスはDBもtokenも読め、userとしてもつなげるので、hostでは助言的なまま（ADR-t3102-1決定5）
+  Codexのplannerは[クライアントモード](queue-service.md#クライアントモード)を使う。
+  sandboxではcheckoutは読み取り専用で、DBと他の資格は読めず、接続はserviceのsocketだけに限る。
+  通常のCLIはtokenでplannerとして認可される。
+  同じsocketのtokenもroleも無い要求は[ownerのpeer](queue-service-host-cli.md#principal)ならuserになる。
+  hostのCLIは助言的なまま（ADR-t3102-1決定5）。
 - serviceへ送らない状態を変えないコマンド（制御側の診断・fileを書く読み取りと、supervisorなどのもの）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
   拒否は同じerrorを返し、serviceが拒まれたprincipalの`authorization_denied`に記録する（[例外](queue-service-host-cli.md#principal)あり）。
   通った読み取りはqueueに書かない

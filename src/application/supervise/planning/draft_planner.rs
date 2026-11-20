@@ -232,7 +232,12 @@ impl PlanningState {
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(env), *planner, ("draft", &prompt))?;
+        let opened = open_draft_planner(
+            &self.planner_launch(env),
+            *planner,
+            ("draft", &prompt),
+            None,
+        )?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         let ids: Vec<TaskId> = members.iter().map(|(target, _)| target.task.id()).collect();
         info!(

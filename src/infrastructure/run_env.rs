@@ -8601,12 +8601,9 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[roles.review]\n[roles.review]", "is defined twice"),
             ("[roles.review]\nprovider = 'gemini'", "provider"),
-            // Codex runs goal, normal run, plan and throughput reviews, the
-            // observer and the recovery job (ADR-t1207-1, tasks 1218, 1220,
-            // 1223 and 1225), and no planner.
             (
-                "[roles.runtime_planner]\nprovider = 'codex'",
-                "[roles.runtime_planner]: provider codex cannot run the runtime_planner role",
+                "[roles.planner]\nprovider = 'codex'",
+                "[roles.planner]: provider codex cannot run the planner role",
             ),
             (
                 "[roles.goal_review]\nmodel = 'claude-opus-5-5'\nprovider = 'codex'",
@@ -8642,6 +8639,11 @@ LITERAL = 'no \n escapes # here'
         let config = parse_config("[roles.throughput_review]\nprovider = 'codex'\n").unwrap();
         assert_eq!(
             config.roles.provider(ModelRole::ThroughputReview).0,
+            crate::domain::Provider::Codex
+        );
+        let config = parse_config("[roles.runtime_planner]\nprovider = 'codex'\n").unwrap();
+        assert_eq!(
+            config.roles.provider(ModelRole::RuntimePlanner).0,
             crate::domain::Provider::Codex
         );
         // And the observer (task 1223, ADR-t1222-1).

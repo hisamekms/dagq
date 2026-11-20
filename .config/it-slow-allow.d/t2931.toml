@@ -1,0 +1,4 @@
+[[test]]
+name = "planner_headless_stats::a_codex_planner_resumes_revise_and_answer_and_writes_as_its_principal"
+reason = "プロセスの境界: 1つの実際のwrapperがCodexの初回と2回のresumeを同じthreadで実行し、各turnのCLIがqueue serviceに接続してから、追加の起動なしに終了することを確かめる。"
+task = 2931

@@ -79,7 +79,9 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 
 - 経路は非対話だけで、選ぶ設定は無い（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)決定1・2、ADR-t1433-2決定3）。
   旧keyは[Actor model](actor-model.md#runtimeのplannerの経路)が持つ。
-- **turnの依頼**: supervisorの依頼は全て`send_to_planner`を通り、前のidle markerを数えないよう`stamp_planner_input`が入力の印を書く。
+- **turnの依頼**: supervisorの依頼はproviderによらず`send_to_planner`を通る。
+  入力の印で前のidle markerを数えず、終了の依頼はwrapperがagentを呼ばずに処理する。
+- **Codex**: 生きているplannerへの続きは同じthreadに届ける（[ADR-t2930-1](../../adr/2026-11-19-t2930-1-headless-codex-runtime-planner.md)、`Codex::planner_turn_command`）。
 - **状態**: idleの判定は`planner_view`と`turn::idle_after_turn`、終了の依頼の前の読み直しは`PlanningState::request_outstanding`が持つ。
   届けたanswerを読み終えるまで終了の依頼を置かない（判じ方は[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）。
   落とし穴: 壁で失敗したturnの後に終わらせるとanswerが失われる。
@@ -87,9 +89,11 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   idleのまま仕事が終わらないものは、reviseの時間切れが見る（[Plan review](plan-review.md#reviseの配送)）。
 - **人の答えだけを待つplannerの終わり**: 残るのが自分の未回答の`planner_question`（と並んで渡されたrevise）だけなら、終了の依頼を置いて枠を空け、決めずに終わった回数に数えない（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)、`planner_answer_wait`）。
   answerは新しいplannerの初期promptで運ばれる（`PlannerHandover`）。
-- **使えないとき**: Claudeの壁で終わったplannerは終わらせずに控えを待ち、解けたら`provider retry`で流し直し、providerは切り替えない（`planner_turns.rs`、ADR-t1394-2決定5）。
+- **使えないとき**: 壁に当たったplannerはそのproviderの控えを待ち、解けたら同じproviderで失敗した依頼をやり直す（`planner_turns.rs`）。
   壁の後に取る依頼の順は`turn::request_to_take`が持つ。
-- **区間**: turnから稼働時間とtokenを取る（`domain::sessions::RUNTIME_PLANNER`、[計測](../measurement.md)）。
+- **区間**: providerごとにturnから稼働時間とtokenを取る（`domain::sessions::RUNTIME_PLANNER`、[計測](../measurement.md)）。
+  Codexの実際のmodelはthreadのrolloutから読み、観測できなかったときは要求modelと区別する。
+  `stats`の区間と`kpi --by provider`でplannerのproviderを比較できる。
 
 ### 続きの依頼と非対話のplannerのCLI<a id="続きの依頼と非対話のplannerのcli"></a>
 

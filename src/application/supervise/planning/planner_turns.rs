@@ -1,6 +1,6 @@
 //! How the turns of a headless planner of the runtime's ended, as the
 //! supervisor acts on them (ADR-t1394-2 decisions 3 and 5): a turn that
-//! failed at Claude's login, usage limit or start leaves the planner
+//! failed at its provider's login, usage limit or start leaves the planner
 //! waiting in the queue's hold, neither ended nor counted as a planner that
 //! ended undecided, and once the hold is gone the call it failed at is made
 //! again as its next turn; a turn its wrapper stopped at the `[stall]`
@@ -45,15 +45,13 @@ enum WallStep {
     /// Nothing: the failure is not the provider's, or the `provider
     /// retry` after the turn answered it ([`wall_answered`]).
     Nothing,
-    /// At first sight: the queue's hold ask of the wall (a login or a usage
-    /// limit), or Claude's provider hold when there is none (a start), and
-    /// `provider_waiting`.
+    /// At first sight, hold the turn's provider and record
+    /// `provider_waiting`. Claude can use the queue's hold ask.
     Hold {
         reason: SwitchReason,
         wall: Option<Wall>,
     },
-    /// It waits already: once Claude is not held, the call the turn failed
-    /// at is made again.
+    /// It waits already: repeat its call once the provider can be used.
     Retry(SwitchReason),
 }
 
@@ -77,9 +75,10 @@ fn wall_step(failure: TurnFailure, answered: bool, waiting: bool) -> WallStep {
 }
 
 /// The payload of `provider_waiting` of planner `id` whose turn `turn`
-/// failed on Claude for `reason` with `message`, holding in the queue's
-/// hold ask `ask_id` (none for Claude's provider hold).
+/// failed on `provider` for `reason` with `message`, with the queue's
+/// hold ask `ask_id` if the wall raised one.
 fn waiting_payload(
+    provider: Provider,
     id: PlannerId,
     turn: u64,
     reason: SwitchReason,
@@ -89,7 +88,7 @@ fn waiting_payload(
     json!({
         "planner_id": id,
         "turn": turn,
-        "provider": Provider::Claude,
+        "provider": provider,
         "reason": reason,
         "message": message,
         "ask_id": ask_id,
@@ -142,7 +141,7 @@ impl PlanningState {
 
     /// Whether the headless planner of `view` took up the answer of `ask`
     /// written as its request: the turn that took the request finished
-    /// otherwise than at Claude's wall, or the `provider retry` that made
+    /// otherwise than at the provider's wall, or the `provider retry` that made
     /// it again did ([`request_read`]); a turn that failed at the wall did
     /// not get to it, and the planner ended then would lose it unread.
     /// `None` for an interactive planner, and when no request of the answer
@@ -174,7 +173,7 @@ impl PlanningState {
     }
 
     /// The provider failure the idle headless planner of `view` stopped at
-    /// in its last turn, if it did: it waits for Claude rather than being
+    /// in its last turn, if it did: it waits at its provider's hold rather than being
     /// done (ADR-t1394-2 decision 5).
     pub(in crate::application::supervise) fn planner_at_wall(
         &self,
@@ -188,12 +187,9 @@ impl PlanningState {
     }
 
     /// Hold or go on with each idle headless planner of the runtime's whose
-    /// last turn failed at Claude's login, usage limit or start: at first
-    /// sight the queue's hold ask (a login or a usage limit) or Claude's
-    /// provider hold (a start) is raised and `provider_waiting` recorded
-    /// with the planner's ID; once Claude is no longer held, the call the
-    /// turn failed at is written as the planner's next request (`provider
-    /// retry`), as a worker's is.
+    /// last turn failed at a provider wall: Claude's login and usage limit
+    /// raise the queue's hold ask, and other walls raise a provider hold.
+    /// Once the hold ends, retry the failed call as the next request.
     pub(in crate::application::supervise) fn tend_planner_walls(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -232,6 +228,11 @@ impl PlanningState {
         else {
             return Ok(());
         };
+        let provider = if finished["provider"] == Provider::Codex.as_str() {
+            Provider::Codex
+        } else {
+            Provider::Claude
+        };
         let turn = finished["turn"].as_u64().unwrap_or(0);
         let message = finished["message"].as_str().unwrap_or("no message");
         let reason = match wall_step(
@@ -243,19 +244,14 @@ impl PlanningState {
             WallStep::Nothing => return Ok(()),
             WallStep::Hold { reason, wall } => {
                 let ask_id = match wall {
-                    Some(wall) => {
+                    Some(wall) if provider == Provider::Claude => {
                         let (outcome, _) =
                             ask::hold(&mut *env.queue, NewHold::wall(wall, None, None))?;
                         Some(outcome.ask.id)
                     }
-                    None => {
-                        env.jobs.hold_provider(
-                            &mut env.pass,
-                            Provider::Claude,
-                            reason,
-                            None,
-                            message,
-                        )?;
+                    _ => {
+                        env.jobs
+                            .hold_provider(&mut env.pass, provider, reason, None, message)?;
                         None
                     }
                 };
@@ -265,17 +261,18 @@ impl PlanningState {
                 // is kept goes before each pass reads the queue.
                 env.queue.record_queue_event(
                     EventKind::ProviderWaiting,
-                    waiting_payload(id, turn, reason, message, ask_id),
+                    waiting_payload(provider, id, turn, reason, message, ask_id),
                 )?;
                 warn!(
-                    "planner {id} of the runtime: its turn {turn} failed on claude ({}); it waits for claude: {message}",
+                    "planner {id} of the runtime: its turn {turn} failed on {} ({}); it waits for that provider: {message}",
+                    provider.as_str(),
                     reason.as_str()
                 );
                 return Ok(());
             }
             WallStep::Retry(reason) => reason,
         };
-        if env.jobs.provider_held(Provider::Claude).is_some() {
+        if env.jobs.provider_held(provider).is_some() {
             return Ok(());
         }
         // The call that first met the wall, which a retry that met it
@@ -284,13 +281,7 @@ impl PlanningState {
             let text = env.files.read_to_string(&taken_path(&view.dir, seq)).ok()?;
             serde_json::from_str::<TurnRequest>(&text).ok()
         });
-        let text = retry_text(
-            Provider::Claude,
-            reason,
-            undelivered.as_ref(),
-            Some(&view.dir),
-        )
-        .text;
+        let text = retry_text(provider, reason, undelivered.as_ref(), Some(&view.dir)).text;
         // Stamped before it is written, as every request: a stamp whose
         // retry was not written (or was, after a turn that already ended)
         // leaves the marker stale, and the wrapper, which takes nothing
@@ -305,7 +296,8 @@ impl PlanningState {
             PROVIDER_RETRY,
         )?;
         info!(
-            "planner {id} of the runtime: claude can be used again; the call of turn {turn} is made again"
+            "planner {id} of the runtime: {} can be used again; the call of turn {turn} is made again",
+            provider.as_str()
         );
         Ok(())
     }
@@ -514,6 +506,7 @@ mod tests {
     #[test]
     fn provider_waiting_names_the_planner_its_turn_why_and_the_hold() {
         let waiting = waiting_payload(
+            Provider::Claude,
             PlannerId::new(3),
             2,
             SwitchReason::UsageLimit,
@@ -532,6 +525,7 @@ mod tests {
             })
         );
         let login = waiting_payload(
+            Provider::Claude,
             PlannerId::new(3),
             1,
             SwitchReason::Authentication,
@@ -541,8 +535,9 @@ mod tests {
         assert_eq!(login["turn"], 1);
         assert_eq!(login["reason"], "authentication");
         assert_eq!(login["ask_id"], 4);
-        // Claude's provider hold is no ask.
+        // Codex's provider hold is no ask.
         let start = waiting_payload(
+            Provider::Codex,
             PlannerId::new(3),
             1,
             SwitchReason::LaunchFailed,
@@ -550,6 +545,7 @@ mod tests {
             None,
         );
         assert_eq!(start["ask_id"], Value::Null);
+        assert_eq!(start["provider"], "codex");
         assert_eq!(start["reason"], "launch_failed");
     }
 

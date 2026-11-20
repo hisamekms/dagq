@@ -1,0 +1,6 @@
+[[boundary]]
+id = "codex-planner-thread-and-service"
+kind = "プロセス"
+test = "planner_headless_stats::a_codex_planner_resumes_revise_and_answer_and_writes_as_its_principal"
+reason = "Exercises the detached wrapper, Codex argv and stdin, resume of one thread, and planner writes through the queue service socket."
+task = 2931

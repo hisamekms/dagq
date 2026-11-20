@@ -216,16 +216,22 @@ impl PlanningState {
                 attempt,
             } => (planner, request, attempt),
         };
-        let prompt = match self.request_planner_material(env, &planner, &current, attempt, answer) {
-            Ok(prompt) => prompt,
-            Err(error) => {
-                env.queue
-                    .close_planner(planner.id, Some(&format!("{error:#}")))?;
-                return Err(error);
-            }
-        };
+        let (prompt, snapshot) =
+            match self.request_planner_material(env, &planner, &current, attempt, answer) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    env.queue
+                        .close_planner(planner.id, Some(&format!("{error:#}")))?;
+                    return Err(error);
+                }
+            };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(env), *planner, ("request", &prompt))?;
+        let opened = open_draft_planner(
+            &self.planner_launch(env),
+            *planner,
+            ("request", &prompt),
+            snapshot.as_deref(),
+        )?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         info!("request {request}: opened planner {id} {attempt} in workspace {workspace}");
         Ok(Some(workspace))
@@ -240,7 +246,7 @@ impl PlanningState {
         request: &PlanRequest,
         attempt: usize,
         answer: Option<&Ask>,
-    ) -> Result<FittedPrompt> {
+    ) -> Result<(FittedPrompt, Option<std::path::PathBuf>)> {
         let dir = planner_dir(&env.layout.planners_dir, planner.id);
         let handed = hand_request_to_planner(
             &**env.files,
@@ -311,7 +317,7 @@ impl PlanningState {
             Some(ask) => env.queue.planner_handover(ask.id)?,
             None => None,
         };
-        request_planner_prompt(&RequestPlannerMaterial {
+        let prompt = request_planner_prompt(&RequestPlannerMaterial {
             db: &env.layout.db,
             request,
             handed: &handed.sentence,
@@ -325,7 +331,8 @@ impl PlanningState {
             replan: replan
                 .as_ref()
                 .map(|brief| (brief, snapshot_dir.as_deref())),
-        })
+        })?;
+        Ok((prompt, snapshot_dir))
     }
 
     /// What `reference` holds, adding the goal it leads to to `goals`.

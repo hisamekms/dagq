@@ -330,7 +330,7 @@ impl PlanningState {
         if let Err(error) = self.start_plan_review(env) {
             warn!(error = %format_args!("{error:#}"), "plan review: could not start a plan review: {error:#}");
         }
-        // The planners are Claude's sessions: the hold stops them.
+        // The queue's Claude hold also pauses the planning pass.
         if !env.jobs.held()
             && let Err(error) = self.tend_planners(env, options)
         {
@@ -1369,7 +1369,7 @@ impl PlanningState {
         // Then the improvements marked for a proposal (ADR-0044 decision
         // 19), within the same limit.
         self.open_finding_planners(env, &mut runtime_open)?;
-        // A headless planner's turn that failed at Claude waits for it, and
+        // A headless planner's turn that hit a provider wall waits, and
         // one its wrapper stopped at its limit tells the inbox
         // (ADR-t1394-2 decisions 3 and 5).
         self.tend_planner_walls(env, &views)?;
@@ -1683,6 +1683,8 @@ impl PlanningState {
             repo_root: &layout.repo_root,
             runner: &layout.runner,
             claude: &layout.claude,
+            codex: &layout.codex,
+            codex_home: layout.codex_home.as_deref(),
             plugin_dir: layout.plugin_dir.as_deref(),
             language: env.verifier.language(),
             roles,

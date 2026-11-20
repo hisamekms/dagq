@@ -90,6 +90,8 @@ pub struct PlannerLaunch<'a> {
     pub repo_root: &'a Path,
     pub runner: &'a Path,
     pub claude: &'a Path,
+    pub codex: &'a Path,
+    pub codex_home: Option<&'a Path>,
     pub plugin_dir: Option<&'a Path>,
     /// The language every planner's prompt names (ADR-t616-2), resolved
     /// when the launch is made; `None` names none.
@@ -176,7 +178,8 @@ pub fn open_runtime_planner(
     let planner = launch
         .queue
         .open_planner(PlannerOrigin::Runtime, Some(proposal))?;
-    launch_planner(launch, planner, ("runtime", &prompt), &actor)
+    let snapshot = carried.replacement.and_then(|(_, snapshot)| snapshot);
+    launch_planner(launch, planner, ("runtime", &prompt), &actor, snapshot)
 }
 
 /// Start the wrapper of a planner the runtime recorded for a draft
@@ -187,9 +190,10 @@ pub fn open_draft_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
     (kind, prompt): (&'static str, &FittedPrompt),
+    snapshot: Option<&Path>,
 ) -> Result<OpenedPlanner> {
     let actor = launch.roles.launch(ModelRole::RuntimePlanner);
-    launch_planner(launch, planner, (kind, prompt), &actor)
+    launch_planner(launch, planner, (kind, prompt), &actor, snapshot)
 }
 
 /// Record `planner` headless, write its directory and start its wrapper in
@@ -211,6 +215,7 @@ fn launch_planner(
     planner: PlannerSession,
     (kind, prompt): (&'static str, &FittedPrompt),
     actor: &ActorLaunch,
+    snapshot: Option<&Path>,
 ) -> Result<OpenedPlanner> {
     let queue = launch.queue;
     // A planner of the runtime's runs headless only, whatever `dagq.toml`
@@ -251,7 +256,7 @@ fn launch_planner(
         }
         Ok(())
     };
-    let handle = match start_wrapper(launch, &planner, &dir, &prompt.text, actor) {
+    let handle = match start_wrapper(launch, &planner, &dir, &prompt.text, actor, snapshot) {
         Ok(handle) => handle,
         Err(error) => {
             closed(&error)?;
@@ -316,6 +321,7 @@ fn start_wrapper(
     dir: &Path,
     prompt: &str,
     actor: &ActorLaunch,
+    snapshot: Option<&Path>,
 ) -> Result<String> {
     let files = launch.files;
     files
@@ -345,22 +351,31 @@ fn start_wrapper(
         "planner-session".into(),
         "--planner".into(),
         planner.id.to_string(),
-        "--claude".into(),
-        path_text(launch.claude)?,
     ];
+    let (flag, executable) = match actor.provider {
+        crate::domain::Provider::Claude => ("--claude", launch.claude),
+        crate::domain::Provider::Codex => ("--codex", launch.codex),
+    };
+    argv.extend([flag.into(), path_text(executable)?]);
+    if actor.provider == crate::domain::Provider::Codex {
+        if let Some(home) = launch.codex_home {
+            argv.extend(["--codex-home".into(), path_text(home)?]);
+        }
+        if let Some(snapshot) = snapshot {
+            argv.extend(["--read-snapshot".into(), path_text(snapshot)?]);
+        }
+    }
     if let Some(plugin_dir) = launch.plugin_dir {
         argv.push("--plugin-dir".into());
         argv.push(path_text(plugin_dir)?);
     }
     // The wrapper gives its agent the model and effort; the session's hook
     // records what it was started with from the wrapper's environment.
-    if let Some((model, effort)) = actor.arguments() {
-        argv.extend([
-            "--model".into(),
-            model.to_owned(),
-            "--effort".into(),
-            effort.to_owned(),
-        ]);
+    if let Some(model) = &actor.model {
+        argv.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(effort) = &actor.effort {
+        argv.extend(["--effort".into(), effort.clone()]);
     }
     argv.push(HEADLESS_FLAG.into());
     argv.push(BACKGROUND_FLAG.into());
@@ -431,6 +446,8 @@ pub struct PlannerWrapper<'a> {
     /// Issues the planner's token for the queue service, which its turns'
     /// `dagq` takes on a served queue (ADR-t3102-1 decision 2).
     pub queue_service: Option<&'a dyn super::queue_service::ServiceAccess>,
+    /// Saved work handed to this planner for a replacement plan.
+    pub read_snapshot: Option<&'a Path>,
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
@@ -453,7 +470,7 @@ pub fn run_planner_session(
     dir: &Path,
     cwd: &Path,
     plugin_dir: Option<&Path>,
-    model: Option<(&str, &str)>,
+    launch: &ActorLaunch,
 ) -> Result<Value> {
     let PlannerWrapper {
         queue,
@@ -466,6 +483,7 @@ pub fn run_planner_session(
         clock,
         telemetry,
         queue_service,
+        read_snapshot,
     } = ctx;
     // A wrapper started for a planner already closed, or with a session,
     // is refused and ends.
@@ -510,7 +528,8 @@ pub fn run_planner_session(
                 dir,
                 cwd,
                 plugin_dir,
-                model,
+                launch,
+                read_snapshot,
                 session,
             },
             provider,
@@ -569,7 +588,7 @@ pub fn run_planner_session(
                             prompt: &prompt,
                             plugin_dir,
                         }),
-                        model,
+                        model: launch.arguments(),
                     },
                 ))?
                 .process()

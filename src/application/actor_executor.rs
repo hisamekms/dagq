@@ -117,6 +117,8 @@ pub enum SessionAgent<'a> {
     /// decision 2), in `target` (the planner's directory and checkout), as
     /// a worker's [`SessionAgent::Turn`] is in its run.
     PlannerTurn {
+        launch: &'a ActorLaunch,
+        read_snapshot: Option<&'a Path>,
         target: TurnTarget<'a>,
         prompt: &'a str,
         session: crate::domain::turn::TurnSession<'a>,
@@ -252,7 +254,8 @@ impl ActorProgram<'_> {
             Self::RunSession { run, .. } => run.actual_provider(),
             Self::SessionAgent { agent, .. } => match agent {
                 SessionAgent::Turn { run, .. } => run.actual_provider(),
-                SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => Provider::Claude,
+                SessionAgent::Planner(_) => Provider::Claude,
+                SessionAgent::PlannerTurn { launch, .. } => launch.provider,
             },
             Self::ControlForeground { launch, .. } => launch.provider,
             Self::Foreground { launch, .. }
@@ -468,7 +471,8 @@ pub fn local_checks_env(run: &TaskRun) -> Result<(String, String)> {
 ///
 /// `DAGQ_ROLE`は`ActorRole::env_value`、`DAGQ_ACTOR_ID`は`ActorContext`の
 /// constructor（`instance`の`<role>:<instance>`など）が作る。
-/// inboxとplanner（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
+/// inboxとplannerのwrapper、Claudeのplannerのturn（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
+/// CodexのplannerのturnからはDBのpathを外し、plannerのtokenとsocketを渡す。
 /// workerとresume、headlessのjob、observerは持たず（`domain::queue_service::client_role`）、本番のagentはqueue serviceのsocketの`DAGQ_SERVICE_SOCKET`とtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`を持ち、その`dagq`はクライアントモードで動く（Queue service）。
 /// ケースのheadless job（`AgentReads`あり）はroleを保ち、socketもtokenのfileも渡さず、資格も発行しない。
 /// runのsession wrapperのprocess自体はどちらも持たない。
@@ -982,6 +986,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let mut without: &[&str] = &[];
                 let mut with: &[(String, String)] = &[];
                 let mut checks = None;
+                let mut codex_planner = None;
                 let mut command = match agent {
                     SessionAgent::Turn {
                         run,
@@ -1001,6 +1006,8 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     }
                     SessionAgent::Planner(planner) => provider.planner_command(&planner)?,
                     SessionAgent::PlannerTurn {
+                        launch,
+                        read_snapshot,
                         target,
                         prompt,
                         session,
@@ -1008,7 +1015,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         stderr,
                     } => {
                         streams = Streams::Files { stdout, stderr };
-                        provider.turn_command(&target, prompt, session)?
+                        let mut command = provider.turn_command(&target, prompt, session)?;
+                        provider.apply_launch(&mut command, launch);
+                        if launch.provider == crate::domain::Provider::Codex {
+                            codex_planner = Some((target, read_snapshot));
+                        }
+                        command
                     }
                 };
                 if let Some((model, effort)) = model {
@@ -1018,7 +1030,40 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 // children this actor; set again, the agent is it whatever
                 // the wrapper inherited.
                 command.envs(actor.env());
-                if client_role(actor.role()) {
+                if let Some((target, read_snapshot)) = codex_planner {
+                    let (socket, credential) = self
+                        .host_client_env(&actor)?
+                        .context("a Codex planner requires its queue service credential")?;
+                    let queue_dir = self.queue.parent().context("the queue has a directory")?;
+                    let reads = super::AgentReads {
+                        readable: [target.cwd, target.dir, Path::new(&credential.1)]
+                            .into_iter()
+                            .chain(read_snapshot)
+                            .map(Path::to_path_buf)
+                            .collect(),
+                        unreadable: [queue_dir.to_path_buf(), self.queue.to_path_buf()]
+                            .into_iter()
+                            .chain(["-wal", "-shm", "-journal"].map(|suffix| {
+                                let mut path = self.queue.as_os_str().to_owned();
+                                path.push(suffix);
+                                PathBuf::from(path)
+                            }))
+                            .chain(socket.parent().map(Path::to_path_buf))
+                            .chain(Path::new(&credential.1).parent().map(Path::to_path_buf))
+                            .collect(),
+                    };
+                    provider.restrict_role_job_reads(&mut command, &reads)?;
+                    for name in CLIENT_ENV {
+                        command.env_remove(name);
+                    }
+                    command
+                        .env_remove(QUEUE_ENV)
+                        .env_remove("DAGQ_DB")
+                        .env_remove(crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV)
+                        .env(SOCKET_ENV, path_text(&socket)?)
+                        .envs([credential]);
+                    provider.reach_queue_service(&mut command, &socket);
+                } else if client_role(actor.role()) {
                     // The worker's `dagq` goes to the queue service, never
                     // to the queue's path, which a workspace an older
                     // binary opened may still name (goal 82's stage (3)).
@@ -2614,6 +2659,7 @@ mod tests {
     fn a_planners_turn_is_given_its_planners_token_and_keeps_the_queue_path() {
         let dir = tempfile::tempdir().unwrap();
         let fake = Fake::default();
+        let launch = ActorLaunch::default_of(crate::domain::actor_model::ModelRole::RuntimePlanner);
         let turn = |executor: &HostActorExecutor<'_>| {
             executor
                 .spawn(ActorExecutionSpec::new(
@@ -2621,6 +2667,8 @@ mod tests {
                     WorkspaceAccess::Write(dir.path().to_path_buf()),
                     ActorProgram::SessionAgent {
                         agent: SessionAgent::PlannerTurn {
+                            launch: &launch,
+                            read_snapshot: None,
                             target: TurnTarget {
                                 role: ActorRole::Planner,
                                 dir: dir.path(),
@@ -2693,12 +2741,15 @@ mod tests {
             .with_provider(&moved)
             .with_spawner(&moved)
             .with_queue_service(&service);
+        let launch = ActorLaunch::default_of(crate::domain::actor_model::ModelRole::RuntimePlanner);
         let turn = |executor: &HostActorExecutor<'_>| {
             executor.spawn(ActorExecutionSpec::new(
                 ActorContext::instance(ActorRole::Planner, 4),
                 WorkspaceAccess::Write(dir.path().to_path_buf()),
                 ActorProgram::SessionAgent {
                     agent: SessionAgent::PlannerTurn {
+                        launch: &launch,
+                        read_snapshot: None,
                         target: TurnTarget {
                             role: ActorRole::Planner,
                             dir: dir.path(),

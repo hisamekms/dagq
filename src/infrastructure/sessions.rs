@@ -1133,7 +1133,29 @@ fn close_headless(
     // A planner's session has no worktree to find its transcript in: its
     // model is the one its turns said they ran on, its effort its opener's.
     let TurnEvents::Run(run_id) = owner else {
-        if let Some(model) = crate::domain::turn::turns_model(&events) {
+        let model = crate::domain::turn::turns_model(&events);
+        if !span.claude() {
+            payload["provider"] = span.payload["provider"].clone();
+            payload["requested_model"] = span.payload["launch"]["model"].clone();
+            payload["effort"] = span.payload["launch"]["effort"].clone();
+            if let Some(session) = events.iter().rev().find_map(|event| {
+                (event.kind == EventKind::TurnFinished)
+                    .then(|| event.payload["session_id"].as_str())
+                    .flatten()
+            }) {
+                payload["session_id"] = json!(session);
+            }
+            if model.is_none() {
+                let reason = events.iter().rev().find_map(|event| {
+                    (event.kind == EventKind::TurnFinished)
+                        .then(|| event.payload["model_unknown"].as_str())
+                        .flatten()
+                });
+                payload["model_unknown"] =
+                    json!(reason.unwrap_or("no model observed in planner turns"));
+            }
+        }
+        if let Some(model) = model {
             payload["model"] = json!(model);
             payload["effort"] = json!(
                 span.payload["launch"]["effort"]

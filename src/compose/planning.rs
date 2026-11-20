@@ -20,7 +20,10 @@ use crate::{
         AgentProvider, SessionWrappers,
         planner::{self, PlannerProbes, PlannerWrapper},
     },
-    domain::PlannerId,
+    domain::{
+        PlannerId, Provider,
+        actor_model::{ActorLaunch, ModelRole},
+    },
     infrastructure::{
         adapters::{ClaudeCode, SystemProcesses},
         location::planners_dir,
@@ -48,9 +51,9 @@ pub fn planners(db: &Path, sessions: &dyn SessionWrappers, all: bool) -> Result<
 pub fn planner_session(
     db: &Path,
     id: PlannerId,
-    claude: &Path,
+    (kind, executable, home): (Provider, &Path, Option<PathBuf>),
     plugin_dir: Option<&Path>,
-    model: Option<(&str, &str)>,
+    (model, effort): (Option<String>, Option<String>),
     entry: PlannerEntry,
 ) -> Result<Value> {
     // A headless planner's agent has no terminal (ADR-t1394-2); one started
@@ -63,8 +66,20 @@ pub fn planner_session(
             "interactive Claude wrapper requires a terminal"
         );
     }
-    let provider = ClaudeCode {
-        executable: claude.into(),
+    let provider: Box<dyn AgentProvider> = match kind {
+        Provider::Claude => Box::new(ClaudeCode {
+            executable: executable.into(),
+        }),
+        Provider::Codex => Box::new(crate::infrastructure::codex::Codex {
+            executable: executable.into(),
+            home,
+        }),
+    };
+    let launch = ActorLaunch {
+        provider: kind,
+        model,
+        effort,
+        ..ActorLaunch::default_of(ModelRole::RuntimePlanner)
     };
     let mut queue = crate::infrastructure::queue_service::ServiceWrapperStore::of_queue(
         db,
@@ -73,16 +88,25 @@ pub fn planner_session(
             id.as_i64(),
         ),
     );
-    planner_session_on(&mut queue, db, id, &provider, plugin_dir, model)
+    planner_session_on(
+        &mut queue,
+        db,
+        id,
+        &*provider,
+        plugin_dir,
+        &launch,
+        entry.read_snapshot.as_deref(),
+    )
 }
 
 /// How a planner's wrapper was started: for a headless planner
 /// (`--headless`, ADR-t1394-2), and then in the background
 /// (`--background`, ADR-t1404-1 decision 8).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PlannerEntry {
     pub headless: bool,
     pub background: bool,
+    pub read_snapshot: Option<PathBuf>,
 }
 
 /// [`planner_session`] with any provider, in the working directory, on
@@ -100,7 +124,12 @@ pub fn planner_session_with_provider(
             crate::domain::actor::ActorRole::Wrapper,
             format_args!("planner:{id}"),
         ));
-    planner_session_on(&mut queue, db, id, provider, plugin_dir, model)
+    let mut launch = ActorLaunch::default_of(ModelRole::RuntimePlanner);
+    if let Some((model, effort)) = model {
+        launch.model = Some(model.to_owned());
+        launch.effort = Some(effort.to_owned());
+    }
+    planner_session_on(&mut queue, db, id, provider, plugin_dir, &launch, None)
 }
 
 /// The wrapper of planner `id` of the queue at `db`, reading and recording
@@ -111,7 +140,8 @@ fn planner_session_on(
     id: PlannerId,
     provider: &dyn AgentProvider,
     plugin_dir: Option<&Path>,
-    model: Option<(&str, &str)>,
+    launch: &ActorLaunch,
+    read_snapshot: Option<&Path>,
 ) -> Result<Value> {
     let cwd = std::env::current_dir().context("working directory is unavailable")?;
     planner::run_planner_session(
@@ -126,12 +156,13 @@ fn planner_session_on(
             clock: &crate::infrastructure::clock::SystemClock,
             telemetry: &crate::infrastructure::queue_service::SystemServiceAccess,
             queue_service: Some(&crate::infrastructure::queue_service::HandedServiceAccess),
+            read_snapshot,
         },
         id,
         &planner::planner_dir(&planners_dir(db), id),
         &cwd,
         plugin_dir,
-        model,
+        launch,
     )
 }
 

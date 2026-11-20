@@ -297,7 +297,12 @@ impl PlanningState {
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(env), *planner, ("finding", &prompt))?;
+        let opened = open_draft_planner(
+            &self.planner_launch(env),
+            *planner,
+            ("finding", &prompt),
+            None,
+        )?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         info!("finding {finding}: opened planner {id} {attempt} in workspace {workspace}");
         Ok(Some(workspace))

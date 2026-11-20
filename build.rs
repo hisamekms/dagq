@@ -32,6 +32,7 @@ fn main() {
     );
     let ordered = list_migrations(&manifest_dir);
     list_postgres_series(&manifest_dir, &ordered);
+    bundle_planner_references(&manifest_dir);
     build_id::emit();
 }
 
@@ -137,4 +138,39 @@ fn included(path: &Path) -> String {
 fn write_out(name: &str, source: &str) {
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     std::fs::write(out.join(name), source).unwrap_or_else(|error| panic!("write {name}: {error}"));
+}
+
+/// Bundle the plugin's instruction documents alongside the CLI that they describe.
+fn bundle_planner_references(manifest_dir: &Path) {
+    let plugin = manifest_dir.join("plugins/claude-dagq");
+    let skills = plugin.join("skills");
+    println!("cargo:rerun-if-changed={}", skills.display());
+
+    fn collect(directory: &Path, paths: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("read plugin skills directory") {
+            let entry = entry.expect("read plugin skill entry");
+            let kind = entry.file_type().expect("read plugin skill entry type");
+            let path = entry.path();
+            if kind.is_dir() {
+                collect(&path, paths);
+            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+                paths.push(path);
+            }
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect(&skills, &mut paths);
+    paths.sort();
+    let mut source = String::from("&[\n");
+    for path in paths {
+        let relative = path.strip_prefix(&plugin).expect("skill under plugin");
+        source.push_str(&format!(
+            "    ({:?}, {}),\n",
+            relative.to_str().expect("UTF-8 skill path"),
+            included(&path)
+        ));
+    }
+    source.push_str("]\n");
+    write_out("planner_references.rs", &source);
 }
