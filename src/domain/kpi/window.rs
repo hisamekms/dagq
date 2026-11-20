@@ -125,7 +125,10 @@ pub struct WindowKpis {
 /// `succeeded`, `failed` or `interrupted`. The spans out of the slots are
 /// its waits for a person (`run_waiting_started` to `run_slot_regained`,
 /// ADR-0062) and its claim's rests ([`satisfied::rests_after`]: from its
-/// acceptance or a verification's end to the next snapshot, ADR-t1818-1).
+/// acceptance or a verification's end to the next snapshot, ADR-t1818-1),
+/// and its landing lane ([`landing_absences`]). Historical queue overflow
+/// cannot be assigned reliably to supervisors, so all landing-lane spans
+/// are excluded: an approximation that undercounts overflow worker time.
 struct Occupancy {
     task_id: TaskId,
     spans: Vec<(i64, i64)>,
@@ -152,10 +155,9 @@ struct Occupancy {
 struct SlotCheck {
     occupied: Option<f64>,
     landings_per_hour: Option<f64>,
-    /// The mean over the landed runs of `work` + `validate` +
-    /// `wait_to_land` (not `startup`, which lies inside `work`), less the
-    /// time each left its slot to wait for a person (`run_waiting_started`
-    /// to `run_slot_regained`); over the runs that recorded all three.
+    /// The mean over landed runs recording `work`, `validate` and
+    /// `wait_to_land`, less their merged human waits, satisfied rests and
+    /// landing lane spans, using the same exclusions as `occupied`.
     slot_secs_per_landing: Option<f64>,
     expected: Option<f64>,
     ratio: Option<f64>,
@@ -220,10 +222,9 @@ pub(super) struct Context<'a> {
     /// The supervisors' lives: start, end and `parallel`.
     supervisors: Vec<SupervisorLife>,
     occupancy: Vec<Occupancy>,
-    /// Each run's waits for a person out of its slot (`run_waiting_started`
-    /// to `run_slot_regained`, open while it still waits), for
-    /// [`SlotCheck`]'s `slot_secs_per_landing`.
-    person_waits: HashMap<RunId, Vec<(i64, Option<i64>)>>,
+    /// Merged intervals out of worker capacity, shared by both sides of
+    /// [`SlotCheck`]; open intervals end at the run's end or now.
+    slot_absences: HashMap<RunId, Vec<(i64, Option<i64>)>>,
     pub marks: Vec<Mark>,
     pub min_samples: usize,
     /// The forecast snapshots scored against the finishes (ADR-0070
@@ -265,6 +266,81 @@ struct OpenRun {
     layers: RunLayers,
     change: Option<TaskChange>,
     nature: Option<String>,
+}
+
+/// Landing-lane intervals, from existing records only. A `landing_queued`
+/// after review starts a wait unless validation requires e2e. Phase
+/// records identify waits in the landing queue and e2e on its budget
+/// (ADR-t5283-4); legacy worker e2e remains occupied until it passes or is
+/// found unconfigured. A generic `awaiting_slot` keeps an open lane
+/// interval. Integration enters the lane even without a queue record.
+/// A return to worker/session work or a terminal status ends it. Excluding
+/// all queue overflow approximates history without a per-token assignment.
+fn landing_absences(events: &[RunEvent], now: i64) -> HashMap<RunId, Vec<(i64, Option<i64>)>> {
+    let mut spans: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
+    let mut e2e_due: HashMap<&RunId, bool> = HashMap::new();
+    let mut landing_e2e = HashSet::new();
+    for event in events {
+        let (Some(run), Some(at)) = (&event.run_id, event_ms(event)) else {
+            continue;
+        };
+        if event.kind == EventKind::ValidationFinished {
+            e2e_due.insert(run, event.payload["e2e_requirement"]["required"] == true);
+        }
+        let e2e_done = event.kind == EventKind::RunE2eFinished
+            && matches!(
+                event.payload["outcome"].as_str(),
+                Some("passed" | "not_configured")
+            );
+        if e2e_done {
+            e2e_due.insert(run, false);
+        }
+        let phase = (event.kind == EventKind::RunPhaseChanged)
+            .then(|| event.payload["phase"].as_str())
+            .flatten();
+        let enters_landing_e2e = match phase {
+            Some("awaiting_e2e") => event.payload["cause"] == "e2e_leased",
+            Some("e2e") => event.payload["holds"] == "landing_slot",
+            _ => false,
+        };
+        if enters_landing_e2e {
+            landing_e2e.insert(run);
+        }
+        let enters = event.kind == EventKind::IntegrationStarted
+            || e2e_done
+            || enters_landing_e2e
+            || matches!(phase, Some("landing_queue" | "landing"))
+            || (event.kind == EventKind::LandingQueued
+                && !e2e_due.get(run).copied().unwrap_or(false));
+        let keeps_e2e = landing_e2e.contains(run);
+        let keeps_phase = matches!(phase, Some("awaiting_slot" | "landing_queue" | "landing"))
+            || (keeps_e2e && matches!(phase, Some("awaiting_e2e" | "e2e")));
+        let leaves = ledger::window::ends_run_occupancy(event)
+            || event.kind.is_in(&[
+                EventKind::ResumeStarted,
+                EventKind::ReviseRequested,
+                EventKind::ReviewStarted,
+                EventKind::RunAdopted,
+                EventKind::RunRecovered,
+                EventKind::RunE2eFailed,
+                EventKind::LandingQueueLeft,
+            ])
+            || (event.kind == EventKind::RunE2eStarted && !keeps_e2e)
+            || event.payload["status"]
+                .as_str()
+                .is_some_and(|status| landing_utilization::LEAVING_STATUSES.contains(&status))
+            || (phase.is_some() && !keeps_phase);
+        if leaves {
+            end_wait(&mut spans, run, Some(at));
+            landing_e2e.remove(run);
+        } else if enters {
+            let intervals = spans.entry(run.clone()).or_default();
+            if intervals.last().is_none_or(|span| span.1.is_some()) {
+                intervals.push((at.min(now), None));
+            }
+        }
+    }
+    spans
 }
 
 /// Ends `run_id`'s open span out of the slots, if any, `at`.
@@ -402,7 +478,6 @@ impl<'a> Context<'a> {
         let mut first_claims: HashMap<RunId, &'a RunEvent> = HashMap::new();
         let mut ends: HashMap<RunId, i64> = HashMap::new();
         let mut waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
-        let mut person_waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
         for event in events {
             let at = event_ms(event);
             if event.kind == EventKind::TaskStatusChanged
@@ -438,15 +513,10 @@ impl<'a> Context<'a> {
                 Some(EventKind::RunWaitingStarted) => {
                     if let Some(at) = at {
                         waits.entry(run_id.clone()).or_default().push((at, None));
-                        let person = person_waits.entry(run_id.clone()).or_default();
-                        if person.last().is_none_or(|wait| wait.1.is_some()) {
-                            person.push((at, None));
-                        }
                     }
                 }
                 Some(EventKind::RunSlotRegained) => {
                     end_wait(&mut waits, run_id, at);
-                    end_wait(&mut person_waits, run_id, at);
                 }
                 _ => {}
             }
@@ -471,6 +541,29 @@ impl<'a> Context<'a> {
             {
                 ends.entry(run_id.clone()).or_insert(at);
             }
+        }
+        for (run, spans) in landing_absences(events, now_ms) {
+            waits.entry(run).or_default().extend(spans);
+        }
+        // Merge before subtraction: human waits, rests and the landing lane
+        // can overlap and must not be deducted twice on either side.
+        for (run, spans) in &mut waits {
+            let end = ends.get(run).copied().unwrap_or(now_ms);
+            spans.sort_unstable_by_key(|span| span.0);
+            let mut merged: Vec<(i64, Option<i64>)> = Vec::new();
+            for &(left, back) in spans.iter() {
+                let back = back.unwrap_or(end).min(end);
+                if left >= back {
+                    continue;
+                }
+                match merged.last_mut() {
+                    Some(last) if left <= last.1.unwrap_or(end) => {
+                        last.1 = Some(last.1.unwrap_or(end).max(back));
+                    }
+                    _ => merged.push((left, Some(back))),
+                }
+            }
+            *spans = merged;
         }
         let occupancy = claims
             .into_iter()
@@ -540,7 +633,7 @@ impl<'a> Context<'a> {
             finishes: Vec::new(),
             supervisors,
             occupancy,
-            person_waits,
+            slot_absences: waits,
             marks: marks::marks_with_earlier(events, earlier_claims, None, None),
             min_samples: input.config.min_samples,
             forecast: Scoring::default(),
@@ -2152,14 +2245,13 @@ impl<'a> Context<'a> {
     }
 
     /// The share of the live supervisors' slots the runs held in the
-    /// window (decision 3), and how many runs held one; null without a
-    /// supervisor's start in it. A run's hold counts only while a
-    /// supervisor was alive, so the runs before the starts were recorded
-    /// (and a run whose end was never recorded) do not count. A run waiting
-    /// only for its turn to land still holds its slot, and so does a run
-    /// claimed into a slot the landing wait freed (ADR-t1591-1), so the
-    /// share can pass 1. With supervisors side by side, each start ends the
-    /// life before it, so the capacity reads too small.
+    /// window (decision 3), and how many runs held one; null without
+    /// recorded supervisor capacity. A run's hold counts only while a
+    /// supervisor was alive; without a recorded end it holds until now.
+    /// Landing lane intervals leave worker occupancy, including historical
+    /// overflow as the approximation in [`Occupancy`] describes. With
+    /// supervisors side by side, each start ends the life before it, so
+    /// the capacity reads too small.
     fn slot_usage(&self, start: i64, end: i64) -> (Option<f64>, usize) {
         let (capacity, held, runs) = self.slots_held(start, end);
         ((capacity > 0).then(|| float(held) / float(capacity)), runs)
@@ -2229,7 +2321,7 @@ impl<'a> Context<'a> {
             .iter()
             .filter_map(|run| {
                 let phases = run.work? + run.validate? + run.wait_to_land?;
-                Some(phases - self.person_wait_secs(run))
+                Some(phases - self.absent_slot_secs(run))
             })
             .collect();
         let slot_secs_per_landing = (!slot_secs.is_empty())
@@ -2261,14 +2353,14 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// The seconds `run` left its slot to wait for a person between its
-    /// claim and its landing; a wait still open at the landing ends there.
-    fn person_wait_secs(&self, run: &RunStats) -> i64 {
+    /// Seconds outside worker capacity between claim and landing, after
+    /// merging overlapping exclusions exactly as for [`Occupancy`].
+    fn absent_slot_secs(&self, run: &RunStats) -> i64 {
         let at = |time: &Option<String>| timestamp_millis(time.as_deref()?);
         let (Some(claimed), Some(landed)) = (at(&run.claimed_at), at(&run.landed_at)) else {
             return 0;
         };
-        self.person_waits
+        self.slot_absences
             .get(&run.run_id)
             .into_iter()
             .flatten()
@@ -2600,4 +2692,25 @@ fn cancel_kpis(
             usize::try_from(flow.run_waste).unwrap_or(0),
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::ledger::testkit::{Log, ms, run_id};
+
+    #[test]
+    fn queued_landing_stays_out_through_awaiting_slot_and_landing() {
+        let run = run_id(1);
+        let mut log = Log::default();
+        log.landed(1, &run, 0);
+        let absent = landing_absences(&log.events, ms(1000));
+        assert_eq!(absent.len(), 1);
+        // 600 s worker, 60 s validation; the following 40 s awaiting_slot
+        // and 200 s landing are one continuous interval outside workers.
+        assert_eq!(
+            absent[&RunId::new(run).unwrap()],
+            vec![(ms(660), Some(ms(900)))]
+        );
+    }
 }

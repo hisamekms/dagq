@@ -1,8 +1,9 @@
 //! The inputs whose readers' values are fixed as the functions of main at
 //! commit `369d7c62657660606feee3911710a7b0b8e03cf1` give them
-//! ([`FIXED_AT`]), for the tasks that change how the ledger is built and
-//! how a window is read to compare their values with those, not only the
-//! new functions with each other. Each [`Input`] is a deterministic history
+//! ([`FIXED_AT`]), except intentional reader-definition amendments named
+//! by `application::ports::observation::frozen`. Tasks changing the ledger
+//! builder or a window reader compare their values with these anchors,
+//! not only the new functions with each other. Each [`Input`] is a deterministic history
 //! of the EventStore (a [`Log`]) and the passes of the builder over it
 //! ([`Step`]); what each event is a record of is [`owner::owner`]'s
 //! ([`Input::owners`]). The values fixed (`stats`, `kpi`, `report`, the
@@ -51,7 +52,8 @@ use crate::domain::ledger::owner::{self, Owner};
 /// The inputs are sized by it to cut a pass.
 pub(crate) const WRITES_PER_PASS: usize = 200;
 
-/// The commit of main whose functions gave the values fixed.
+/// The commit of main whose functions gave the original frozen values;
+/// reader-definition amendments are documented beside the expected table.
 pub(crate) const FIXED_AT: &str = "369d7c62657660606feee3911710a7b0b8e03cf1";
 
 /// The kinds of one event each no reader of the ledger names

@@ -15,7 +15,7 @@ fn derives_the_queue_kpis_of_a_window() {
         json!({"supervisor": "s", "candidates": 2, "free_slots": 1, "ready": 2}),
         MONDAY,
     );
-    // Two hours of one run in four hours of two slots.
+    // Two hours less a landing minute in four hours of two worker slots.
     queue.run(&Run::new(
         1,
         Some("runtime".parse::<TaskChange>().unwrap()),
@@ -74,7 +74,7 @@ fn derives_the_queue_kpis_of_a_window() {
     let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
     let day = result.periods.last().unwrap();
     assert!(!day.partial);
-    assert_eq!(measure(day, "slot_usage", ALL).value, Some(0.25));
+    assert_eq!(measure(day, "slot_usage", ALL).value, Some(0.248));
     assert_eq!(measure(day, "slot_usage", ALL).n, 1);
     // 2 candidates for two hours, then none until the stop (two hours).
     let candidates = measure(day, "candidates", ALL);
@@ -252,16 +252,16 @@ fn monday_slot_usage(alive: impl FnOnce(&mut Queue)) -> Option<f64> {
 /// is alive until now.
 #[test]
 fn a_stale_supervisor_ends_at_its_last_heartbeat() {
-    // Two hours of one run in four hours of two slots.
+    // Two hours less a landing minute in four hours of two worker slots.
     let stale = monday_slot_usage(|queue| {
         queue.heartbeats.insert("s".to_owned(), MONDAY + 4 * HOUR);
     });
-    assert_eq!(stale, Some(0.25));
+    assert_eq!(stale, Some(0.248));
     // Alive (its heartbeat fresh at now): the whole day.
     let live = monday_slot_usage(|queue| {
         queue.heartbeats.insert("s".to_owned(), MONDAY + DAY - 1);
     });
-    assert_eq!(live, Some(round3(2.0 / 48.0)));
+    assert_eq!(live, Some(round3(7140.0 / 172800.0)));
     // `up` or `down` pruned its row: the stop they recorded ends it at the
     // row's last heartbeat, not at the prune.
     let pruned = monday_slot_usage(|queue| {
@@ -271,7 +271,7 @@ fn a_stale_supervisor_ends_at_its_last_heartbeat() {
             MONDAY + 10 * HOUR,
         );
     });
-    assert_eq!(pruned, Some(0.25));
+    assert_eq!(pruned, Some(0.248));
     // Its row went without a stop: it ends at the last event it recorded.
     let gone = monday_slot_usage(|queue| {
         queue.queue_event(
@@ -280,7 +280,7 @@ fn a_stale_supervisor_ends_at_its_last_heartbeat() {
             MONDAY + 4 * HOUR,
         );
     });
-    assert_eq!(gone, Some(0.25));
+    assert_eq!(gone, Some(0.248));
     // A later start still ends it first.
     let restarted = monday_slot_usage(|queue| {
         queue.heartbeats.insert("s".to_owned(), MONDAY + 6 * HOUR);
@@ -295,7 +295,7 @@ fn a_stale_supervisor_ends_at_its_last_heartbeat() {
             MONDAY + 4 * HOUR,
         );
     });
-    assert_eq!(restarted, Some(0.25));
+    assert_eq!(restarted, Some(0.248));
 }
 
 /// Only the `integrate` attempts that ran a verification command count

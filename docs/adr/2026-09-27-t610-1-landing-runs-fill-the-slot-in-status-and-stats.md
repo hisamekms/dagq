@@ -10,6 +10,7 @@ amends:
   - adr-0071 decision 12
   - adr-0071 decision 13
 amended_by:
+  - adr-t5111-1
   - adr-t1591-1
 owners:
   - hisamekms

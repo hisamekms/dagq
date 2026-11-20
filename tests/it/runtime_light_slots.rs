@@ -175,10 +175,14 @@ fn the_landing_queue_leaves_room_for_the_heavy_interrupt() {
         .unwrap()
         .clone();
     assert_eq!(
-        supervisor_status["slots"]["landing_queue"], 0,
+        supervisor_status["landing_lane"],
+        json!({"integrating": 0, "e2e": 0, "queued": 1, "overflow": 1}),
         "{supervisor_status}"
     );
-    assert_eq!(supervisor_status["slots"]["used"], 0, "{supervisor_status}");
+    assert_eq!(
+        supervisor_status["worker_slots"]["used"], 1,
+        "{supervisor_status}"
+    );
     let first_run = SqliteQueue::open(&db).unwrap().show(first).unwrap().runs[0]
         .id()
         .to_string();

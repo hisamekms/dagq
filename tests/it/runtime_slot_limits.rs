@@ -112,8 +112,8 @@ fn the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again() {
     }
     let status = runtime::status(&db).unwrap();
     let entry = &status["supervisors"][0];
-    assert_eq!(entry["slots"]["parallel"], 1, "{entry}");
-    assert_eq!(entry["slots"]["source"], "dagq.toml", "{entry}");
+    assert_eq!(entry["worker_slots"]["parallel"], 1, "{entry}");
+    assert_eq!(entry["worker_slots"]["source"], "dagq.toml", "{entry}");
     assert_eq!(entry["waiting"]["limit"], 0, "{entry}");
     assert_eq!(entry["waiting"]["source"], "dagq.toml", "{entry}");
     // A claim is made under the table's `parallel`.

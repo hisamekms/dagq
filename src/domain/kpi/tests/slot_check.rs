@@ -19,9 +19,8 @@ fn monday_slot_check(runs: impl FnOnce(&mut Queue)) -> Value {
     result.periods.last().unwrap().window.details["slot_check"].clone()
 }
 
-/// Four runs of an hour each from claim to landing: four hours held in a
-/// day is 1/6 of a run at once, and 4 landings a day of 3600 s each is
-/// the same, so the ratio is 1.
+/// Four hour-long runs each spend their last minute landing. Both sides
+/// count 3540 worker seconds per landing, so the ratio remains one.
 #[test]
 fn steady_runs_hold_as_many_slots_as_their_landings_say() {
     let check = monday_slot_check(|queue| {
@@ -29,10 +28,10 @@ fn steady_runs_hold_as_many_slots_as_their_landings_say() {
             queue.run(&Run::new(task, None, MONDAY + task * 2 * HOUR, HOUR - 100));
         }
     });
-    assert_eq!(check["occupied"], json!(round3(4.0 / 24.0)));
+    assert_eq!(check["occupied"], json!(round3(4.0 * 3540.0 / 86400.0)));
     assert_eq!(check["landings_per_hour"], json!(round3(4.0 / 24.0)));
-    assert_eq!(check["slot_secs_per_landing"], json!(3600.0));
-    assert_eq!(check["expected"], json!(round3(4.0 / 24.0)));
+    assert_eq!(check["slot_secs_per_landing"], json!(3540.0));
+    assert_eq!(check["expected"], json!(round3(4.0 * 3540.0 / 86400.0)));
     assert_eq!(check["ratio"], json!(1.0));
     assert!(check.get("reason").is_none());
 }
@@ -54,10 +53,13 @@ fn a_run_without_its_end_holds_a_slot_the_landings_do_not_see() {
             MONDAY + 12 * HOUR,
         );
     });
-    // One hour landed, twelve more held by the run with no end.
-    assert_eq!(check["occupied"], json!(round3(13.0 / 24.0)));
-    assert_eq!(check["expected"], json!(round3(1.0 / 24.0)));
-    assert_eq!(check["ratio"], json!(13.0));
+    // 3540 worker seconds landed, twelve hours held by the run with no end.
+    assert_eq!(
+        check["occupied"],
+        json!(round3((3540.0 + 12.0 * 3600.0) / 86400.0))
+    );
+    assert_eq!(check["expected"], json!(round3(3540.0 / 86400.0)));
+    assert_eq!(check["ratio"], json!(13.203));
 }
 
 /// A run that left its slot to wait for a person holds none while it
@@ -113,4 +115,118 @@ fn the_check_has_no_ratio_without_landings_or_a_supervisor() {
     assert_eq!(before["occupied"], Value::Null);
     assert_eq!(before["ratio"], Value::Null);
     assert_eq!(before["reason"], json!("no_supervisor"));
+}
+
+/// The landing lane can fill most of the day without inflating worker
+/// occupancy or either side of Little's law. Historical overflow is also
+/// excluded. The recorded stage distinguishes older worker e2e from
+/// e2e on the landing budget.
+#[test]
+fn landing_lanes_leave_usage_and_both_sides_of_the_slot_check() {
+    for (e2e, landing_e2e, worker_hours) in
+        [(false, false, 1.0), (true, false, 2.0), (true, true, 1.0)]
+    {
+        let mut queue = Queue::default();
+        start(&mut queue, 2, MONDAY);
+        queue.heartbeats.insert("s".to_owned(), MONDAY + DAY - 1);
+        // Five landings exceed parallel; the historical approximation
+        // excludes all five lanes rather than guessing their overflow.
+        for task in 1..=5 {
+            let run = Run::new(task, None, MONDAY + HOUR, 10 * HOUR - 100);
+            queue.run(&run);
+            let id = run_id(&run).to_string();
+            // Finish worker/review before queuing, keeping the fixture's
+            // claim-to-landing timeline consistent for the phase-based RHS.
+            for event in queue
+                .events
+                .iter_mut()
+                .filter(|event| event.run_id.as_ref().is_some_and(|run| run.as_str() == id))
+            {
+                if event.kind == EventKind::ReceiptObserved {
+                    event.created_at = marks::utc_text((MONDAY + HOUR + 80) * 1000);
+                } else if event.kind == EventKind::ValidationFinished {
+                    event.created_at = marks::utc_text((MONDAY + HOUR + 100) * 1000);
+                    event.payload["e2e_requirement"] = json!({"required": e2e});
+                }
+            }
+            queue.push(
+                Some(task),
+                Some(&id),
+                "landing_queued",
+                json!({}),
+                MONDAY + 2 * HOUR,
+            );
+            if landing_e2e {
+                queue.push(
+                    Some(task),
+                    Some(&id),
+                    "run_phase_changed",
+                    json!({"phase": "landing_queue", "cause": "landing_queued"}),
+                    MONDAY + 2 * HOUR,
+                );
+                queue.push(
+                    Some(task),
+                    Some(&id),
+                    "run_phase_changed",
+                    json!({"phase": "awaiting_e2e", "cause": "e2e_leased"}),
+                    MONDAY + 2 * HOUR + 120,
+                );
+            }
+            if e2e {
+                queue.push(
+                    Some(task),
+                    Some(&id),
+                    "run_e2e_started",
+                    json!({}),
+                    MONDAY + 2 * HOUR + if landing_e2e { 180 } else { 0 },
+                );
+                if landing_e2e {
+                    queue.push(
+                        Some(task),
+                        Some(&id),
+                        "run_phase_changed",
+                        json!({"phase": "e2e", "holds": "landing_slot"}),
+                        MONDAY + 2 * HOUR + 180,
+                    );
+                }
+                queue.push(
+                    Some(task),
+                    Some(&id),
+                    "run_e2e_finished",
+                    json!({"outcome": "passed"}),
+                    MONDAY + 3 * HOUR,
+                );
+            }
+            // An overlapping human wait must not subtract the lane twice.
+            queue.push(
+                Some(task),
+                Some(&id),
+                "run_waiting_started",
+                json!({}),
+                MONDAY + 4 * HOUR,
+            );
+            queue.push(
+                Some(task),
+                Some(&id),
+                "run_slot_regained",
+                json!({}),
+                MONDAY + 5 * HOUR,
+            );
+        }
+        let query = KpiQuery {
+            at: Some(Cursor::Time(MONDAY * 1000)),
+            ..KpiQuery::default()
+        };
+        let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+        let day = result.periods.last().unwrap();
+        assert_eq!(
+            measure(day, "slot_usage", ALL).value,
+            Some(round3(5.0 * worker_hours / 48.0))
+        );
+        let check = &day.window.details["slot_check"];
+        assert_eq!(check["occupied"], json!(round3(5.0 * worker_hours / 24.0)));
+        assert_eq!(check["expected"], json!(round3(5.0 * worker_hours / 24.0)));
+        assert_eq!(check["slot_secs_per_landing"], json!(worker_hours * 3600.0));
+        assert_eq!(check["ratio"], json!(1.0));
+    }
 }

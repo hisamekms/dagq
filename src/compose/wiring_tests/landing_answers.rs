@@ -2725,10 +2725,10 @@ fn queued_e2e_starts_with_all_worker_slots_used() {
         }
         if landing.is_none() {
             let status = wiring.status();
-            let slots = &status["supervisors"][0]["slots"];
+            let slots = &status["supervisors"][0]["worker_slots"];
             assert_eq!(slots["used"], 1);
             assert_eq!(slots["parallel"], 1);
-            assert_eq!(slots["landing_queue"], 0);
+            assert_eq!(status["supervisors"][0]["landing_lane"]["e2e"], 0);
             landing = Some(approved_disk_landing(&wiring, true).0);
             return false;
         }
@@ -2736,10 +2736,10 @@ fn queued_e2e_starts_with_all_worker_slots_used() {
             return false;
         }
         let status = wiring.status();
-        let slots = &status["supervisors"][0]["slots"];
+        let slots = &status["supervisors"][0]["worker_slots"];
         assert_eq!(slots["parallel"], 1);
         assert_eq!(slots["used"], 1);
-        assert_eq!(slots["landing_queue"], 1);
+        assert_eq!(status["supervisors"][0]["landing_lane"]["e2e"], 1);
         let entry = &status["landing_queue"][0];
         assert_eq!(entry["run_id"], json!(landing.as_ref().unwrap().id()));
         assert_eq!(entry["position"], 1);
@@ -2761,12 +2761,12 @@ fn queued_e2e_starts_with_all_worker_slots_used() {
 
 /// The same SQLite lease feeds status and the observations behind stats.
 #[test]
-fn status_separates_landing_from_workers_while_stats_counts_the_reservation() {
+fn status_and_stats_separate_landing_from_worker_capacity() {
     use crate::application::live_inputs::{LiveSources, live_inputs};
     use crate::domain::{LeaseToken, Priority, Reason, ReasonCode, live_alerts};
 
     let wiring = Wiring::new(
-        "status_separates_landing_from_workers_while_stats_counts_the_reservation",
+        "status_and_stats_separate_landing_from_worker_capacity",
         Script {
             receipts: vec![],
             verdicts: vec![],
@@ -2802,12 +2802,19 @@ fn status_separates_landing_from_workers_while_stats_counts_the_reservation() {
             .begin_integration(run.id(), &token, &wiring.git.main())
             .unwrap();
         assert_eq!(landing.status(), RunStatus::Integrating);
+        let status = wiring.status();
+        let supervisor = &status["supervisors"][0];
         assert_eq!(
-            wiring.status()["supervisors"][0]["slots"],
-            json!({"used": 0, "landing_queue": used, "parallel": 2, "source": null}),
+            supervisor["worker_slots"],
+            json!({"used": 0, "parallel": 2, "source": null}),
             "{token}"
         );
-        assert_eq!(idle_slots(&queue), free, "{token}");
+        assert_eq!(
+            supervisor["landing_lane"],
+            json!({"integrating": used, "e2e": 0, "queued": 0, "overflow": 0}),
+            "{token}"
+        );
+        assert_eq!(idle_slots(&queue), 2, "{token}");
 
         let back = queue
             .abort_integration(
@@ -2821,8 +2828,8 @@ fn status_separates_landing_from_workers_while_stats_counts_the_reservation() {
         assert_eq!(back.status(), RunStatus::AwaitingIntegration);
         assert!(queue.lease_for_review(run.id(), &token).unwrap().is_some());
         assert_eq!(
-            wiring.status()["supervisors"][0]["slots"],
-            json!({"used": used, "landing_queue": 0, "parallel": 2, "source": null}),
+            wiring.status()["supervisors"][0]["worker_slots"],
+            json!({"used": used, "parallel": 2, "source": null}),
             "{token}"
         );
         assert_eq!(idle_slots(&queue), free, "{token}");

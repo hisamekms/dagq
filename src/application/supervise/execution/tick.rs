@@ -87,6 +87,7 @@ impl Supervisor<'_> {
                         Some(waiting) if waiting.ended.is_some() => {
                             EventKind::RunWaitingEnded.as_str()
                         }
+                        _ if matches!(slot.phase, Phase::Landing(_)) => "landing",
                         _ if slot.in_landing_queue() => "landing_turn",
                         _ => "observed",
                     };

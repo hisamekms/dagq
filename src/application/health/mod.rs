@@ -546,10 +546,14 @@ mod tests {
     }
 
     fn run_at(id: &str, created_at: &str) -> TaskRun {
+        run_at_status(id, created_at, RunStatus::Running)
+    }
+
+    fn run_at_status(id: &str, created_at: &str, status: RunStatus) -> TaskRun {
         TaskRun::restore(crate::domain::RunRecord {
             id: RunId::new(id).unwrap(),
             task_id: TaskId::new(7),
-            status: RunStatus::Running,
+            status,
             requested_provider: crate::domain::Provider::Claude,
             actual_provider: crate::domain::Provider::Claude,
             worker_mode: crate::domain::worker::Worker::default_mode(
@@ -585,17 +589,103 @@ mod tests {
         };
         let registrations = [registration("a", 1, now)];
         let leases = [lease("r1", "a", 1, now), lease("r3", "a", 1, now)];
-        let (runs, supervisors, waiting) =
-            runs_slots_and_waits(&queue, &OnlyOne, &registrations, &leases, now).unwrap();
+        let (runs, supervisors, waiting) = runs_slots_and_waits(
+            &queue,
+            &OnlyOne,
+            &registrations,
+            &leases,
+            &HashMap::new(),
+            now,
+        )
+        .unwrap();
         let ids: Vec<_> = runs.iter().map(|run| run["run_id"].clone()).collect();
         assert_eq!(ids, [json!("r1"), json!("r2"), json!("r3")]);
-        assert_eq!(supervisors[0]["slots"]["used"], 2);
+        assert_eq!(supervisors[0]["worker_slots"]["used"], 2);
         assert!(waiting.is_empty());
         let reads = queue.event_reads.borrow();
         for id in ["r1", "r2", "r3"] {
             assert_eq!(reads.get(&RunId::new(id).unwrap()), Some(&1), "{id}");
         }
         assert_eq!(reads.len(), 3);
+    }
+
+    fn landing_lane_fixture(
+        queued: usize,
+    ) -> (
+        crate::application::port_fakes::RunsAndEvents,
+        Vec<SupervisorRegistration>,
+        Vec<RunLease>,
+    ) {
+        let mut queue = crate::application::port_fakes::RunsAndEvents::default();
+        let mut registration = registration("a", 1, 1_000);
+        registration.parallel = 3;
+        let mut leases = Vec::new();
+        for index in 0..queued + 2 {
+            let id = format!("r{index}");
+            let status = match index {
+                0 => RunStatus::Running,
+                1 => RunStatus::Integrating,
+                _ => RunStatus::AwaitingIntegration,
+            };
+            let run = run_at_status(&id, "1970-01-01 00:15:00", status);
+            if index >= 2 {
+                let mut log = crate::domain::ledger::testkit::Log::default();
+                log.phase(
+                    7,
+                    run.id().as_str(),
+                    900 - crate::domain::ledger::testkit::T0,
+                    crate::domain::run_phase::Phase::LandingQueue,
+                    "landing_turn",
+                );
+                queue.events.insert(run.id().clone(), log.events);
+            }
+            queue.active.push(run);
+            leases.push(lease(&id, "a", 1, 1_000));
+        }
+        (queue, vec![registration], leases)
+    }
+
+    #[test]
+    fn status_separates_worker_slots_and_the_bounded_landing_lane() {
+        for (queued, used, outside, overflow) in [(2, 1, 2, 0), (5, 3, 3, 2)] {
+            let (queue, registrations, leases) = landing_lane_fixture(queued);
+            let (_, supervisors, _) = runs_slots_and_waits(
+                &queue,
+                &OnlyOne,
+                &registrations,
+                &leases,
+                &HashMap::new(),
+                1_000,
+            )
+            .unwrap();
+            assert_eq!(supervisors[0]["worker_slots"]["used"], used);
+            assert_eq!(supervisors[0]["worker_slots"]["parallel"], 3);
+            assert_eq!(
+                supervisors[0]["landing_lane"],
+                json!({"integrating": 1, "e2e": 0, "queued": outside, "overflow": overflow})
+            );
+        }
+    }
+
+    #[test]
+    fn idle_slots_use_free_worker_capacity_and_ignore_unregistered_leases() {
+        for (queued, free) in [(2, 2), (5, 0)] {
+            let (mut queue, registrations, mut leases) = landing_lane_fixture(queued);
+            queue.active.push(run_at("manual", "1970-01-01 00:15:00"));
+            leases.push(lease("manual", "unregistered", 1, 1_000));
+            assert_eq!(
+                crate::application::live_inputs::free_worker_slots(
+                    &queue,
+                    &OnlyOne,
+                    &registrations,
+                    &leases,
+                    &HashMap::new(),
+                    1_000
+                )
+                .unwrap(),
+                free
+            );
+        }
     }
 
     #[test]

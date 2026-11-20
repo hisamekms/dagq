@@ -6,27 +6,25 @@
 //! now; `stats` reads the judgments the ledger folds of those records,
 //! never these reads.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-    time::SystemTime,
-};
-
-use anyhow::Result;
+use std::{collections::HashMap, path::Path, time::SystemTime};
 
 use super::{
-    AgentSignals, CoordinationReads, EventStore, PlanningRecords, ProcessControl, RunFiles, RunLog,
-    RunReads, StatusFilter, SupervisorReads, TaskQuery, TaskReads,
+    AgentSignals, AskQuery, AskStore, CoordinationReads, PlanningRecords, ProcessControl, RunFiles,
+    RunLog, StatusFilter, SupervisorReads, TaskQuery, TaskReads,
 };
 use crate::domain::{
-    EventKind, GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
+    EventKind, GoalStatus, RunId, RunLease, RunStatus, SupervisorPulse, SupervisorRegistration,
+    TaskRun, TaskStatus, admission,
+    landing_queue::{Resources, waiting_for_answer},
     live_alerts::{
         EVENTS_PER_READ, LiveHistory, LiveInputs, SeededFold, WORK_EVENTS_PER_READ,
         first_pass_reads,
     },
+    run_progress::{LandingStage, landing_stage},
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{LiveRun, SlotSnapshot, outlier_thresholds},
 };
+use anyhow::Result;
 
 /// The marker the agent's `UserPromptSubmit` hook writes when the session
 /// takes an input (ADR-0043 decision 2), in the run directory.
@@ -46,7 +44,15 @@ pub struct LiveSources<'a> {
 /// the processes and `sources`: what a supervisor's pass records
 /// (docs/design/measurement.md "今の判定の記録").
 pub fn live_inputs(
-    queue: &(impl TaskReads + PlanningRecords + SupervisorReads + CoordinationReads + RunLog + ?Sized),
+    queue: &(
+         impl TaskReads
+         + PlanningRecords
+         + SupervisorReads
+         + CoordinationReads
+         + RunLog
+         + AskStore
+         + ?Sized
+     ),
     processes: &dyn ProcessControl,
     now: i64,
     events: &[crate::domain::RunEvent],
@@ -68,7 +74,15 @@ pub fn live_inputs(
 /// ([`carried_events`]): what its pass judges and records without reading
 /// the whole history.
 pub fn carried_live_inputs(
-    queue: &(impl TaskReads + PlanningRecords + SupervisorReads + CoordinationReads + RunLog + ?Sized),
+    queue: &(
+         impl TaskReads
+         + PlanningRecords
+         + SupervisorReads
+         + CoordinationReads
+         + RunLog
+         + AskStore
+         + ?Sized
+     ),
     processes: &dyn ProcessControl,
     now: i64,
     history: &mut LiveHistory,
@@ -221,50 +235,17 @@ fn carried_events(
 }
 
 /// The queue's slots at `now`: the live supervisors' (`processes` telling
-/// which are alive) less the runs executing, and the candidates and ready
+/// which are alive) less worker-slot usage, and the candidates and ready
 /// tasks.
 fn slot_snapshot(
-    queue: &(impl EventStore + TaskReads + SupervisorReads + CoordinationReads + RunReads + ?Sized),
+    queue: &(impl RunLog + TaskReads + SupervisorReads + CoordinationReads + AskStore + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
 ) -> Result<SlotSnapshot> {
     let registrations = queue.supervisors()?;
-    let slots: i64 = registrations
-        .iter()
-        .filter(|registration| {
-            !SupervisorPulse::judge(registration, processes.alive(registration.pid), now).stale
-        })
-        .map(|registration| i64::from(registration.parallel))
-        .sum();
-    // A run that waits for a person, or waits to go back to its slot,
-    // holds no slot (ADR-0071 decision 13), nor does a claim of
-    // `already_satisfied` resting on its ask (ADR-t1818-1). Stats counts
-    // registered supervisors’ leases, including landing work, for its
-    // idle-slot alert. Unfinished runs under other tokens count too,
-    // except for direct integrations (ADR-t610-1).
-    let supervisor_leases: HashSet<RunId> = queue
-        .run_leases()?
-        .into_iter()
-        .filter(|lease| {
-            registrations
-                .iter()
-                .any(|registration| registration.token == lease.token)
-        })
-        .map(|lease| lease.run_id)
-        .collect();
-    let mut holding: HashSet<RunId> = queue
-        .active_runs()?
-        .into_iter()
-        .filter(|run| run.status() != RunStatus::Integrating)
-        .map(|run| run.id().clone())
-        .collect();
-    holding.extend(supervisor_leases);
-    let mut executing: i64 = 0;
-    for run in &holding {
-        if crate::domain::waiting::WaitState::holds_a_slot(&queue.run_events(run)?) {
-            executing += 1;
-        }
-    }
+    let leases = queue.run_leases()?;
+    let shared = shared_landing_entries(queue, processes, &registrations, &leases, now)?;
+    let free_slots = free_worker_slots(queue, processes, &registrations, &leases, &shared, now)?;
     let ready = queue
         .list(&TaskQuery {
             status: StatusFilter::Only(vec![TaskStatus::Ready]),
@@ -281,10 +262,137 @@ fn slot_snapshot(
         .map(|goal| goal.tasks.ready)
         .sum();
     Ok(SlotSnapshot {
-        free_slots: slots - executing,
+        free_slots,
         candidates: queue.candidates()?.len(),
         ready: ready.saturating_sub(ready_in_draft_goals),
     })
+}
+
+/// Shared landing entries that contribute claim backpressure. Use the
+/// same landing-ready and admission predicates as the supervisor's pass,
+/// with the recorded gates and current queue rows. The local landing-turn
+/// waits are counted from supervisor leases separately.
+pub(super) fn shared_landing_entries(
+    queue: &(impl RunLog + TaskReads + AskStore + ?Sized),
+    processes: &dyn ProcessControl,
+    registrations: &[SupervisorRegistration],
+    leases: &[RunLease],
+    now: i64,
+) -> Result<HashMap<String, usize>> {
+    use crate::domain::{
+        RunHistory, ci_watch::CI_WATCH_HOLD, claim_hold::OwnHold,
+        landing_branch::LANDING_BRANCH_HOLD, run_env::RUN_ENV_PROGRAM_KINDS,
+    };
+    let mut tokens: Vec<_> = registrations
+        .iter()
+        .filter(|r| !SupervisorPulse::judge(r, processes.alive(r.pid), now).stale)
+        .map(|r| r.token.as_str())
+        .collect();
+    if tokens.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let env = queue
+        .latest_queue_event(&RUN_ENV_PROGRAM_KINDS)?
+        .is_some_and(|event| event.kind == EventKind::RunEnvProgramMissing);
+    let ci = queue.latest_events_by_supervisor(&CI_WATCH_HOLD.kinds(), &tokens)?;
+    let branch = queue.latest_events_by_supervisor(&LANDING_BRANCH_HOLD.kinds(), &tokens)?;
+    tokens.retain(|token| {
+        admission::Progress {
+            gates: admission::Gates {
+                ci: CI_WATCH_HOLD.holds(OwnHold::latest_of(&ci, token)),
+                env,
+                branch: LANDING_BRANCH_HOLD.holds(OwnHold::latest_of(&branch, token)),
+            },
+            ..Default::default()
+        }
+        .can_progress()
+    });
+    if tokens.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let candidates = super::integrate::landing_candidates(queue)?;
+    if candidates.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut asks = HashMap::<_, Vec<_>>::new();
+    for ask in queue.asks(AskQuery {
+        open: true,
+        ..Default::default()
+    })? {
+        if let Some(run) = &ask.run_id {
+            asks.entry(run.clone()).or_default().push(ask);
+        }
+    }
+    let by_run: HashMap<_, _> = leases
+        .iter()
+        .map(|lease| (&lease.run_id, &lease.token))
+        .collect();
+    let mut queued = 0;
+    for (run, events) in candidates {
+        let history = RunHistory::from_events(&events);
+        let lease = by_run.get(run.id());
+        let facts = Resources {
+            preparing: !history.landing_ready(),
+            leased: lease.is_some(),
+            e2e_lease: lease.is_some_and(|token| registrations.iter().any(|r| &r.token == *token))
+                && crate::domain::run_e2e::landing_lease(&events),
+            ..Default::default()
+        };
+        if facts.counts_toward_backpressure()
+            && !waiting_for_answer(asks.get(run.id()).map_or(&[], Vec::as_slice), &history)
+            && !queue.task_fenced(run.task_id())?
+        {
+            queued += 1;
+        }
+    }
+    Ok(tokens
+        .into_iter()
+        .map(|token| (token.to_owned(), queued))
+        .collect())
+}
+
+/// Free capacity for any task, summed over live supervisors using the
+/// same worker judgment as claims. Each supervisor's usable capacity
+/// bottoms at zero; a stale or full supervisor cannot spend another's slots.
+pub(super) fn free_worker_slots(
+    queue: &(impl RunLog + ?Sized),
+    processes: &dyn ProcessControl,
+    registrations: &[SupervisorRegistration],
+    leases: &[RunLease],
+    shared: &HashMap<String, usize>,
+    now: i64,
+) -> Result<i64> {
+    let live: Vec<_> = registrations
+        .iter()
+        .filter(|r| !SupervisorPulse::judge(r, processes.alive(r.pid), now).stale)
+        .collect();
+    let mut free = 0;
+    for registration in live {
+        let parallel = usize::try_from(registration.parallel).unwrap_or(0);
+        let mut workers = 0;
+        let mut queued = shared
+            .get(registration.token.as_str())
+            .copied()
+            .unwrap_or(0);
+        for lease in leases
+            .iter()
+            .filter(|lease| lease.token == registration.token)
+        {
+            let run = queue.run(&lease.run_id)?;
+            let events = queue.run_events(run.id())?;
+            if !crate::domain::waiting::WaitState::holds_a_slot(&events) {
+                continue;
+            }
+            match landing_stage(run.status(), &events) {
+                None => workers += 1,
+                Some(LandingStage::Queued) => queued += 1,
+                Some(LandingStage::Integrating | LandingStage::E2e) => {}
+            }
+        }
+        let used = crate::domain::light_slots::worker_slots(workers, queued, parallel);
+        free += i64::try_from(parallel.saturating_sub(used)).unwrap_or(i64::MAX);
+    }
+    Ok(free)
 }
 
 /// The runs of `all` (every run of the queue) not finished yet, in its order, with their markers and

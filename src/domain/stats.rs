@@ -262,17 +262,14 @@ pub struct StatsQuery {
     pub full: bool,
 }
 
-/// The supervisors as they are now: execution slots nobody uses, the
-/// dependency-ready tasks and the ready tasks that are still blocked.
-///
-/// A run waiting its turn to land fills its slot (ADR-0071 decision 13,
-/// ADR-t610-1), so a free slot is one a heavy task could use too; a run
-/// waiting for a person does not. The light room a landing queue leaves
-/// (ADR-t1591-1) is not free here, and the ready tasks of a draft goal
-/// wait for `goal ready`, not for a predecessor, so they are left out of
-/// `ready`. It is read once per `stats`, which keeps no history of the
-/// hours slots stood free; when a slot alert started and ended is in the
-/// supervisors' record of the judgments of now ([`super::live_alerts`]).
+/// The supervisors as they are now: free worker capacity, dependency-ready
+/// tasks and ready tasks still blocked. Free slots are usable by heavy
+/// tasks too. Human waits, integration and landing-budget e2e leave
+/// worker slots, and the excess landing queue uses worker capacity.
+/// Lease usage comes from registered supervisors. Draft goals' ready tasks wait for
+/// `goal ready`, so they are left out of `ready`. The snapshot keeps no
+/// history of idle hours; alert starts and ends are in the supervisors'
+/// judgments of now ([`super::live_alerts`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotSnapshot {
     pub free_slots: i64,

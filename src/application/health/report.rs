@@ -2,6 +2,7 @@
 //! claims and the unfinished runs (observation and analysis).
 
 use super::*;
+use crate::domain::run_progress::{LandingStage, landing_stage};
 use crate::{application::claim_view, domain::EventKind};
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,8 +59,15 @@ pub fn status(
     let now = clock.now();
     let registrations = queue.supervisors()?;
     let leases = queue.run_leases()?;
+    let shared = crate::application::live_inputs::shared_landing_entries(
+        queue,
+        control,
+        &registrations,
+        &leases,
+        now,
+    )?;
     let (runs, supervisors, waiting) =
-        runs_slots_and_waits(queue, control, &registrations, &leases, now)?;
+        runs_slots_and_waits(queue, control, &registrations, &leases, &shared, now)?;
     let claim_hold = claim_hold_in_place(queue, &registrations, control, now)?;
     let shown_claim_hold = claim_hold.as_ref().map(hold_view).or_else(|| {
         let mut live = supervisors
@@ -182,6 +190,7 @@ pub(super) fn runs_slots_and_waits(
     control: &dyn ProcessControl,
     registrations: &[SupervisorRegistration],
     leases: &[RunLease],
+    shared: &HashMap<String, usize>,
     now: i64,
 ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>)> {
     let listed = listed_runs(queue, leases)?;
@@ -227,20 +236,26 @@ pub(super) fn runs_slots_and_waits(
         registrations,
         leases,
         &events,
+        shared,
         now,
     )?;
     Ok((runs, supervisors, waiting))
 }
 
-/// Each registered supervisor's `slots` (`used` of `parallel`) and
-/// `waiting` (`count` of `limit`, with the `returning` among them), and the
-/// runs that wait for a person or for a slot to go back to (ADR-0071
-/// decision 12), from the leases and the run events (`events` by run, read
-/// here for a leased run not in it). `slots.used` counts worker slots
-/// occupied by development, review and other worker stages.
-/// `slots.landing_queue` counts leased landing work, including e2e and
-/// integration. The top-level landing queue also lists unleased entries.
-/// Claim admission separately reserves capacity for excess queued work.
+/// Each registered supervisor's `worker_slots` object has `used`, `parallel`
+/// and `source`: usage is the claim/resume/return judgment's worker count
+/// from [`crate::domain::light_slots::worker_slots`]. `parallel` is the
+/// worker limit and `source` its setting origin (null if not recorded).
+/// `landing_lane.integrating` and `e2e` count integration and e2e leases.
+/// `queued` (up to `parallel`) and `overflow` (counted in `used`) split
+/// the backpressure inputs: local landing-turn waits and the common
+/// queue count read with the supervisor's recorded gates. Eligible
+/// common entries may include an e2e lease, still in the queue during e2e.
+/// The top-level `landing_queue` lists individual entries. Human waits and
+/// returning runs count in `waiting`.
+/// Only registered tokens have these capacity objects; unregistered leases
+/// do not occupy a supervisor's worker slots. Runs come from leases and
+/// their events (`events` by run, read here for a leased run not in it).
 /// `count` is what
 /// `--max-waiting` bounds (ADR-0071 (f2)): the runs that wait and those
 /// that wait to go back (`state: returning` in `waiting`), with `limit`
@@ -257,14 +272,19 @@ pub(super) fn slots_and_waits(
     registrations: &[SupervisorRegistration],
     leases: &[RunLease],
     events: &HashMap<RunId, Vec<RunEvent>>,
+    shared: &HashMap<String, usize>,
     now: i64,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
     let mut waiting = Vec::new();
-    // Per token: the slots in use and the runs out of them, counted as
-    // `--max-waiting` counts them.
-    // Per token: the slots in use, the landing queue among them, and the
-    // runs out of them.
-    let mut counts: HashMap<&str, (usize, usize, WaitCount)> = HashMap::new();
+    #[derive(Default)]
+    struct Counts {
+        workers: usize,
+        integrating: usize,
+        e2e: usize,
+        queued: usize,
+        waiting: WaitCount,
+    }
+    let mut counts: HashMap<&str, Counts> = HashMap::new();
     for lease in leases {
         let run = queue.run(&lease.run_id)?;
         let entry = counts.entry(lease.token.as_str()).or_default();
@@ -278,10 +298,11 @@ pub(super) fn slots_and_waits(
         };
         // The same wait as the run's `progress.slot` in `runs` ([`crate::domain::run_progress::SlotUse`]).
         let Some(state) = WaitState::of(events) else {
-            if crate::domain::run_progress::in_landing_queue(run.status(), events) {
-                entry.1 += 1;
-            } else {
-                entry.0 += 1;
+            match landing_stage(run.status(), events) {
+                None => entry.workers += 1,
+                Some(LandingStage::Integrating) => entry.integrating += 1,
+                Some(LandingStage::E2e) => entry.e2e += 1,
+                Some(LandingStage::Queued) => entry.queued += 1,
             }
             continue;
         };
@@ -300,7 +321,7 @@ pub(super) fn slots_and_waits(
             wait["ended_at"] = json!(ms.div_euclid(1000));
             wait["cause"] = json!(cause.as_str());
         }
-        entry.2.add(state.ended.is_some());
+        entry.waiting.add(state.ended.is_some());
         waiting.push(wait);
     }
     // The hold on new claims in progress (task 327), on its supervisor.
@@ -368,19 +389,25 @@ pub(super) fn slots_and_waits(
             let live = !health.stale;
             let mut value = serde_json::to_value(health)?;
             if let Some(registration) = registrations.get(index) {
-                let (workers, queued, count) = counts
-                    .get(registration.token.as_str())
-                    .copied()
-                    .unwrap_or_default();
-                value["slots"] = json!({
-                    "used": workers,
-                    "landing_queue": queued,
+                let token = registration.token.as_str();
+                let count = counts.remove(token).unwrap_or_default();
+                let queued = count.queued + shared.get(token).copied().unwrap_or(0);
+                let parallel = usize::try_from(registration.parallel).unwrap_or(0);
+                let outside = queued.min(parallel);
+                value["worker_slots"] = json!({
+                    "used": crate::domain::light_slots::worker_slots(count.workers, queued, parallel),
                     "parallel": registration.parallel,
                     "source": registration.parallel_source,
                 });
+                value["landing_lane"] = json!({
+                    "integrating": count.integrating,
+                    "e2e": count.e2e,
+                    "queued": outside,
+                    "overflow": queued - outside,
+                });
                 value["waiting"] = json!({
-                    "count": count.count(),
-                    "returning": count.returning,
+                    "count": count.waiting.count(),
+                    "returning": count.waiting.returning,
                     "limit": registration.max_waiting,
                     "source": registration.max_waiting_source,
                 });

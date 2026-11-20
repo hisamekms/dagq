@@ -62,10 +62,12 @@ fn shown(phase: &str, status: RunStatus, lease: Lease, queued: bool) -> bool {
             && (lease == Lease::Stale || queued))
 }
 
-/// How a run uses its supervisor's capacity. The worker count includes
-/// `used`; leased landing work, including an e2e, is `landing_queue`.
-/// Human waits and returns are counted separately. Unleased runs have no
-/// slot even when shown in the queue-wide landing list.
+/// A leased run uses a worker slot (`used`), belongs to the landing lane
+/// (`landing_queue`, integrating, landing e2e or waiting for its turn), or
+/// waits outside both lanes for a person (`waiting`) or a return slot
+/// (`returning`). An unleased run has no slot (`None`). Aggregate worker
+/// usage also counts excess landing queue entries past `parallel`; the
+/// aggregate backpressure does not assign an overflow slot to any run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotUse {
@@ -97,13 +99,32 @@ impl SlotUse {
 
 /// Whether a leased run uses the landing budget or waits in the landing queue.
 pub fn in_landing_queue(status: RunStatus, events: &[RunEvent]) -> bool {
-    status == RunStatus::Integrating
-        || (matches!(
-            status,
-            RunStatus::AwaitingIntegration | RunStatus::NeedsSession
-        ) && super::run_e2e::landing_lease(events))
-        || (status == RunStatus::AwaitingIntegration
-            && current(events, 0).is_some_and(|(phase, _)| phase == LANDING_QUEUE))
+    landing_stage(status, events).is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LandingStage {
+    Integrating,
+    E2e,
+    Queued,
+}
+
+/// The landing stage of a lease, shared by progress, status and stats.
+pub(crate) fn landing_stage(status: RunStatus, events: &[RunEvent]) -> Option<LandingStage> {
+    match status {
+        RunStatus::Integrating => Some(LandingStage::Integrating),
+        RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+            if super::run_e2e::landing_lease(events) =>
+        {
+            Some(LandingStage::E2e)
+        }
+        RunStatus::AwaitingIntegration
+            if current(events, 0).is_some_and(|(phase, _)| phase == LANDING_QUEUE) =>
+        {
+            Some(LandingStage::Queued)
+        }
+        _ => None,
+    }
 }
 
 /// The run's lease as [`Progress::of`] reads it.
@@ -301,8 +322,16 @@ mod tests {
             T0 + 20,
         );
         assert_eq!(approved.phase.as_deref(), Some("landing_queue"));
-        // Landing, it is in its slot.
+        // Integrating belongs to the landing lane, even without a phase record.
         log.phase(1, &run, 30, Phase::Landing, "x");
+        assert_eq!(
+            Progress::of(RunStatus::Integrating, Lease::Live, &log.events, T0 + 40).slot,
+            Some(SlotUse::LandingQueue)
+        );
+        assert_eq!(
+            Progress::of(RunStatus::Integrating, Lease::Stale, &[], T0 + 40).slot,
+            Some(SlotUse::LandingQueue)
+        );
         assert!(!in_landing_queue(
             RunStatus::AwaitingIntegration,
             &log.events

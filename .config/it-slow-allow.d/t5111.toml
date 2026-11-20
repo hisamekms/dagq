@@ -1,0 +1,4 @@
+[[test]]
+name = "runtime_slot_limits::the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again"
+reason = "B 境界（守る境界）: 実行中の supervisor が設定ファイルを再読込し、再起動なしに変えた枠とその出所が SQLite の登録・claim・status・doctor に届く配線を確かめる。既存の境界 supervisor-table-sets-the-slot-limits-and-is-read-again を保ち、値の解決の判断は domain::slot_limits の unit test が持つ"
+task = 5111

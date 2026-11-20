@@ -93,8 +93,8 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     );
     let status = runtime::status(&db).unwrap();
     assert_eq!(
-        status["supervisors"][0]["slots"],
-        json!({"used": 0, "landing_queue": 0, "parallel": 1, "source": "flag"}),
+        status["supervisors"][0]["worker_slots"],
+        json!({"used": 0, "parallel": 1, "source": "flag"}),
         "{status}"
     );
     assert_eq!(

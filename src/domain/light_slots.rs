@@ -69,7 +69,7 @@ pub enum ClaimRoom {
 /// Worker capacity in use: active workers and the excess landing queue
 /// over `parallel`. Ready landings contribute to backpressure even after
 /// their leases were returned. Active workers exclude human waits and
-/// integrating runs, but include review, e2e, revise and resume.
+/// integrating runs and landing e2e, but include review, revise and resume.
 pub fn worker_slots(active_workers: usize, queued: usize, parallel: usize) -> usize {
     active_workers + queued.saturating_sub(parallel)
 }

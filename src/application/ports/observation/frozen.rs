@@ -1,7 +1,9 @@
 //! The readers' values of the inputs of
 //! [`crate::domain::ledger::testkit::frozen`], fixed as the functions of
 //! main at its [`FIXED_AT`] give them of the ledger the builder of then
-//! made: a task that changes how the ledger is built or a window read
+//! made. The KPI-since worker-slot expectations exclude the landing lane;
+//! every other field retains its original frozen value. A task that
+//! changes how the ledger is built or a window read
 //! compares its values with these ([`check`], [`differs`]), so that what it keeps the
 //! same is the same as before it, not only between its new functions.
 //!
@@ -456,7 +458,7 @@ pub(crate) fn check(each: &[(&Input, Values)]) {
 
 /// Every independent frozen value belongs to exactly one group, in the
 /// original order. The ledger's direct golden anchor executes these groups
-/// for every canonical input and still compares with the untouched table.
+/// for every canonical input and still compares with the independent table.
 #[test]
 fn groups_partition_every_fixed_value() {
     let inputs = crate::domain::ledger::testkit::frozen::inputs();
@@ -478,7 +480,11 @@ fn groups_partition_every_fixed_value() {
     }
 }
 
-/// The values fixed, by input and name.
+/// The values fixed, by input and name. KPI-since answers use worker-slot
+/// time (600 s worker + 60 s validation in these inputs), excluding the
+/// awaiting-slot and landing intervals. Except slot_check's expected and
+/// slot_secs_per_landing fields in those answers, every field retains the
+/// original anchor. The input histories remain unchanged.
 const FIXED: &[(&str, &[(&str, &str)])] = &[
     (
         "reached",
@@ -514,8 +520,8 @@ const FIXED: &[(&str, &[(&str, &str)])] = &[
             ),
             ("stats --until 53", "43216 bytes, fnv 22045b9204f19f9b"),
             ("kpi", "109424 bytes, fnv 5a1c3fbf922b1a12"),
-            ("kpi --since t5", "46449 bytes, fnv f96f9b1acb04cbff"),
-            ("kpi --since t960", "46289 bytes, fnv 47f02117036dd079"),
+            ("kpi --since t5", "46449 bytes, fnv 85a66749f920e4dd"),
+            ("kpi --since t960", "46289 bytes, fnv 54c0d18b04fe8be0"),
             ("kpi --since t3000", "36149 bytes, fnv 2308bee14f0d5512"),
             ("targets day", "342 bytes, fnv 78ed68f51331a953"),
             ("targets week", "334 bytes, fnv 81a4e0b9de16f6ea"),
@@ -550,7 +556,7 @@ const FIXED: &[(&str, &[(&str, &str)])] = &[
             ),
             ("stats --until 1383", "147357 bytes, fnv e6a3709e3fccb8f5"),
             ("kpi", "109424 bytes, fnv 18e31e586cee31b6"),
-            ("kpi --since t2000", "46009 bytes, fnv cc1bf932d3f24bf6"),
+            ("kpi --since t2000", "46009 bytes, fnv 35a03748c8207aa6"),
             ("kpi --since t9001", "36157 bytes, fnv affdb08fc4521c98"),
             ("targets day", "342 bytes, fnv 78ed68f51331a953"),
             ("targets week", "334 bytes, fnv 81a4e0b9de16f6ea"),
@@ -584,7 +590,7 @@ const FIXED: &[(&str, &[(&str, &str)])] = &[
             ),
             ("stats --until 1390", "147359 bytes, fnv fc8732d87075f3f4"),
             ("kpi", "109430 bytes, fnv beae0583370a928a"),
-            ("kpi --since t1500", "46001 bytes, fnv e740e906c16c4716"),
+            ("kpi --since t1500", "46001 bytes, fnv 05d94dd1ade849de"),
             ("kpi --since t9005", "36165 bytes, fnv 8bd8cae6bdc8382e"),
             ("targets day", "342 bytes, fnv 78ed68f51331a953"),
             ("targets week", "334 bytes, fnv 81a4e0b9de16f6ea"),
@@ -764,8 +770,8 @@ const FIXED: &[(&str, &[(&str, &str)])] = &[
             ),
             ("stats --until 2722", "243631 bytes, fnv 599df95fe2aabdc5"),
             ("kpi", "109424 bytes, fnv 18e31e586cee31b6"),
-            ("kpi --since t1201", "47205 bytes, fnv 7588b5ddd1c1d647"),
-            ("kpi --since t3150", "47201 bytes, fnv 436f22d8007ee061"),
+            ("kpi --since t1201", "47203 bytes, fnv a6389c275bb9268a"),
+            ("kpi --since t3150", "47199 bytes, fnv cee860d5e3477201"),
             ("kpi --since t9211", "37227 bytes, fnv f8a9183e10c3f0fb"),
             ("kpi --since t9221", "37229 bytes, fnv 69bc9cc8abdd317e"),
             ("targets day", "342 bytes, fnv 78ed68f51331a953"),
@@ -827,7 +833,7 @@ const FIXED: &[(&str, &[(&str, &str)])] = &[
             ),
             ("stats --until 93", "42369 bytes, fnv 4b6dc5b2f119ac6a"),
             ("kpi", "109424 bytes, fnv 18e31e586cee31b6"),
-            ("kpi --since t50", "45982 bytes, fnv 99b804429620e2d9"),
+            ("kpi --since t50", "45982 bytes, fnv 73ddaff9945174a3"),
             ("kpi --since t4000", "36151 bytes, fnv 3ed81c05296a9457"),
             ("kpi --since t4500", "36151 bytes, fnv e20effa943772de0"),
             ("kpi --since t5000", "36151 bytes, fnv 944b132abbb81df7"),

@@ -422,9 +422,13 @@ fn status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot() {
         }
         if supervisor["registered"] == true {
             let count = |slot: &str| slots.get(slot).copied().unwrap_or(0);
-            assert_eq!(supervisor["slots"]["used"], count("used"), "{supervisor}");
             assert_eq!(
-                supervisor["slots"]["landing_queue"],
+                supervisor["worker_slots"]["used"],
+                count("used"),
+                "{supervisor}"
+            );
+            assert_eq!(
+                supervisor["landing_lane"]["integrating"],
                 count("landing_queue"),
                 "{supervisor}"
             );
@@ -443,7 +447,7 @@ fn status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot() {
         .unwrap();
     assert_eq!(live["run_ids"].as_array().unwrap().len(), 6);
     // Runs out of their slots: the six runs are not the slots in use.
-    assert_eq!(live["slots"]["used"], 4);
+    assert_eq!(live["worker_slots"]["used"], 4);
     assert_eq!(live["waiting"]["count"], 2);
     let waiting: Vec<&str> = status["waiting"]
         .as_array()
