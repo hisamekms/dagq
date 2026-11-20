@@ -349,7 +349,7 @@ tags = ["headless", "codex", "cmux", "throughput", "enterprise", "planning", "ob
 # Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する。
 # Codex で動ける役割は actor-model.md の provider の項（domain::actor_model::CODEX_ROLES）が持つ。
 # この repository で codex にしている役割は、この節とこの下に続く [roles.*] の節のうち provider = "codex" を書いたもの
-# （足した task はそれぞれのコメント）で、[roles.review]・[roles.recovery] は claude を書き、[roles.*] の節を持たない役割は
+# （足した task はそれぞれのコメント）で、[roles.review]・[roles.plan_review]・[roles.recovery] は claude を書き、[roles.*] の節を持たない役割は
 # provider を書かず Claude で動く。
 # [roles.<role>] の provider を知らない旧バイナリは dagq.toml を読めなくなるので、
 # 固定バイナリが task 1065 を含んでから足した。
@@ -364,13 +364,13 @@ provider = "codex"
 provider = "claude"
 
 [roles.plan_review]
-# plan review の job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
-# 「inbox と worker は Claude、それ以外の actor は Codex」の plan review の分。goal 80、task 1218・1219。
-# 書式と振る舞いは docs/design/supervisor-lifecycle/plan-review.md の「Codexで動かす」と actor-model.md の provider）。
-# model と effort は書かず、Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する
-# （--no-claude では切り替えず plan review by hand に渡す）。plan_review の codex を知らない旧バイナリ
-# （CODEX_ROLES に plan_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1218 を含んでから足した。
-provider = "codex"
+# plan review の job は 2026-10-01 の決定（goal 80、task 1218・1219）で Codex にしていたが、
+# 差し戻しの往復が多いため、人の 2026-11-19 の決定（request 372）で Claude に戻す。
+# 11/19 夜は task 5395 が 9 回、5470 が 6 回、5509 が 5 回の差し戻し。いずれも受け入れ条件の文面と
+# 実装・規則の細部の食い違いによる。切り替え前後の差し戻し回数とトークン数で効果を見る。
+# 書式と振る舞いは docs/design/supervisor-lifecycle/plan-review.md と actor-model.md の provider。
+# model と effort は書かず、Claude の既定に任せる。
+provider = "claude"
 
 [throughput_review]
 # 毎時・日次・週次の見直しの kpi・stats を止める（人の 2026-11-16 の決定、request 340）。job_read の重い読みが queue service を
