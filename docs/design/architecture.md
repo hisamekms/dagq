@@ -187,7 +187,7 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
 - **X2** 境界の規則のためにtransactionを分けない。
   所有の表のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。
   検査: 全体のreview。
-- **X3** 所有の表のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
+- **X3** 所有の表のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::task_store::transition_task`など）を通す。
   SQLの文を書き写さない。
   検査: 全体のreview。
 - **X4** 挿入した行のIDは、storeのadapterの挿入の関数（`infrastructure::sqlite`の`insert_id`・`WriteTx::insert_id`）から取り、SQLiteの`last_insert_rowid`はその下の内部の関数だけが呼ぶ（ADR-t3982-1決定4）。
