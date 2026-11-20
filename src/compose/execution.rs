@@ -975,3 +975,18 @@ pub fn init_recommended(cwd: &Path, profiles: &crate::domain::toolchain::Profile
         profiles,
     )
 }
+
+/// Select remote committed reads only for a configured team deployment.
+/// API reads are made by the application between queue calls, never in a write entry.
+pub(super) fn review_reads(
+    deployment: &crate::infrastructure::deployment_config::DeploymentConfig,
+    clock: Arc<dyn crate::application::Clock>,
+) -> Result<Option<Arc<dyn crate::application::review_input::ReviewReads + Send + Sync>>> {
+    Ok(
+        crate::infrastructure::github_app::GithubReviewReads::from_deployment(deployment, clock)?
+            .map(|reads| {
+                Arc::new(reads)
+                    as Arc<dyn crate::application::review_input::ReviewReads + Send + Sync>
+            }),
+    )
+}

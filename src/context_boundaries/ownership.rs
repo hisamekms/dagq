@@ -626,6 +626,7 @@ pub(super) const PORTS: &[Port] = &[
     port("Verifier", Partial),
     port("RepositoryReads", Public(Only(&[Observation]))), // read-only reads of main; the CI watch reads the landing branch, unresolved it leaves the check to the landing's hold
     port("Repository", Internal),
+    port("ReviewReads", Internal),
     port("PreparedRef", Public(Only(&[Planning]))), // the ref write CarriedBranches::prepare_write hands to ready --inherit (T10)
     port("CoordinationReads", Public(All)),
     port("RunCoordination", Internal),

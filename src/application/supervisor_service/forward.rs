@@ -746,6 +746,10 @@ impl GoalReviewStore for SupervisorQueue {
 }
 
 impl RunReads for SupervisorQueue {
+    fn review_accepted_head(&self, id: &RunId) -> Result<Option<String>> {
+        self.remote("review_accepted_head", vec![to_value(id)?])
+    }
+
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         self.remote("active_runs", vec![])
     }

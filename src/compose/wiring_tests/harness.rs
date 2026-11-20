@@ -1214,6 +1214,7 @@ impl Parts {
         }
         let layout = layout(&self.db, self.pid, &workers);
         let ports = Ports {
+            review_reads: None,
             queues: Arc::new(queues.clone()),
             service,
             observation_queues: Arc::new(SupervisorPorts {

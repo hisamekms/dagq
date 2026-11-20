@@ -179,3 +179,201 @@ fn failures_and_invalid_destinations_cannot_expose_credentials() {
             .is_err()
     );
 }
+
+#[test]
+fn compare_paths_require_a_complete_list_and_keep_both_rename_paths() {
+    assert_eq!(
+        complete_changed_paths(&json!({"files":[
+            {"filename":"new/AGENT.md", "status":"renamed", "previous_filename":"old/AGENT.md"},
+            {"filename":"dagq.toml", "status":"modified"}
+        ]}))
+        .unwrap(),
+        ["dagq.toml", "new/AGENT.md", "old/AGENT.md"]
+    );
+    assert_eq!(
+        complete_changed_paths(&json!({"files":[]})).unwrap(),
+        Vec::<String>::new()
+    );
+    for value in [
+        json!({}),
+        json!({"files":[{}]}),
+        json!({"files":[{"filename":"new", "status":"renamed"}]}),
+        json!({"files":vec![json!({"filename":"a"}); 300]}),
+        json!({"files":vec![json!({"filename":"a"}); 301]}),
+    ] {
+        assert!(complete_changed_paths(&value).is_err());
+    }
+    assert!(complete_changed_paths(&json!({"files":vec![json!({"filename":"a"});299]})).is_ok());
+}
+
+struct ReviewClock;
+impl crate::application::Clock for ReviewClock {
+    fn system_time(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(1000)
+    }
+    fn monotonic(&self) -> std::time::Instant {
+        panic!("no waits")
+    }
+}
+struct ReviewApi {
+    auth: Api,
+    compare: Mutex<Value>,
+    file_status: Mutex<u16>,
+}
+impl GithubApi for ReviewApi {
+    fn request(
+        &self,
+        method: &str,
+        url: &str,
+        bearer: &AppToken,
+        body: Option<&Value>,
+        raw: bool,
+    ) -> Result<String, ConfigUnavailable> {
+        // Authenticate and record through the independently verifying fake.
+        let text = self.auth.request(method, url, bearer, body, raw)?;
+        if url.contains("/compare/") {
+            Ok(self.compare.lock().unwrap().to_string())
+        } else if url.ends_with("/git/ref/heads/main") {
+            Ok(
+                json!({"ref":"refs/heads/main","object":{"type":"commit", "sha":"a".repeat(40)}})
+                    .to_string(),
+            )
+        } else {
+            Ok(text)
+        }
+    }
+    fn raw_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
+        Ok((
+            *self.file_status.lock().unwrap(),
+            self.request("GET", url, bearer, None, true)?,
+        ))
+    }
+}
+#[test]
+fn review_reads_pin_raw_files_compare_ranges_and_request_only_runner_read_scope() {
+    use crate::application::review_input::ReviewReads;
+    let pem = key();
+    let PrivateKeyDer::Pkcs8(der) = PrivateKeyDer::from_pem_slice(pem.as_bytes()).unwrap() else {
+        panic!()
+    };
+    let public = signature::RsaKeyPair::from_pkcs8(der.secret_pkcs8_der())
+        .unwrap()
+        .public_key()
+        .as_ref()
+        .to_vec();
+    let api = Arc::new(ReviewApi {
+        auth: Api {
+            calls: Mutex::new(vec![]),
+            public,
+            failure: false,
+        },
+        compare: Mutex::new(
+            json!({"merge_base_commit":{"sha":"b".repeat(40)},"files":[{"filename":"src/a.rs"}]}),
+        ),
+        file_status: Mutex::new(200),
+    });
+    // Distinct App keys: the fake verifies every issuance with the runner's
+    // public key, so selecting the main signing key cannot pass this test.
+    let main_pem = key();
+    let pairs = [
+        ("DAGQ_GITHUB_RUNNER_APP_ID", "11"),
+        ("DAGQ_GITHUB_RUNNER_APP_KEY", pem.as_str()),
+        ("DAGQ_GITHUB_MAIN_APP_ID", "22"),
+        ("DAGQ_GITHUB_MAIN_APP_KEY", main_pem.as_str()),
+        ("DAGQ_GITHUB_REPOSITORY", "owner/repo"),
+        (
+            "DAGQ_GITHUB_API_BASE_URL",
+            "https://enterprise.example/api/v3",
+        ),
+    ];
+    let config = DeploymentConfig::read(
+        |n| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| (*v).into())
+        },
+        |_| unreachable!(),
+    )
+    .unwrap();
+    assert!(
+        GithubReviewReads::from_deployment(&config, Arc::new(ReviewClock))
+            .unwrap()
+            .is_some()
+    );
+    let reads = GithubReviewReads {
+        app: RunnerApp::from_deployment(&config, api.clone())
+            .unwrap()
+            .unwrap(),
+        clock: Arc::new(ReviewClock),
+    };
+    let main = reads.main_head().unwrap();
+    assert_eq!(main.as_str(), "a".repeat(40));
+    let head = "c".repeat(40);
+    assert!(
+        reads
+            .file_in(&head, "dagq.toml")
+            .unwrap()
+            .unwrap()
+            .contains("parallel = 2")
+    );
+    assert!(reads.file_in(&head, "dir/a?#.md").is_ok());
+    assert_eq!(
+        reads
+            .merge_base(main.as_str(), &head)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        "b".repeat(40)
+    );
+    assert_eq!(
+        reads.changed_paths(main.as_str(), &head).unwrap(),
+        ["src/a.rs"]
+    );
+    *api.file_status.lock().unwrap() = 404;
+    assert_eq!(reads.file_in(&head, "absent").unwrap(), None);
+    *api.file_status.lock().unwrap() = 403;
+    let error = reads.file_in(&head, "denied").unwrap_err();
+    assert!(!format!("{error:?}").contains("installation-secret"));
+    *api.compare.lock().unwrap() = json!({"files":vec![json!({"filename":"a"});300]});
+    assert!(reads.changed_paths(main.as_str(), &head).is_err());
+    *api.compare.lock().unwrap() = json!({"message":"installation-secret"});
+    assert!(reads.changed_paths(main.as_str(), &head).is_err());
+    let calls = api.auth.calls.lock().unwrap();
+    for (_, _, body, _) in calls.iter().filter(|(method, _, _, _)| method == "POST") {
+        assert_eq!(
+            body.as_ref().unwrap(),
+            &json!({"repositories":["repo"],"permissions":{"contents":"read"}})
+        );
+    }
+    assert!(calls.iter().any(|(_, url, _, raw)| *raw
+        && url
+            == &format!(
+                "https://enterprise.example/api/v3/repos/owner/repo/contents/dagq.toml?ref={head}"
+            )));
+    assert!(
+        calls
+            .iter()
+            .any(|(_, url, _, raw)| *raw && url.contains("dir/a%3F%23.md?ref="))
+    );
+    assert!(calls.iter().any(|(_, url, _, _)| url
+        == &format!(
+            "https://enterprise.example/api/v3/repos/owner/repo/compare/{}...{head}?per_page=1",
+            main.as_str()
+        )));
+}
+
+#[test]
+fn raw_contents_can_exceed_the_json_bound_without_truncation() {
+    let large = vec![b'x'; 1_048_577];
+    assert_eq!(
+        read_bounded(large.as_slice(), 100 * 1_048_576)
+            .unwrap()
+            .len(),
+        1_048_577
+    );
+    assert!(read_bounded(large.as_slice(), 1_048_576).is_err());
+    assert_eq!(read_bounded(b"abc".as_slice(), 3).unwrap(), "abc");
+    assert!(read_bounded(b"abcd".as_slice(), 3).is_err());
+    assert!(read_bounded(&[0xff][..], 3).is_err());
+}

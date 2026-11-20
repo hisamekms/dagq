@@ -2121,6 +2121,12 @@ impl std::error::Error for HandoffAsked {}
 /// [`StateStore`](super::shared::StateStore), which a run's transitions
 /// change with their events in one transaction.
 pub trait RunReads {
+    /// The newest accepted runner head, read from durable lease records.
+    /// Local execution never calls this; absence in team mode fails closed.
+    fn review_accepted_head(&self, _id: &RunId) -> Result<Option<String>> {
+        anyhow::bail!("accepted runner head is unavailable")
+    }
+
     fn active_runs(&self) -> Result<Vec<TaskRun>>;
     /// Every run of the queue, oldest first.
     fn all_runs(&self) -> Result<Vec<TaskRun>>;
@@ -2265,6 +2271,51 @@ pub trait RepositoryReads {
     /// use the same base as the approved range, with no virtual base.
     fn unique_merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
         self.merge_base(a, b)
+    }
+}
+
+pub mod review_input {
+    use super::*;
+    /// Read-only committed inputs for control-side review selection and the eval
+    /// gate. Implementations must fail rather than return a partial changed-path
+    /// list. Calls happen outside queue write transactions; no checkout is needed.
+    pub trait ReviewReads {
+        fn main_head(&self) -> Result<CommitSha>;
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>>;
+        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>>;
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
+    }
+
+    impl<T: Repository + ?Sized> ReviewReads for T {
+        fn main_head(&self) -> Result<CommitSha> {
+            RepositoryReads::main_head(self)
+        }
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+            RepositoryReads::file_in(self, commit, path)
+        }
+        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+            RepositoryReads::merge_base(self, a, b)
+        }
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            Repository::changed_paths(self, from, to)
+        }
+    }
+
+    /// Keep the local default on exactly the existing repository implementation.
+    pub struct LocalReviewReads(pub std::sync::Arc<dyn Repository + Send + Sync>);
+    impl ReviewReads for LocalReviewReads {
+        fn main_head(&self) -> Result<CommitSha> {
+            RepositoryReads::main_head(&*self.0)
+        }
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+            self.0.file_in(commit, path)
+        }
+        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+            self.0.merge_base(a, b)
+        }
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            self.0.changed_paths(from, to)
+        }
     }
 }
 

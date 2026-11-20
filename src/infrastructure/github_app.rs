@@ -39,6 +39,11 @@ pub trait GithubApi: Send + Sync {
         self.request(method, url, bearer, body, false)
             .map(|text| (200, text))
     }
+    /// Raw contents with status retained so only a real 404 means absent.
+    fn raw_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
+        self.request("GET", url, bearer, None, true)
+            .map(|body| (200, body))
+    }
     /// A JSON GET answered with any HTTP status and its body (bounded as
     /// [`Self::request`]'s), for a reader that tells refusals apart. Only a
     /// transport failure is an error. A fake without statuses answers 200.
@@ -127,7 +132,20 @@ impl GithubApi for HttpsGithub {
         let status = response.status().as_u16();
         Ok((status, bounded_body(response)?))
     }
+    fn raw_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
+        self.read_status(url, bearer, "application/vnd.github.raw+json")
+    }
     fn get_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
+        self.read_status(url, bearer, "application/vnd.github+json")
+    }
+}
+impl HttpsGithub {
+    fn read_status(
+        &self,
+        url: &str,
+        bearer: &AppToken,
+        accept: &str,
+    ) -> Result<(u16, String), ConfigUnavailable> {
         let response = self
             .0
             .get(url)
@@ -136,24 +154,39 @@ impl GithubApi for HttpsGithub {
             .build()
             .header("Authorization", bearer_header(bearer)?)
             .header("User-Agent", "dagq")
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", accept)
             .call()
             .map_err(|_| ConfigUnavailable)?;
         let status = response.status().as_u16();
-        Ok((status, bounded_body(response)?))
+        // Raw contents supports GitHub's full 100 MiB file ceiling. JSON and
+        // all pre-existing calls retain the smaller diagnostic/body bound.
+        let limit = if accept == "application/vnd.github.raw+json" {
+            100 * 1_048_576
+        } else {
+            1_048_576
+        };
+        Ok((status, bounded_body_to(response, limit)?))
     }
 }
 
-/// At most 1 MiB of UTF-8, else the fixed error.
+/// Existing JSON/startup reads retain their 1 MiB UTF-8 bound.
 fn bounded_body(response: ureq::http::Response<ureq::Body>) -> Result<String, ConfigUnavailable> {
+    bounded_body_to(response, 1_048_576)
+}
+fn bounded_body_to(
+    response: ureq::http::Response<ureq::Body>,
+    limit: usize,
+) -> Result<String, ConfigUnavailable> {
+    read_bounded(response.into_body().into_reader(), limit)
+}
+/// Bound even chunked responses, and reject invalid UTF-8 without echoing bytes.
+fn read_bounded(reader: impl Read, limit: usize) -> Result<String, ConfigUnavailable> {
     let mut bytes = Vec::new();
-    response
-        .into_body()
-        .into_reader()
-        .take(1_048_577)
+    reader
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ConfigUnavailable)?;
-    if bytes.len() > 1_048_576 {
+    if bytes.len() > limit {
         return Err(ConfigUnavailable);
     }
     String::from_utf8(bytes).map_err(|_| ConfigUnavailable)
@@ -414,5 +447,135 @@ impl MainApp {
     }
     pub(super) fn issue(&self, scope: &Value, now: i64) -> Result<AppToken, ConfigUnavailable> {
         self.0.issue(scope, now)
+    }
+}
+
+/// Control-side committed reads. Only RunnerApp implements the token port used
+/// here: contents:read for one repository, also for dagq.toml. No main key is
+/// loaded. Tokens live for one call; failures expose only a fixed error. API
+/// requests are outside the writer transaction, as are the ref adapter's reads.
+pub struct GithubReviewReads {
+    app: RunnerApp,
+    clock: Arc<dyn crate::application::Clock>,
+}
+impl GithubReviewReads {
+    pub fn from_deployment(
+        config: &DeploymentConfig,
+        clock: Arc<dyn crate::application::Clock>,
+    ) -> Result<Option<Self>, ConfigUnavailable> {
+        Ok(
+            RunnerApp::from_deployment(config, Arc::new(HttpsGithub::default()))?
+                .map(|app| Self { app, clock }),
+        )
+    }
+    fn token(&self) -> Result<AppToken, ConfigUnavailable> {
+        let name = self
+            .app
+            .repository
+            .split('/')
+            .nth(1)
+            .ok_or(ConfigUnavailable)?;
+        self.app.issue(
+            &crate::application::supervise::repository_config::read_scope(name),
+            self.clock.now(),
+        )
+    }
+    fn compare(&self, a: &str, b: &str) -> Result<Value, ConfigUnavailable> {
+        if !valid_sha(a) || !valid_sha(b) {
+            return Err(ConfigUnavailable);
+        }
+        let token = self.token()?;
+        self.app.json(
+            &format!(
+                "/repos/{}/compare/{a}...{b}?per_page=1",
+                self.app.repository
+            ),
+            &token,
+        )
+    }
+}
+
+/// Compare's first page includes at most 300 files, even with commit paging.
+/// At the boundary completeness cannot be established, so refuse it too.
+/// Include both names of a rename, matching local git diff --no-renames.
+/// Malformed or partial responses must never silently disable required checks.
+pub fn complete_changed_paths(value: &Value) -> Result<Vec<String>, ConfigUnavailable> {
+    let files = value["files"]
+        .as_array()
+        .filter(|f| f.len() < 300)
+        .ok_or(ConfigUnavailable)?;
+    let mut paths = std::collections::BTreeSet::new();
+    for file in files {
+        let name = file["filename"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigUnavailable)?;
+        paths.insert(name.to_owned());
+        if file["status"] == "renamed" {
+            let old = file["previous_filename"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or(ConfigUnavailable)?;
+            paths.insert(old.to_owned());
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+impl crate::application::review_input::ReviewReads for GithubReviewReads {
+    fn main_head(&self) -> anyhow::Result<crate::domain::CommitSha> {
+        let token = self.token()?;
+        let head = super::github_refs::read_reference(
+            &*self.app.api,
+            &self.app.base,
+            &self.app.repository,
+            "refs/heads/main",
+            &token,
+        )?
+        .ok_or(ConfigUnavailable)?;
+        Ok(crate::domain::CommitSha::parse(head, "main head")?)
+    }
+    fn file_in(&self, commit: &str, path: &str) -> anyhow::Result<Option<String>> {
+        if !valid_sha(commit) || path.is_empty() {
+            return Err(ConfigUnavailable.into());
+        }
+        // Encode the path as data, retaining slash separators. Neither a query
+        // nor a fragment in a repository filename can change the pinned ref.
+        let path: String = path
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect();
+        let token = self.token()?;
+        let (status, body) = self.app.api.raw_status(
+            &format!(
+                "{}/repos/{}/contents/{path}?ref={commit}",
+                self.app.base, self.app.repository
+            ),
+            &token,
+        )?;
+        match status {
+            200 => Ok(Some(body)),
+            404 => Ok(None),
+            _ => Err(ConfigUnavailable.into()),
+        }
+    }
+    fn merge_base(&self, a: &str, b: &str) -> anyhow::Result<Option<crate::domain::CommitSha>> {
+        let value = self.compare(a, b)?;
+        let sha = value["merge_base_commit"]["sha"]
+            .as_str()
+            .filter(|s| valid_sha(s))
+            .ok_or(ConfigUnavailable)?;
+        Ok(Some(crate::domain::CommitSha::parse(
+            sha.to_owned(),
+            "merge base",
+        )?))
+    }
+    fn changed_paths(&self, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+        Ok(complete_changed_paths(&self.compare(from, to)?)?)
     }
 }

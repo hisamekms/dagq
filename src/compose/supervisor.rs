@@ -1050,6 +1050,10 @@ pub fn supervise_with_reviewer(
         |port| port.0.clone(),
     );
     let ports = Ports {
+        review_reads: super::execution::review_reads(
+            &deployment,
+            options.generators.clock.clone(),
+        )?,
         queues: Arc::new(supervisor_queues()),
         service: service.clone(),
         observation_queues: Arc::new(SupervisorPorts {

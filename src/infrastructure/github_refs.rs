@@ -118,6 +118,25 @@ pub fn read_head(body: &str, name: &str) -> Result<String, RefFailure> {
     Ok(sha.into())
 }
 
+/// Shared uncached ref read for control-side selection and ref recovery.
+/// The caller supplies a runner-App contents:read token; no main key is needed.
+pub(super) fn read_reference(
+    api: &dyn GithubApi,
+    base: &str,
+    repository: &str,
+    name: &str,
+    token: &AppToken,
+) -> Result<Option<String>, RefFailure> {
+    let path = request_path(repository, name, Operation::Read)?;
+    let (status, body) = api
+        .get_status(&format!("{base}{path}"), token)
+        .map_err(|_| RefFailure::Temporary)?;
+    match classify(Operation::Read, status, &body)? {
+        Reply::Missing => Ok(None),
+        Reply::Present => read_head(&body, name).map(Some),
+    }
+}
+
 /// One-repository contents:write and workflows:write (the main App scope)
 /// are issued only for creation/deletion of refs to accepted commits; the
 /// main App cannot be selected for a GET. The runner App always requests only
@@ -187,16 +206,9 @@ impl GithubRefs {
     }
     fn read_named(&self, name: &str) -> Result<Option<String>, RefFailure> {
         let token = self.token(false)?;
-        let path = request_path(&self.repository, name, Operation::Read)?;
-        let (status, body) = self
-            .api
-            .get_status(&format!("{}{path}", self.base), &token)
-            .map_err(|_| RefFailure::Temporary)?;
-        match classify(Operation::Read, status, &body)? {
-            Reply::Missing => Ok(None),
-            Reply::Present => read_head(&body, name).map(Some),
-        }
+        read_reference(&*self.api, &self.base, &self.repository, name, &token)
     }
+
     pub fn main_head(&self) -> anyhow::Result<crate::domain::CommitSha> {
         let head = self
             .read_named("refs/heads/main")?

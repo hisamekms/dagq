@@ -495,6 +495,8 @@ pub struct Ports<'a> {
     /// failed calls and the stops through, as its ports.
     pub recording_queues: Arc<dyn QueueOpener<dyn crate::application::RecordingQueue + Send>>,
     pub repository: Arc<dyn Repository + Send + Sync>,
+    /// Team committed reads; None retains local Git and rewritten landing heads.
+    pub review_reads: Option<Arc<dyn crate::application::review_input::ReviewReads + Send + Sync>>,
     pub remote: Arc<dyn MainRemote + Send + Sync>,
     pub verifier: Arc<dyn Verifier + Send + Sync>,
     /// Whether the container runtime can run what `dagq.toml` sets to it
@@ -1362,6 +1364,12 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         queues: ports.queues.clone(),
         layout,
         repository: ports.repository.clone(),
+        review_reads: ports.review_reads.clone().unwrap_or_else(|| {
+            Arc::new(crate::application::review_input::LocalReviewReads(
+                ports.repository.clone(),
+            ))
+        }),
+        team_review: ports.review_reads.is_some(),
         remote: ports.remote.clone(),
         verifier: ports.verifier.clone(),
         container: ports.container.clone(),
@@ -1606,6 +1614,8 @@ struct Supervisor<'a> {
     queues: Arc<dyn QueueOpener>,
     layout: &'a Layout,
     repository: Arc<dyn Repository + Send + Sync>,
+    review_reads: Arc<dyn crate::application::review_input::ReviewReads + Send + Sync>,
+    team_review: bool,
     remote: Arc<dyn MainRemote + Send + Sync>,
     verifier: Arc<dyn Verifier + Send + Sync>,
     /// Whether the container runtime can be used ([`Ports::container`]).

@@ -144,6 +144,7 @@ validationを通ったrun（awaiting_integration）
 ## reviewのsubagent<a id="reviewのsubagent"></a>
 
 [ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)と[ADR-t1895-1](../../adr/2026-10-06-t1895-1-review-stage-runs-agent-and-program-jobs-in-a-fixed-shape.md)の実装。
+チームの版の制御側はreviewのagentをGitHubの読みでmainのheadから選ぶ。
 変えたpathに応じて必須のagentを選び、全体のreviewのjob（`builtin:acceptance`）と並べて、agentごとに独立のjobとして動かす。
 
 - **設定**: 書式は[Run environment](run-environment.md)、誤りは`dagq doctor`が出し、built-inの規則は[`setup-review`](setup-review.md)が作る。

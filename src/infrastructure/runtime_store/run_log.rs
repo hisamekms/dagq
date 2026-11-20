@@ -1823,6 +1823,16 @@ impl<E: TransactionEntries> InboxWatchLog for StoreQueue<E> {
 /// The [`RunReads`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl<E: TransactionEntries> RunReads for StoreQueue<E> {
+    fn review_accepted_head(&self, id: &RunId) -> Result<Option<String>> {
+        Ok(crate::domain::runner_lease::newest_accepted_head(
+            &crate::infrastructure::runner_leases::records(
+                &self.read_entry("review_accepted_head")?,
+                id.as_str(),
+            )?,
+        )
+        .map(|accepted| accepted.head))
+    }
+
     fn last_turns_of(&self, sessions: &[RunSessionPair]) -> Result<Vec<LastSessionTurn>> {
         StoreQueue::last_turns_of(self, sessions)
     }
@@ -2199,6 +2209,25 @@ mod tests {
                 clock: std::sync::Arc::new(Still),
                 ..crate::infrastructure::clock::system()
             })
+    }
+
+    #[test]
+    fn review_head_reads_only_the_newest_accepted_generation() {
+        let queue = rulesets_queue("review-accepted-head");
+        let run = RunId::new("00000000-0000-4000-8000-000000000001").unwrap();
+        assert_eq!(RunReads::review_accepted_head(&queue, &run).unwrap(), None);
+        queue.conn.execute_batch(
+            "INSERT INTO runner_lease_records(run_id,generation,accepted_head,verified_ref_head) VALUES
+            ('00000000-0000-4000-8000-000000000001',1,'old',NULL),
+            ('00000000-0000-4000-8000-000000000001',2,'accepted',NULL),
+            ('00000000-0000-4000-8000-000000000001',3,NULL,'unaccepted');"
+        ).unwrap();
+        assert_eq!(
+            RunReads::review_accepted_head(&queue, &run)
+                .unwrap()
+                .as_deref(),
+            Some("accepted")
+        );
     }
 
     /// The runner rulesets' hold: its read, ask and event are one

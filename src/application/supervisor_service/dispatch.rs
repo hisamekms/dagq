@@ -1115,6 +1115,10 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 &kinds.iter().map(String::as_str).collect::<Vec<_>>(),
             ))
         }
+        "review_accepted_head" => {
+            let (id,): (RunId,) = read(op, args)?;
+            answer(RunReads::review_accepted_head(&*store, &id))
+        }
         "run_events" => {
             let (id,): (RunId,) = read(op, args)?;
             answer(EventStore::run_events(&*store, &id))

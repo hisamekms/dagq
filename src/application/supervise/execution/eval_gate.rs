@@ -126,13 +126,13 @@ impl Supervisor<'_> {
             None => match self.ask_for_eval_rounds(run, &head) {
                 Ok(Some(rounds)) => rounds,
                 result => {
-                    let why = match result {
-                        Err(error) => format!(
-                            "whether the run changes an agent's definition could not be read for the agent eval before it lands: {error:#}"
-                        ),
-                        _ => STOPPED.to_owned(),
+                    let failed = match result {
+                        Err(error) => unreadable_eval(&error),
+                        _ => Verdict::Ask(STOPPED.to_owned()),
                     };
-                    warn!(run_id = %run.id(), "run {}: {why}", run.id());
+                    if let Verdict::Ask(why) = &failed {
+                        warn!(run_id = %run.id(), "run {}: {why}", run.id());
+                    }
                     let mut watch = EvalGateWatch {
                         session: session.clone(),
                         verdict: verdict.clone(),
@@ -141,7 +141,7 @@ impl Supervisor<'_> {
                         rounds: Vec::new(),
                         wait: None,
                     };
-                    return self.eval_ends(run, &mut watch, Verdict::Ask(why)).map(Some);
+                    return self.eval_ends(run, &mut watch, failed).map(Some);
                 }
             },
         };
@@ -179,55 +179,34 @@ impl Supervisor<'_> {
         run: &TaskRun,
         head: &str,
     ) -> Result<Option<Vec<(String, i64)>>> {
-        let main = self.repository.main_head()?;
+        let main = self.review_reads.main_head()?;
         let range = self.receipt_range(run, &main)?;
-        let changed = self.repository.changed_paths(&range.base, &range.head)?;
-        let agents = before_landing::changed_agents(changed.iter().map(String::as_str));
-        if agents.is_empty() {
+        if self.team_review {
+            anyhow::ensure!(
+                range.head.eq_ignore_ascii_case(head),
+                "eval head differs from review head"
+            );
+        }
+        let definition_head = if self.team_review {
+            range.head.as_str()
+        } else {
+            head
+        };
+        let targets = eval_targets(&*self.review_reads, &main, &range, definition_head)?;
+        if targets.agents.is_empty() && targets.skipped.is_empty() {
             return Ok(Some(Vec::new()));
         }
-        let mut at_head = BTreeSet::new();
-        let mut with_dev_cases = BTreeSet::new();
-        for agent in &agents {
-            if self
-                .repository
-                .file_in(head, &definition_path(agent))?
-                .is_some()
-            {
-                at_head.insert(agent.clone());
-            }
-            let dev = format!(
-                "{DEFINITION_DIR}/{agent}/{EVALS_DIR}/{}",
-                Split::Dev.file_name()
-            );
-            if self.repository.file_in(main.as_str(), &dev)?.is_some() {
-                with_dev_cases.insert(agent.clone());
-            }
-        }
-        let targets = before_landing::targets(
-            agents,
-            |agent| at_head.contains(agent),
-            |agent| with_dev_cases.contains(agent),
-        );
         if !targets.agents.is_empty() && self.stopping_for_good() {
             return Ok(None);
         }
         let mut rounds = Vec::new();
         for agent in &targets.agents {
-            let request = Request {
-                agent: agent.clone(),
-                split: Split::Dev,
-                k: None,
-                cases: None,
-                set: None,
-                rerun: false,
-                requested_by: "supervisor".to_owned(),
-                requested_by_id: self.registration.token().to_string(),
-                run_id: Some(run.id().to_string()),
-                before_landing: true,
-                definition_commit: Some(head.to_owned()),
-                launch: crate::domain::actor_model::AgentModel::default(),
-            };
+            let request = eval_request(
+                agent,
+                definition_head,
+                run.id().as_str(),
+                self.registration.token().as_str(),
+            );
             let id = self
                 .queue
                 .record_queue_event(EventKind::AgentEvalRequested, request.record())?;
@@ -387,6 +366,67 @@ impl Supervisor<'_> {
     }
 }
 
+/// Decide targets using only committed reads: definitions at the reviewed head,
+/// cases at main. An unreadable or partial diff must reach the caller's Ask,
+/// never the empty-round shortcut or landing.
+fn eval_targets(
+    reads: &(impl crate::application::review_input::ReviewReads + ?Sized),
+    main: &crate::domain::CommitSha,
+    range: &crate::application::review::ReviewRange,
+    definition_head: &str,
+) -> Result<before_landing::Targets> {
+    let changed = reads.changed_paths(&range.base, &range.head)?;
+    let agents = before_landing::changed_agents(changed.iter().map(String::as_str));
+    let mut at_head = BTreeSet::new();
+    let mut with_dev_cases = BTreeSet::new();
+    for agent in &agents {
+        if reads
+            .file_in(definition_head, &definition_path(agent))?
+            .is_some()
+        {
+            at_head.insert(agent.clone());
+        }
+        let dev = format!(
+            "{DEFINITION_DIR}/{agent}/{EVALS_DIR}/{}",
+            Split::Dev.file_name()
+        );
+        if reads.file_in(main.as_str(), &dev)?.is_some() {
+            with_dev_cases.insert(agent.clone());
+        }
+    }
+    Ok(before_landing::targets(
+        agents,
+        |a| at_head.contains(a),
+        |a| with_dev_cases.contains(a),
+    ))
+}
+
+/// Fixed routing for an unreadable selection, shared with the gate's error arm.
+fn unreadable_eval(error: &anyhow::Error) -> Verdict {
+    Verdict::Ask(format!(
+        "whether the run changes an agent's definition could not be read for the agent eval before it lands: {error:#}"
+    ))
+}
+
+/// The requested definition is the reviewed (accepted in team mode) head.
+/// Cases are deliberately not pinned here: the eval round reads main's cases.
+fn eval_request(agent: &str, head: &str, run: &str, supervisor: &str) -> Request {
+    Request {
+        agent: agent.to_owned(),
+        split: Split::Dev,
+        k: None,
+        cases: None,
+        set: None,
+        rerun: false,
+        requested_by: "supervisor".to_owned(),
+        requested_by_id: supervisor.to_owned(),
+        run_id: Some(run.to_owned()),
+        before_landing: true,
+        definition_commit: Some(head.to_owned()),
+        launch: crate::domain::actor_model::AgentModel::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +443,75 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    use crate::application::review_input::ReviewReads as _;
+    struct Reads {
+        fail: bool,
+    }
+    impl crate::application::review_input::ReviewReads for Reads {
+        fn main_head(&self) -> Result<CommitSha> {
+            Ok(CommitSha::try_from("a".repeat(40)).unwrap())
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+            unreachable!()
+        }
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            assert_eq!((from, to), ("base", "accepted"));
+            anyhow::ensure!(!self.fail, "paths unavailable or truncated");
+            Ok(["changed", "removed", "no-cases"]
+                .iter()
+                .map(|a| definition_path(a))
+                .collect())
+        }
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+            assert!(commit == "accepted" || commit == "a".repeat(40));
+            Ok(((commit == "accepted"
+                && (path == definition_path("changed") || path == definition_path("no-cases")))
+                || (commit == "a".repeat(40) && path == ".dagq/agents/changed/evals/dev.json"))
+                .then(|| "committed content".into()))
+        }
+    }
+    #[test]
+    fn remote_eval_reads_definitions_at_accepted_head_and_cases_at_main() {
+        let reads = Reads { fail: false };
+        let range = crate::application::review::ReviewRange {
+            base: "base".into(),
+            head: "accepted".into(),
+        };
+        let targets =
+            eval_targets(&reads, &reads.main_head().unwrap(), &range, "accepted").unwrap();
+        assert_eq!(targets.agents, ["changed"]);
+        let request = eval_request(&targets.agents[0], &range.head, "run", "supervisor");
+        assert_eq!(request.definition_commit.as_deref(), Some("accepted"));
+        assert_eq!(request.agent, "changed");
+        assert_eq!(request.split, Split::Dev);
+        assert!(request.before_landing);
+
+        assert_eq!(
+            targets.skipped,
+            [
+                ("no-cases".into(), before_landing::SkipReason::NoDevCases),
+                (
+                    "removed".into(),
+                    before_landing::SkipReason::DefinitionRemoved
+                ),
+            ]
+        );
+    }
+    #[test]
+    fn remote_eval_refuses_unavailable_paths_before_the_empty_round_shortcut() {
+        let reads = Reads { fail: true };
+        let range = crate::application::review::ReviewRange {
+            base: "base".into(),
+            head: "accepted".into(),
+        };
+        let error =
+            eval_targets(&reads, &reads.main_head().unwrap(), &range, "accepted").unwrap_err();
+        let Verdict::Ask(why) = unreadable_eval(&error) else {
+            panic!("unreadable selection must ask, never land")
+        };
+        assert!(why.contains("paths unavailable or truncated"));
     }
 
     /// The rounds asked at a head are those of its latest request; a new

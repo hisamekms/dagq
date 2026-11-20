@@ -1876,7 +1876,7 @@ impl Supervisor<'_> {
     /// some agent can be selected (an enabled built-in counts).
     pub(super) fn review_subagents(&self, run: &TaskRun) -> Result<Option<SubagentSnapshot>> {
         snapshot_subagents(
-            &*self.repository,
+            &*self.review_reads,
             &|text| self.verifier.review_subagents_in(text),
             &|main| self.receipt_range(run, main),
         )
@@ -1887,27 +1887,28 @@ impl Supervisor<'_> {
     fn review_commit(&self, subagents: Option<&SubagentSnapshot>) -> Result<String> {
         Ok(match subagents {
             Some(snapshot) => snapshot.commit.clone(),
-            None => self.repository.main_head()?.into_string(),
+            None => self.review_reads.main_head()?.into_string(),
         })
     }
     /// The code paths of the landing branch's commit `commit`
     /// ([`review_code_paths`]).
     fn review_code_paths(&self, commit: &str) -> Result<Option<review_reason::CodePaths>> {
-        review_code_paths(&*self.repository, commit, &|text| {
+        review_code_paths(&*self.review_reads, commit, &|text| {
             self.verifier.review_code_paths_in(text)
         })
     }
     /// The run's revise limit of the landing branch's commit `commit`
     /// ([`review_revise_limit`]), the default where it writes none.
     fn review_revise_limit(&self, commit: &str) -> Result<ReviseLimit> {
-        let limit = review_revise_limit(&*self.repository, commit, &|text| {
+        let limit = review_revise_limit(&*self.review_reads, commit, &|text| {
             self.verifier.review_revise_limit_in(text)
         })?;
         Ok(limit.unwrap_or_default())
     }
     /// The range `run`'s review reads with the landing branch at `main`:
     /// to its receipt's commit, or to the head a stopped landing rewrote it
-    /// to ([`review_range_at`]).
+    /// to ([`review_range_at`]). Team mode instead requires the durable accepted
+    /// head to match the receipt and never consults a clone or remote branch tip.
     pub(super) fn receipt_range(&self, run: &TaskRun, main: &CommitSha) -> Result<ReviewRange> {
         let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
         let receipt = Receipt::parse(
@@ -1916,8 +1917,16 @@ impl Supervisor<'_> {
                 .read_to_string(receipt_path)
                 .with_context(|| format!("read receipt {}", receipt_path.display()))?,
         )?;
-        let events = self.queue.run_events(run.id())?;
-        review_range_at(&*self.repository, run, &receipt, main, &events)
+        let head = if self.team_review {
+            crate::application::review::accepted_review_head(
+                self.queue.review_accepted_head(run.id())?.as_deref(),
+                receipt.commit(),
+            )?
+        } else {
+            let events = self.queue.run_events(run.id())?;
+            crate::application::review::reviewed_head(&*self.repository, run, &receipt, &events)
+        };
+        review_range_at(&*self.review_reads, run, &head, main)
     }
     /// The range a review attempt of `run` reads as it starts (its agents'
     /// range, or else [`Self::receipt_range`]) and its binding: what a
@@ -1931,7 +1940,7 @@ impl Supervisor<'_> {
     ) -> Result<(ReviewRange, crate::domain::landing_binding::LandingFacts)> {
         let range = match subagents {
             Some(snapshot) => snapshot.range.clone(),
-            None => self.receipt_range(run, &self.repository.main_head()?)?,
+            None => self.receipt_range(run, &self.review_reads.main_head()?)?,
         };
         // A run in a container's commits are read only by the git kept
         // from running their hooks and drivers, as `integrate`'s `begin`
@@ -1990,9 +1999,9 @@ impl Supervisor<'_> {
         // may cut them.
         let commit = match subagents {
             Some(snapshot) => snapshot.commit.clone(),
-            None => self.repository.main_head()?.into_string(),
+            None => self.review_reads.main_head()?.into_string(),
         };
-        let rules = acceptance_rules(&*self.repository, &commit)?;
+        let rules = acceptance_rules(&*self.review_reads, &commit)?;
         let whole_at = run_dir.join(format!("review-{attempt}-builtin-acceptance.md"));
         if let Some(rules) = &rules {
             self.files.write(&whole_at, rules.text.as_bytes())?;

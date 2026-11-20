@@ -300,21 +300,38 @@ pub fn review_range(
     events: &[crate::domain::RunEvent],
 ) -> Result<ReviewRange> {
     let main = repository.main_head()?;
-    review_range_at(repository, run, receipt, &main, events)
+    review_range_at(
+        repository,
+        run,
+        &reviewed_head(repository, run, receipt, events),
+        &main,
+    )
 }
 
-/// [`review_range`] with `main`, the landing branch's commit, read
-/// already.
+/// The range with main and the reviewed head already selected. Local callers
+/// resolve landing rewrites first; team callers validate the accepted head.
 pub fn review_range_at(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     run: &TaskRun,
-    receipt: &Receipt,
+    head: &str,
     main: &CommitSha,
-    events: &[crate::domain::RunEvent],
 ) -> Result<ReviewRange> {
-    let head = reviewed_head(repository, run, receipt, events);
-    let base = range_base(repository, run, main, &head)?;
-    Ok(ReviewRange { base, head })
+    let base = range_base(repository, run, main, head)?;
+    Ok(ReviewRange {
+        base,
+        head: head.to_owned(),
+    })
+}
+
+/// Team ranges are bound to the accepted report, never the remote branch tip.
+/// A receipt for another commit cannot start a review or skip the eval gate.
+pub fn accepted_review_head(accepted: Option<&str>, receipt: &str) -> Result<String> {
+    let head = accepted.context("run has no accepted runner head")?;
+    anyhow::ensure!(
+        head.eq_ignore_ascii_case(receipt),
+        "receipt commit differs from accepted runner head"
+    );
+    Ok(CommitSha::parse(head.to_ascii_lowercase(), "accepted runner head")?.into_string())
 }
 
 /// The head a review of `run` reads and its verdict is bound to: the
@@ -367,7 +384,7 @@ pub fn lands_rewritten(run: &TaskRun, current: &str, commit: &str, rewritten: &s
 /// after them; one that took in none starts at its base commit. The run's
 /// base commit when the two have no merge base.
 pub fn range_base(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     run: &TaskRun,
     main: &CommitSha,
     head: &str,
@@ -525,7 +542,7 @@ impl SubagentSnapshot {
 /// from, and is called only when some agent can be selected (an enabled
 /// built-in counts): the landing branch is read once per attempt.
 pub fn snapshot_subagents(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     parse: &dyn Fn(&str) -> Result<ReviewAgents>,
     range: &dyn Fn(&CommitSha) -> Result<ReviewRange>,
 ) -> Result<Option<SubagentSnapshot>> {
@@ -604,7 +621,7 @@ pub fn snapshot_subagents(
 /// The review's agents the landing branch's commit `commit` writes in its
 /// `dagq.toml`, none without the file.
 fn landing_agents(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     parse: &dyn Fn(&str) -> Result<ReviewAgents>,
 ) -> Result<ReviewAgents> {
@@ -625,7 +642,7 @@ fn landing_agents(
 /// file cannot be read or parsed or writes a launch its provider cannot
 /// take ([`ReviewAgents::launch_problems`]).
 pub fn written_launch_at(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     parse: &dyn Fn(&str) -> Result<ReviewAgents>,
     agent: &str,
@@ -648,7 +665,7 @@ pub fn written_launch_at(
 /// read or parsed: the attempt fails rather than judging without them
 /// (decision 6).
 pub fn review_code_paths(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     parse: &dyn Fn(&str) -> Result<Option<CodePaths>>,
 ) -> Result<Option<CodePaths>> {
@@ -664,7 +681,7 @@ pub fn review_code_paths(
 /// the attempt fails rather than falling back to the default (ADR-t1453-1
 /// decision 6).
 pub fn review_revise_limit(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     parse: &dyn Fn(&str) -> Result<Option<ReviseLimit>>,
 ) -> Result<Option<ReviseLimit>> {
@@ -674,7 +691,7 @@ pub fn review_revise_limit(
 /// What `parse` reads of the `dagq.toml` in the landing branch's commit
 /// `commit`, `None` without the file.
 fn committed_setting<T>(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     parse: &dyn Fn(&str) -> Result<Option<T>>,
 ) -> Result<Option<T>> {
@@ -691,7 +708,7 @@ fn committed_setting<T>(
 /// The project's rules for `builtin` on the landing branch's commit
 /// `commit`, `None` without the file.
 fn project_rules(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     builtin: BuiltinAgent,
 ) -> Result<Option<ProjectRules>> {
@@ -702,7 +719,10 @@ fn project_rules(
 /// landing branch's commit `commit` (ADR-t2259-1 decision 6), `None`
 /// without the file: never a worktree's or the run branch's file, and no
 /// instructions file in their place.
-pub fn acceptance_rules(repository: &dyn Repository, commit: &str) -> Result<Option<ProjectRules>> {
+pub fn acceptance_rules(
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
+    commit: &str,
+) -> Result<Option<ProjectRules>> {
     rules_at(repository, commit, review_builtins::acceptance_rules_path())
 }
 
@@ -727,7 +747,7 @@ pub fn acceptance_record(rules: Option<&ProjectRules>) -> Value {
 /// The file `path` on the landing branch's commit `commit` as a project's
 /// rules, `None` without it.
 fn rules_at(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     path: String,
 ) -> Result<Option<ProjectRules>> {
@@ -744,7 +764,7 @@ fn rules_at(
 /// The selected built-in agent `builtin`: the binary's definition, and the
 /// project's rules for it from the landing branch's commit `commit`.
 fn builtin_snapshot(
-    repository: &dyn Repository,
+    repository: &(impl crate::application::review_input::ReviewReads + ?Sized),
     commit: &str,
     builtin: BuiltinAgent,
     selected: review_subagents::SelectedAgent,
@@ -1737,6 +1757,122 @@ mod tests {
         }
     }
 
+    /// This fake has no Repository implementation and holds distinct run and
+    /// main trees, so an accidental run-tree read cannot share the baseline.
+    struct RemoteRead {
+        run_config: &'static str,
+        run_definition: &'static str,
+        paths_error: bool,
+    }
+    impl crate::application::review_input::ReviewReads for RemoteRead {
+        fn main_head(&self) -> Result<CommitSha> {
+            Ok(CommitSha::try_from(SHA).unwrap())
+        }
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+            let text = match (commit, path) {
+                (SHA, CONFIG_FILE) => Some(CONFIG),
+                (SHA, ".dagq/agents/design/AGENT.md") => Some(DEFINITION),
+                (HEAD, CONFIG_FILE) => Some(self.run_config),
+                (HEAD, ".dagq/agents/design/AGENT.md") => Some(self.run_definition),
+                _ => None,
+            };
+            Ok(text.map(str::to_owned))
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+            Ok(Some(CommitSha::try_from(CLAIMED).unwrap()))
+        }
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            assert_eq!((from, to), (CLAIMED, HEAD));
+            anyhow::ensure!(!self.paths_error, "paths unavailable or truncated");
+            Ok(vec![
+                "change.txt".into(),
+                CONFIG_FILE.into(),
+                ".dagq/agents/design/AGENT.md".into(),
+            ])
+        }
+    }
+    #[test]
+    fn remote_selection_uses_main_even_when_run_changes_settings_and_definition() {
+        let select = |run_config, run_definition| {
+            snapshot_subagents(
+                &RemoteRead {
+                    run_config,
+                    run_definition,
+                    paths_error: false,
+                },
+                &parse,
+                &|main| {
+                    assert_eq!(main.as_str(), SHA);
+                    Ok(ReviewRange {
+                        base: CLAIMED.into(),
+                        head: HEAD.into(),
+                    })
+                },
+            )
+            .unwrap()
+            .unwrap()
+        };
+        for (config, definition) in [(CONFIG, DEFINITION), ("bad", "run-only instructions")] {
+            let snapshot = select(config, definition);
+            assert_eq!(snapshot.commit, SHA);
+            assert_eq!(snapshot.range.head, HEAD);
+            assert_eq!(
+                snapshot
+                    .agents
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["design"]
+            );
+            assert_eq!(snapshot.agents[0].definition, DEFINITION);
+            assert_eq!(snapshot.agents[0].matched, ["change.txt"]);
+        }
+    }
+    #[test]
+    fn remote_selection_refuses_unavailable_paths() {
+        let reads = RemoteRead {
+            run_config: CONFIG,
+            run_definition: DEFINITION,
+            paths_error: true,
+        };
+        assert!(
+            snapshot_subagents(&reads, &parse, &|_| Ok(ReviewRange {
+                base: CLAIMED.into(),
+                head: HEAD.into()
+            }))
+            .is_err()
+        );
+    }
+    #[test]
+    fn team_range_requires_the_accepted_head_to_equal_the_receipt() {
+        assert_eq!(
+            accepted_review_head(Some(HEAD), &HEAD.to_uppercase()).unwrap(),
+            HEAD
+        );
+        assert!(accepted_review_head(None, HEAD).is_err());
+        assert!(accepted_review_head(Some(SHA), HEAD).is_err());
+        assert!(accepted_review_head(Some("bad"), "bad").is_err());
+        let reads = RemoteRead {
+            run_config: CONFIG,
+            run_definition: DEFINITION,
+            paths_error: false,
+        };
+        let head = accepted_review_head(Some(HEAD), HEAD).unwrap();
+        assert_eq!(
+            review_range_at(
+                &reads,
+                &run_on(CLAIMED),
+                &head,
+                &CommitSha::try_from(SHA).unwrap()
+            )
+            .unwrap(),
+            ReviewRange {
+                base: CLAIMED.into(),
+                head: HEAD.into()
+            }
+        );
+    }
+
     const CONFIG: &str = "the committed dagq.toml";
     const DEFINITION: &str = "---\ndescription: main's design checks\n---\nCheck the design.\n";
 
@@ -2484,14 +2620,7 @@ mod tests {
             ..Committed::default()
         };
         assert_eq!(
-            review_range_at(
-                &repository,
-                &run_on(CLAIMED),
-                &receipt,
-                &CommitSha::try_from(SHA).unwrap(),
-                &[],
-            )
-            .unwrap(),
+            review_range(&repository, &run_on(CLAIMED), &receipt, &[]).unwrap(),
             ReviewRange {
                 base: MIDWAY.to_owned(),
                 head: HEAD.to_owned(),
