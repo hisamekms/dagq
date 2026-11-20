@@ -118,8 +118,9 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 [Run environment](run-environment.md)の「`[run.env]`が名指すプログラムの検査」（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9）と同じ形にする（ADR-t1920-1決定2）。
 
 - `up`のpreflightは`lifecycle::Ports::ci_watch_preflight`、実装は`infrastructure::ci_watch::preflight`で、理由と対処は`Access::message`が持つ。
-- supervisorの保留は`domain::ci_watch::hold_reason`が判定し、着地の開始への効き方は[承認とslot](integrate.md#承認とslot)が持つ。
-- drain・claimの停止の最中は、最後の答えがだめなときだけleaseを返し、最初の答えを待つ間は返さない（handoffはどちらでも返さない）。
+- supervisorの保留は`domain::ci_watch::hold_reason`が判定し、着地では[開始の判定](integrate.md#承認とslot)だけに効き、列での待ちにはleaseを取らない。
+- drain・claimの停止中にleaseを持つ`AwaitingSlot`を進めると、CIの答えに関わらず`return_to_landing_queue`でleaseを返す。
+- [handoffの区切り](handoff.md)では`AwaitingSlot`を進めず、持っているleaseごと引き継ぐ。
 - attentionは`ci_watch_unavailable`だけで（`domain::event_attention`）、対処は`Unavailable::next`、`status`の行は`application::health::attention`が出す。
 - 保留の記録は`CI_WATCH_HOLD`（`domain::claim_hold::OwnHold`）と`ObservationState::record_ci_watch_hold`が持ち、`ci_watch_unavailable` / `ci_watch_available`はqueueの答えで、supervisorが保留していることは示さない。
 - `doctor`は`application::ci_watch::doctor`と`infrastructure::ci_watch::doctor_view`。
