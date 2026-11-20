@@ -409,6 +409,18 @@ effort = "low"
 # model と effort は書かず、Claude の既定に任せる。
 provider = "claude"
 
+# 非対話の runtime の planner を Codex で動かす（人の 2026-10-02 の決定の 3 段目。goal 87 の評価後、
+# ask 1019 の答えで非対話を続けると決めた。goal 88、ADR-t2930-1、task 2931）。
+# model と effort は書かず、Codex の既定に任せる。Codex が使えないときは ADR-t2930-1 決定 5 に従い、
+# 起動先の選択と provider ごとの控えは task 2932、起動先が無いときの inbox の status と attention は
+# task 5575、最初の turn が provider の壁で終わったときの切り替えは task 5576 の振る舞いに従う。
+# 書式と振る舞いは docs/design/supervisor-lifecycle/actor-model.md の provider と
+# docs/design/supervisor-lifecycle/plan-planners.md の「runtimeのplannerの経路」。
+# runtime_planner の codex を知らない旧バイナリは設定の誤りとして拒むので、
+# 固定バイナリが task 2931・2932・5575・5576 を含んでから足した。
+[roles.runtime_planner]
+provider = "codex"
+
 [areas]
 # stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
 # 書式と求め方は domain::areas::AreaMap と application::areas::AreaReader の doc comment）。glob は --paths と同じ規則で重なってよく、
