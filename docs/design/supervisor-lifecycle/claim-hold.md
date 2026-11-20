@@ -127,10 +127,12 @@ claimと着地の予約の取り方と、両方が同じ回に進める条件は
   `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べる（[Review](review.md#review-supervisor)）。
 - resume: workerのsessionが容量不足で落ちたrunは、claimが控える間は復旧jobもaskも無しに`failed`か`interrupted`のまま待ち、控えが解けたpassで同じrunでresumeする（[Triage](triage.md)）。
 - 落とし穴: 着地の控えはhostのものでなく記録したsupervisorの候補のものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
-- 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返し[拾い直し](supervise.md#leaseの解放)に任せる。
-  待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。
+- 止めるdrainでは掃除jobの予約中だけ着地待ちのrunのleaseを保つ（`step_landing_wait`）。
+  予約が外れれば容量によらずleaseを返して列に戻る（`step_awaiting_slot`）。
+  空き容量は列からの開始だけに効く。
+  drain自体は掃除と残りのjobの有限の候補を時間上限なしで待つ。
   provisioningの失敗のdrainは掃除をdrainの扱いにしないが、同じく残りのjobが終わるまで待つ。
-  `[run.env]`のprogramが無いときと着地のbranchが解決しないときは、掃除を待たずにleaseを返す。
+  `[run.env]`のprogram不足と着地branchの未解決も列からの開始を控える。
 - handoffはどの保留でもleaseを返さず、runをleaseごと次のprocessに渡す（[Handoff](handoff.md)、[ADR-t3048-1](../../adr/2026-10-21-t3048-1-handoff-hands-over-held-landings-leased.md)）。
   handoffを初めて読んだ周回では、runを進める前に掃除をdrainの扱いにして読み直す（`end_cleanup_for_handoff`）。
 
