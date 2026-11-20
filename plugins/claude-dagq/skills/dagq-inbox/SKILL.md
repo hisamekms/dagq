@@ -52,14 +52,15 @@ An ask whose kind, options or effect is unclear: `reference/asks.md`, with the a
 
 ## 4. Report the other attention, act only on the person's word
 
-List task, status, `next` and the gist of `last_error`. Act on the person's word. `(runtime)` needs nothing. See `reference/status.md`.
+Report task, status, `next` and the gist of `last_error` (`reference/status.md`). `(runtime)` needs nothing.
 
 - `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`, `plan task <N> with the answer: …`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
 - `triage by hand`, `recover by hand`: `dagq-recover` section 4. For recovery, check `reason_category` (`recovery_failed` or absent under `--no-claude`).
 - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
 - `request a plan for …` (the draft, the finding, the waiting tasks, the follow-ups of goal G): a request on the person's word (`reference/status.md`).
-- A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it for a runtime planner (`reference/requests.md`); `report the request's proposal`, `rephrase or drop the request` and a `planner_question` on a request: the same file. More words for an open planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
+- `reference/requests.md` covers `request add`, `report the request's proposal`, `rephrase or drop the request`, a request's `planner_question`, and `planner request` for the next turn.
 - `check the planner`, `plan review by hand`: `dagq-recover` section 8.
+- `check planner providers`. Tell the person what is waiting and why (Planning in `reference/status.md`). Leave `dagq.toml` as is. The person restores a provider using the checks in `skills/dagq/reference/provider.md`.
 - `report the update` (`update_installed`), `report the review`, `check the failed review`, `check the failed observer` (`observe_finished`): tell the person (`reference/watch.md`).
 - `stop sccache on the host; the supervisor starts it`, `install tool` (`run_env_program_missing`, `ci_watch_unavailable`), `log in to gh`, `fix dagq.toml` (`ci_watch_unavailable`, `ci_jobs_missing`, `container_runtime_unavailable`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
