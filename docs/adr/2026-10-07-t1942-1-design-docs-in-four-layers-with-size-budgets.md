@@ -2,10 +2,12 @@
 id: adr-t1942-1
 type: adr
 title: 文書を概念・地図・doc commentの詳細・ADRとgitの経緯の4層に分け、designには概念と地図だけを書き、細かい事実はコードのdoc comment、経緯はADRとgitに置き、designを1文1行と文書ごとの大きさの予算で保ち、検査を増やす方向と減らす方向の両方にする（ADR-t598-1決定3・4をamends）
-status: accepted
+status: superseded
 created: 2026-10-07
 updated: 2026-10-07
 accepted_on: 2026-10-07
+superseded_by: adr-t5395-1
+superseded_on: 2026-11-20
 amends:
   - adr-t598-1 decision 3
   - adr-t598-1 decision 4
@@ -24,6 +26,8 @@ related:
 ---
 
 # ADR-t1942-1: 文書を4層に分け、designには概念と地図だけを書き、1文1行と大きさの予算で保つ（ADR-t598-1決定3・4をamends）
+
+> **置き換え済み（2026-11-20）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t5395-1](2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)を読む。
 
 ## Context
 

@@ -16,6 +16,7 @@ related:
   - adr-t1428-1
   - adr-t1662-2
   - adr-t1942-1
+  - adr-t5395-1
   - adr-t1942-2
   - adr-t2352-1
   - adr-t3990-5
@@ -39,8 +40,8 @@ related:
   runのプログラムのreviewはmainのscriptを読むので、文書を消すtaskのcommitで足した行はそのreviewで効かない（登録は[taskの登録](task-registration.md)の「ADRがリンクする文書を消すtask」）。
   その行を確定にするのは、文書を消したgoalの最後のtaskである（行の書式と状態の意味は下の「frontmatter」とscriptの冒頭）。
 - どのADRが今の決定か（`accepted`・`amended_by`・`superseded_by`の辿り方・`deprecated`）は[frontmatter仕様](../frontmatter.md)の「ADR fields」の状態と欄の表が持つ。
-- 小さなADR: 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果。目安は「これを変えるとき人に聞くか」）で、eventの種類と欄・CLIのflagの綴り・JSONの形・既定値や閾値の数値・関数やmoduleやファイルの名前・migrationの番号・testの名前はコード（定義のそばのdoc comment）か`docs/design/`の地図に書く（ADR-t598-1決定2・3、決定3は[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)がamends。下の「design」）。
-- 置き換えか`amends`か: 元のADRの決定の数と変える範囲で決め、IDの形（4桁か新しい形か）では決めない（[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定（例: `adr-0047 decision 24`）を書き、元のADRの`amended_by`にそのIDを足し、同じ変更で今の姿（`docs/design/`かdoc comment）を直す。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換え、まだ有効な古い決定を書き直して引き継ぎ、古いADRを丸ごと`superseded`にする（1つのADRが複数を置き換えてもよい）。どちらにするかをtaskに書くことは[taskの登録](task-registration.md)の「ADRを書くtask」が持つ。
+- 小さなADR: 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果。目安は「これを変えるとき人に聞くか」）で、eventの種類と欄・CLIのflagの綴り・JSONの形・既定値や閾値の数値・関数やmoduleやファイルの名前・migrationの番号・testの名前はコード（型・名前・test）が持ち、決定1の(a)(b)(c)に当たることは`docs/design/`に書く（ADR-t598-1決定2・3。決定3・4は[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)がamends。下の「design」）。
+- 置き換えか`amends`か: 元のADRの決定の数と変える範囲で決め、IDの形（4桁か新しい形か）では決めない（[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定（例: `adr-0047 decision 24`）を書き、元のADRの`amended_by`にそのIDを足し、今の姿を直す必要があれば、同じ変更でコードか、下の「design」の(a)(b)(c)に当たる設計文書に反映する。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換え、まだ有効な古い決定を書き直して引き継ぎ、古いADRを丸ごと`superseded`にする（1つのADRが複数を置き換えてもよい）。どちらにするかをtaskに書くことは[taskの登録](task-registration.md)の「ADRを書くtask」が持つ。
 - 置き換えは後継を`accepted`にする変更と同じ変更で行い、古いADRの`superseded_on`は後継の`accepted_on`と同じ日にする。`proposed`の後継は何も置き換えない（`supersedes`に予定のIDを書いてよいが、古いADRの状態は後継がacceptedになるまで変えない）。
 - ADRの索引は各ADRのfrontmatterから`scripts/adr-index.sh`が生成するgitignoreした`docs/adr/INDEX.md`で、commitしない（[ADR-t1967-1](../adr/2026-10-07-t1967-1-adr-index-generated-from-frontmatter.md)）。状態と後継の正本はfrontmatterの欄（`status`・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`）で、ADRを足す・状態を変える変更は欄だけを直し、索引も[ADRの案内](../adr/README.md)も書き換えない。
 - 索引を読む前に、無ければ`sh scripts/adr-index.sh`で作る（あれば何もしない。`--force`で作り直し、`--stdout`はファイルに書かず出す。CIは`--stdout`で全てのADRを読めることを確かめる）。表は有効なADRと置き換え・廃止のADRの2つで、4桁の行の後ろに`accepted_on`の順で並ぶ。有効なADRの表は`accepted_on`の右に`amended_by`も示す。
@@ -49,42 +50,33 @@ related:
 ## ADRのID
 
 - 新しいADRのIDはそれを書くtaskのIDと枝番の`adr-t<task ID>-<N>`（Nは1から。1本だけでも`-1`）、ファイル名は`docs/adr/<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`で、日付は`accepted_on`（ADRを書くtaskではworkerが書いてacceptedにした日）にする（ADR-t598-1決定1）。`proposed`のADRは書いた日の名前にし、acceptedにする変更で`accepted_on`に合わせて名前とそこへのlinkを直す。IDはtaskのIDから決まるので、mainの次の空き番号を探さず、plannerもplan reviewも番号の割り当ての棚卸しをしない。
-- 後続のtaskはADRを`ADR-t<ID>-<N>`で参照する（日付を含めないので着地前から書ける）。今どうなっているかを指すときは`docs/design/`の文書かコードを、なぜそうしたかを指すときはADRを指す（決定4、ADR-t1942-1がamends）。
+- 後続のtaskはADRを`ADR-t<ID>-<N>`で参照する（日付を含めないので着地前から書ける）。今どうなっているかを指すときは`docs/design/`の文書かコードを、なぜそうしたかを指すときはADRを指す（決定4、ADR-t5395-1がamends）。
 - 既存の4桁のADR（0001〜、IDは`adr-NNNN`）と、登録済みのtaskが予約した4桁の番号はそのまま使い、振り直さない。新しく登録するADRのtaskは新しい形にする。
 - 例外: 予約した4桁の番号がmainですでに埋まっていたら（`integrate`の`check-adr-numbers.sh`が重複で落ちてresumeされたときも同じ）、番号の衝突は人が要る理由（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41）に当たらないので、workerは`dagq ask`にせず、自分のtaskのIDの新しい形（上の1つ目）にファイル名とfrontmatterの`id`を書き直す。自分の変更の中の参照も合わせ、元の番号と新しいIDをreceiptの`summary`に書く。
 - `scripts/check-adr-numbers.sh`（CIと、差分がそのpathに当たるrunの[プログラムのreview](../design/supervisor-lifecycle/review-programs.md)も実行する。どのscriptを挙げるかは`dagq.toml`の`[review.programs]`）が検出するものはscriptの冒頭のcommentが持つ。scriptの名前は登録済みのtaskのverifyが使うので変えない。
 
 ## design
 
-`docs/design/`の書き方の規則。経緯は[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)が持つ。
-
-### 4層
-
-- 概念: 下の「形と予算」で概念の文書とした文書と、各サブシステムの文書の冒頭。
-  目的・全体の流れの図・責務と境界・不変条件を書く。
-  識別子の一覧と既定値は書かない。
-  人とAIが読む。
-- 地図: 各design文書の本体。
-  「Xを知りたいならコードのここ」という入口、コードから読めない約束と落とし穴、ADRへのリンクを書く。
-  AIが読む。
-- 詳細: 型・event・設定の定義のそばのRustのdoc comment。
-  欄・flag・既定値の意味はここに書く。
-- 経緯: ADRとgitの履歴だけ。
+迷ったら書かない。
+`docs/design/`に書くのはコードを読んでもわからないことだけで、経緯は[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)が持つ。
 
 ### 書くもの・書かないもの
 
-- 書くのは、流れ・責務と境界・不変条件、コードから読めない約束と落とし穴、コードへの入口（module・型・関数の名前を入口として指すのはよい）、ADRへのリンク。
-- 書かないのは次のもので、`docs/design/`を変えるrunのreviewで、`.dagq/agents/design-layers/`のagentが差分の足した・変えた・消したdesignの行の層を見て、どれに当たるかをこの規則コードで判定する（[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)決定7、予算のための削除のDL-3は下の「形と予算」）。
-  - DL-1: 場面・分岐ごとに誰が何をどの順にするか（書く・読む・起動する）の列挙（コードを読めば分かる手順の書き写し）。
-    利用者や開発者が打つ手順は、コードに移す先が無くてもここに当たり、置き場は`docs/development/`かpluginのskillで、designには入口の1行を置く。
-  - DL-2: eventの欄・CLIのflag・既定値と閾値の数値・関数や型の名前・test名の並び（入口として1つ指すのはよい）。
-    下の「権限の表を写す文書」が名指す表の行は、規則が残せと言う表なので当たらない。
-  - DL-4: 経緯（task・goal・requestの番号、「以前は」「〜から変えた」、文字数や件数の変遷）。
-    今も効く互換（古い記録の読み方、残している引数のように、今のコードの外の読み手が頼る約束）は地図で、当たらない。
-  - DL-5: 列挙や識別子の形をとらなくても、コードから読める細部（何を作り直す・読む・持ち越すかなど、定義のそばのdoc commentに置く詳細の層）を文章で書いた行。
-    地図に残すのは、知りたいことからコードへの入口と、コードから読めない約束・落とし穴・不変条件だけにする。
-- 名前・欄・既定値の意味が要るなら、定義のそばのdoc commentに書く。
-- designを書き直すのは、流れ・境界・不変条件・コードから読めない約束が変わったときと、記述が今のコードかacceptedのADRと食い違うときだけ。
+- 書くものは決定1の次の三つだけとする。
+  - (a) 複数の集約や係をまたぐ順序・一貫性・受け渡し・途中の失敗。
+  - (b) 複数のBCをまたぐ受け渡しと持ち主（queue・supervisor・service・workerの境目）。
+  - (c) コードからわからないインフラ（processの配置、disk上のファイルと置き場、GitHub・Claude・Codex・podmanなど外部との境目、更新と引き継ぎの手順、壊れ方と復旧）。
+- 三つのいずれにも当たらない単位内部の状態の移り方・欄・規則・関数名・処理の手順や、内部の部品どうしの順序・受け渡しは書かない。
+  経緯はADRとgitの履歴だけに置く。
+- DS-1: 差分が`docs/design`に足した・変えた行が、(a)(b)(c)のどれにも当たらず、1つのコードの単位の中で閉じる話を書いた。
+  1つの単位は1つの集約か、集約に属さずcommand・job・役割から直接呼ばれる入口と、自分の状態か出力を持つ1つの係とする。
+  storeの行から帳簿を作り直す係や、統計・指標・報告をそれぞれ作る係がこれに当たる。
+  その単位からだけ呼ぶhelperのmodule・関数・型は同じ単位の部品とし、部品がいくつ登場しても内部の順序や受け渡しはDS-1に当たる。
+  (a)は2つ以上の単位（集約どうし・集約と係・係どうし）をまたぐ順序・一貫性・受け渡し・途中の失敗だけを指す。
+  集約とBCの一覧（`aggregates.md`）は境目を確かめる補助で、一覧の有無で判じ方を変えず、一覧に無い係も1つの単位とする。
+- 型・名前・enum・構造でコードを宣言的にし、コードから読める事実はdoc commentにも書き写さず、designから消した記述もそこへ移さない。
+- designに行を足すのは(a)(b)(c)に当たる変更があるときだけで、既存の記述を直すのは今のコードかacceptedのADRと食い違うときだけとする。
+  1つのコードの単位で閉じる細部はコードの型・名前・testが持つ。
   変えた名前がdesignに無いことはずれではない（[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)、下の「workerの文書の照合」）。
 - 直し対象の印は、今のコードかacceptedのADRと食い違う記述の直しを後のtaskに回すときだけ使い、記述の追加の代わりには使わない。
   対象の節の見出しの直後に、``> 直し対象（正: `<コードの入口>`、直す: `task <ID>`）。``の形で1文1行の引用を置く。
@@ -92,12 +84,14 @@ related:
   印は短い指し先にとどめ、食い違う文と今の振る舞いは印を入れたtaskのreceiptに節ごとに1行で書き、直すtaskはそのreceiptを読む。
   印は1節に1つとし、同じ直すtaskの印が既にある節に後のtaskが印を足さない。
   印を置くと`sh scripts/check-design-docs.sh`の上限を超えるときは、食い違う句や節だけを削って印の分を空け、同じ文と同じ節に今も有効な約束とコードへの入口を残す。
-  文を丸ごと消せるのはその文の全部が食い違うときだけで、食い違う部分だけを削っても収まらなければ本文に手を加えず印を省く（下の「形と予算」のDL-3）。
+  文を丸ごと消せるのはその文の全部が食い違うときだけで、食い違う部分だけを削っても収まらなければ本文に手を加えず印を省く（上限のために今も有効な約束と入口を消さない）。
   印とこの削除以外の本文は変えない。
   task番号は直すtaskが消す一時の指し先としてinline codeで書く（task番号の予算に数えない）。
   直すtaskが印を消す。
+  印の直すtaskはverifyに`sh scripts/check-design-docs.sh --fixed <自分の ID>`を持ち（印の検査が着地した後に流れる直すtaskは全て）、印は直すtaskの着地まで残ってよく、通常の検査は印が直すtaskの番号を持つことだけを見る。
+  印の付いた節を他のtaskが削るときは、印の行と印が指す食い違いの文を残し、直すtaskに任せる。
 - designは`updated`・`last_verified`を持たず（下の「frontmatter」）、内容を変える必要がない文書に差分を作らない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
-- 「変更と一緒にdesignも直す」（ADR-t1428-1）は記述を足す義務でなく、差分とdesignの食い違いを無くすことで、場面・分岐ごとの処理や新しい関数・欄の説明はdoc commentに書く（登録の側は[taskの登録](task-registration.md)の「文書の変更を求めるtask」）。
+- 「変更と一緒にdesignも直す」（ADR-t1428-1）は記述を足す義務でなく、差分とdesignの食い違いを無くすことで、場面・分岐ごとの処理や関数・欄はコードの型・名前・testが持ち、doc commentにも書き写さない（登録の側は[taskの登録](task-registration.md)の「文書の変更を求めるtask」）。
 - 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足す・変えるtaskは、同じ変更で[計測](../design/measurement.md)の「SSOTとビュー」の節に区分（SSOT・ビュー・材料）と今のアダプタを書く（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、元は[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定9）。
   `docs/plans/`の1回きりや週次の見直しの測定の出力（scriptとCSV）は設計書に足さず、そのplansの文書に区分と作り直せる範囲を書く。
 
@@ -113,12 +107,13 @@ related:
 - 何でも入る巨大な文書を作らない。
   予算を超えるなら、次の順に直す。
   1. 消してよいのは、本文のtask番号・goal番号と経緯、同じ文書か他の文書に同じ事実がある重複、コードから読める列挙（欄・flag・既定値・test名・関数やmoduleの名前の並び）だけにする。
-  2. コードから読める細かい事実で他に記述が無いものは、消さずに定義のそばのdoc commentへ移す（移した先を地図の行に残してよい）。
+  2. コードから読める細かい事実は消す（コードの型・名前・testが持ち、doc commentへ移さない）。
   3. それでも収まらなければ文書を分ける。
      新しい文書は地図の文書の予算に従い、元の文書から相対リンクで辿れるようにする。
   4. 地図として要る行（知りたいこと→コードの入口、コードから読めない約束と落とし穴、規則、他に記述の無い事実）は予算のために消さない。
-     消すときは、同じ事実が残る場所（文書かdoc comment）を確かめる。
-     DL-3: 予算に収めるために、差分と関係の無い既存の事実（地図として要る行やその一部）を消すのは、この規則の違反とする。
+     消すときは、同じ事実が残る場所（他の文書か既存のdoc comment）を確かめる。
+     予算に収めるために、差分と関係の無い既存の地図の事実を、同じ事実が他の文書にも既存のdoc commentにも残らないのに消すことを禁じる。
+     全体のreviewが差分の消した行で判じる（下の「文書を理由に差し戻す条件」の(v)）。
 - 予算の値:
 
   | 指標 | 上限 |
@@ -200,8 +195,8 @@ frontmatterとfenced code blockとinline codeの見分け方は上と同じ。
   閉じない括弧の後の「。」は行の終わりまで数えない。
 - 出力: 違反の行ごとにファイル・行番号・行を出して落ちる（exit 1）。
 
-識別子の並びと列挙の検査のscript（`scripts/check-design-identifiers.sh`）は、地図の層（上の「4層」）を越えた細部のうち機械で安く見分けられる形だけを拾い、層の判断を足さない。
-拾い漏れはreviewの層を判定するagentが見るので、閾値は誤検出を0にする側に寄せ、値と決め方はscriptの冒頭が持つ。
+識別子の並びと列挙の検査のscript（`scripts/check-design-identifiers.sh`）は、上の「書くもの・書かないもの」の書かないもの（1つのコードの単位で閉じる細部）のうち機械で安く見分けられる形だけを拾う。
+拾い漏れはreviewの`design-layers`のagentが見るので、閾値は誤検出を0にする側に寄せ、値と決め方はscriptの冒頭が持つ。
 CIとrunのreviewのプログラムが流し、[taskの登録](task-registration.md)の「推奨の組み合わせ」のverifyには足さない（どの`docs/design/`の差分にも両方が流れるので、既存のtaskの登録を変えずに済む）。
 
 - 対象・除く行: 1文1行の検査のscriptと同じ（base・gitがまだ追っていないファイル・名前の変更・gitが引用する名前・`--all`の扱いも同じ）。
@@ -210,8 +205,43 @@ CIとrunのreviewのプログラムが流し、[taskの登録](task-registration
 - 違反（B）: 箇条（行頭の空白を除いて`-`か`1.`のような数字と`.`で始まる行）が閾値の本数以上続く塊で、どの箇条も対象の行で、その行か字下げした続きの行にinline codeを含むもの（場面ごと・識別子ごとの列挙）。
   入れ子の箇条も同じ塊に数える。
   inline codeの無い箇条・対象でない箇条（既にある箇条）・空行・字下げの無い箇条でない行・除く行が塊を切るので、既にある箇条は塊に数えず、既にある列挙に足した箇条は足した本数だけで数える。
-  このため既にある場面ごとの列挙への1〜2本の追記は拾わず、それは層を判定するagent（`design-layers`）が見る（devのケース`ab08fe0a1-hold-appended-to-scene-lists`・`ab08fe0a1-hold-appended-to-claim-scene-list`）。
+  このため既にある場面ごとの列挙への1〜2本の追記は拾わず、それは`design-layers`のagentが見る（devのケース`ab08fe0a1-hold-appended-to-scene-lists`・`ab08fe0a1-hold-appended-to-claim-scene-list`）。
 - 出力: 違反ごと（（B）は塊の各箇条の行。（A）と（B）の両方に当たる行は2回）にファイル・行番号・違反の種類・行を出して落ちる（exit 1）。
+
+### 機械の検査
+
+機械の検査を先に当て、検査の本文はscriptとtestのコメントに置く。
+
+- 識別子と実在のunit test（予定）は、本文のinline codeにあるコードの識別子（関数名・型やeventの欄・enumの値・constの名前）と、実在しないmoduleのpath・集約・BC・型の名前への参照を落とす。
+- 大きさの検査（`scripts/check-design-docs.sh`）は文書ごとの本文のbyte数と1行の長さの上限を超えたもの、本文でtaskかタスクに番号が続く形を落とす（frontmatter・fenced code block・inline code・リンクの行き先（`](`から次の`)`までと、行頭の参照リンク定義`[名前]: `の後ろ）を除き、リンクの表示文言は数え、数字の直後が件・つ・個・本・回の形は数えない）。
+- 1文1行の検査（`scripts/check-design-sentences.sh`）は、差分が足した・変えた行で1行に複数の文が続くものを落とす。
+- reviewの前ふるい（`scripts/check-design-identifiers.sh`）は、差分が足した・変えた行でinline codeが閾値以上の行（違反（A））と、行自体か字下げした続きの行にinline codeを含む足した・変えた箇条が閾値以上続く塊（違反（B））を落とす。
+- 直し対象の印の検査は、直すtaskの番号が無い印を落とす。
+
+`design-layers`のDS-1は、差分が足した・変えた行のうち1つのコードの単位で閉じる話だけを判じる。
+識別子・大きさ・本文のtask番号・印・経緯・消した行はDS-1の判定外とし、予算のための削除は全体のreviewが下の(v)で判じる。
+機械の検査もDS-1も拾わない経緯（番号を持たない「以前は」「〜から変えた」の文、goal・request・ADRの番号や日付・件数で書く変遷）は全体のreviewが指摘する。
+
+### 文書を理由に差し戻す条件
+
+コード・acceptedのADR・testを正とし、designはまたがる話の地図として読む。
+runのreviewが文書を理由に差し戻すのは次の場合に限る。
+
+- (i) 差分が変えた文書が差分・コード・acceptedのADR・testと食い違う。
+- (ii) 差分がacceptedのADR・test・コードの持つ不変条件・約束・境界を破る。
+- (iii) 差分が`docs/design/`に足した・変えた行が機械の検査かDS-1に当たる。
+- (iv) 差分が足した・変えた行に、このrepositoryの従来の文書の規則が禁じる`docs/design/`の外の文書でのコードの書き写し、または同じ規則が当たる文書での経緯がある。
+  `docs/design/`の書き写しは(iii)が受け持ち、機械の検査が拾わない経緯は全体のreviewが従来どおり指摘する。
+- (v) 予算に収めるために、差分と関係の無い既存の地図の事実（コードへの入口、コードから読めない約束と落とし穴、規則、他に記述の無い事実）を`docs/design/`から消し、同じ事実が他の文書にも既存のdoc commentにも残らない。
+  全体のreviewが差分の消した行を見て、削除の目的と同じ事実が残る場所を確かめる。
+  予算に収める目的の無い削除や、言い換え・参照先への短縮で事実が残るもの、既存のdoc commentに同じ事実が残るものは対象外とする。
+  1つの単位で閉じる記述・重複・経緯・コードから読める列挙の削除や、直し対象の印を置くために食い違う句や節を削る変更も対象外とする。
+
+差分がdesignとだけ食い違うときは、designの直しを`docs_drift`のfollow_upにする。
+
+plan reviewは同じ基準を使い、受け入れ条件がdesignに必須とする記述に機械の検査の境界を先に当て、該当すれば`revise`にする。
+機械が拾わなくても、1つの集約か集約に属さない1つの係で閉じる話を必須にするなど、DS-1に明確に当たれば`revise`にする（識別子を使わない地の文も含む）。
+DS-1に当たるか迷う記述は`revise`の理由にせず、designの記述とだけ食い違うことは`revise`・`concern`の理由にしない。
 
 ## plans
 
@@ -257,12 +287,14 @@ runtimeの汎用性（言語・道具・外への宛先・hostで流すコマン
 workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)・[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る。生成物なので直さず、ずれはADRのfrontmatterで直す）で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。
 
 - 候補は、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）で`docs/design/`・`docs/development/`・`plugins/claude-dagq/skills`の`SKILL.md`と`reference/`・AGENTS.md・ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る）を探して拾い、`summary`に探した名前を書く（ADR-t1942-2決定1・3。探す手段は問わない）。
-- 見つけた`docs/design/`の文書を書き直すのは、流れ・境界・不変条件・コードから読めない約束が変わったときと、記述が差分と食い違うときだけ（ADR-t1942-2決定2）。
+- 見つけた`docs/design/`の文書に行を足すのは「書くもの・書かないもの」の(a)(b)(c)に当たる変更があるときだけで、既存の記述を直すのは差分かacceptedのADRと食い違うときだけとする（ADR-t1942-2決定2、[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)がamends）。
   変えた名前がdesignに無いことはずれではなく、名前・欄・既定値を書き足さない。
-  その意味は定義のそばのdoc commentに書く。
-  直すときは経緯（task番号・「以前は」・変遷）を書き込まず、上の「design」の形と予算に従う。
-- runのreviewは、欠けに加えて差分が文書に入れたコードの書き写しと経緯の混入を指摘する（ADR-t1942-2決定4）。
-  差し戻すのは、差分が変えた文書と差分の食い違い（差分が入れた書き写しと経緯の混入を含む）と、差分と文書の述べる不変条件・約束・境界の食い違いだけである（[ADR-t2352-1](../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)）。
+  名前・欄・既定値の意味と単位内部の細部はコードの型・名前・testが持つ。
+  直すときは経緯（task番号・「以前は」・変遷）を書き込まず、上の「design」の規則に従う。
+- runのreviewは欠けを指摘し、`docs/design/`のコードの書き写しは「design」の機械の検査と`design-layers`のDS-1が見る（ADR-t1942-2決定4、[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)がamends）。
+  全体のreviewは、`docs/design/`の外の文書の書き写し、経緯（`docs/design/`では機械の検査が拾わない形）、予算のための削除（上の「文書を理由に差し戻す条件」の(v)）を指摘する。
+  差し戻しは上の「文書を理由に差し戻す条件」に従う（[ADR-t2352-1](../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)決定1、[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)がamends）。
+  差分がdesignの記述とだけ食い違うときは、designの直しを`docs_drift`のfollow_upにする。
   差分が触っていない文書の古い記述（差分が変えた挙動の説明がその文書に無いか古いことを含む）は差し戻さず、reviewがverdictの`follow_ups`で返し、runtimeが`docs_drift`のfollow_upのdraftにする。
   このrepositoryではそれとsummaryの探した名前の確かめを全体のreviewが全ての差分でこの節の規則により行い、`.dagq/review/builtin-acceptance.md`の「文書の照合」はその要点を`builtin:acceptance`の規則として持つ。
 - 見落としやすい型: 役割・権限の説明は複数の文書に散らばる（task 1400: `docs/design/overview.md`の用語集の役割の行・`docs/design/authorization.md`・`docs/design/supervisor-lifecycle/roles.md`・`triage.md`）。testやscriptが何を検査するかを列挙する節も古くなりやすい（task 1462: `docs/design/plugin-integration.md`「読み込みと検証」）。

@@ -13,6 +13,7 @@ related:
   - adr-t1453-2
   - development-testing
   - development-task-registration
+  - adr-t5395-1
 ---
 
 # このrepositoryのmigrationの規則
@@ -46,7 +47,10 @@ related:
 
 ## persistence.mdに書くこと
 
-migrationを足すtaskは、[Persistence](../design/persistence.md)の、変えた表・列の今の姿を書く箇所だけを直す: 冒頭のschemaの木のその表の行（表の役割と、列についてコードから読めない約束）と、その表・列を説明する本文の節。列の一覧・既定値・null可の書き写しは足さず、意味が要れば定義のそばのdoc commentかmigrationのコメントに書く（[文書の規則](documents.md)の「design」、[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)）。足した表は木に1行と、要れば本文の節を足す。
+migrationを足すtaskが[Persistence](../design/persistence.md)のschemaの木に行を足すか本文に節を足すのは、変えた表・列が複数の集約や係・複数のBCをまたぐか、コードからわからないインフラの約束を持つなど、[文書の規則「design」](documents.md#design)の(a)(b)(c)に当たるときだけとする。
+既存の木の行と本文を直すのは、記述が差分かacceptedのADRと食い違うときだけとする。
+1つの集約か係の内部だけで使う表・列は足さず、細部はコードの型・名前・testが持つ。
+列の一覧・既定値・null可はdesignにもdoc commentにも書き写さず、migrationのコメントにはコードから読めないことだけを書く（[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)決定1・3）。
 
 - 冒頭の段落にmigrationごとの経緯（どのmigrationが何を足したか、schemaの版）を足さず、木にmigrationごとの行（`-- 00NN: …`）を足さない。経緯は`migrations/*.sql`（先頭行の互換の宣言とコメント）とgitの履歴が持つ。
 - 本文で根拠を名指すときは、migrationの番号（`integrate`が振り直すと古くなる）でなくADRかmigrationのファイル名の`<name>`の部分を名指す。既にある番号の言及は書き直さなくてよい。

@@ -11,6 +11,7 @@ amends:
   - adr-t1487-2 decision 4
 amended_by:
   - adr-t5292-1
+  - adr-t5395-1
 owners:
   - hisamekms
 tags:

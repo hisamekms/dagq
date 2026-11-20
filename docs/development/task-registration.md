@@ -17,6 +17,7 @@ related:
   - adr-t1639-2
   - adr-t1453-2
   - adr-t1942-1
+  - adr-t5395-1
   - adr-t1964-1
   - adr-t1504-1
   - adr-t1504-2
@@ -210,7 +211,7 @@ reviewが3回以上になるrunは差分の大きいtaskに偏り、そのうち
 - ADRを書くtaskを登録するときは、descriptionに本数と各IDの中身を書く（自分のIDは`add`が返すまで分からないので「このtaskのIDでADR-t<ID>-1を書く」と書くか、`add`の後にdraftを直す）。verifyは上の「推奨の組み合わせ」の「ADRを書く」の行。IDの形と、番号の割り当ての棚卸しをしないことは[文書の規則](documents.md)の「ADRのID」。
 - 番号付きの決定を複数持つADRの一部を変える（`amends`）か、丸ごと置き換えるかを、ADRを書くtaskのplannerがdescriptionに書き、plan reviewが見る（下の「plan reviewが当てはめる規則」）。選び方は[文書の規則](documents.md)の「ADR」。
 - 現行のADRの決定（方針・境界・不変条件）に触れるtask（変更がADRの決定の範囲に入るか、descriptionかacceptanceがADRを名指すtask）は、ADRを書くかどうかを登録の時に次のどちらかに確定してdescriptionに書く。
-  - (a) ADRを書かない: 保つ決定を「ADR-X決定Nを保つ」の形で名指し、細部はdesignかdoc commentに書くと書く。
+  - (a) ADRを書かない: 保つ決定を「ADR-X決定Nを保つ」の形で名指し、細部はコードの型・名前・testが持ち、designに行を足すのは「design」の(a)(b)(c)に当たる変更があるときだけと書く。
   - (b) ADRを書く: 上の2項のとおり本数・ID・変える決定・`amends`か置き換えかを書き、verifyに`sh scripts/check-adr-numbers.sh`を足す。
   - 名指すADRは、frontmatterの`superseded_by`・`amended_by`を辿った今の決定にする（辿り方は[frontmatter仕様](../frontmatter.md#adr-fields)の「ADR fields」）。`superseded`のADRを今の決定として引かない。
   - 「必要ならADRを書く」のようにworkerに選ばせる書き方と、既存のADRの本文（Consequencesを含む）を直す選択肢は書かない（ADRがappend-onlyであることは[文書の規則](documents.md)の「ADR」）。決定を変える必要が実装中に分かったら、workerはaskで止める、と添える。
@@ -243,19 +244,17 @@ dagqは外部のprojectで使い、このrepositoryはdogfoodingしているだ�
 
 descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に次に合わせて書く（規則の本文は[文書の規則](documents.md)が持つ）。
 
-1. 既定値・閾値の数値、設定のkeyと型、eventの欄、CLIのflag、JSONの形、関数とファイルの名前の列挙は`docs/design/`に書かせず、意味が要るなら定義のそばのdoc commentに書かせる。
-   designに求めるのは流れ・境界・不変条件・コードから読めない約束と、名前で指すコードへの入口にする（[文書の規則](documents.md)の「design」、[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)）。
-   designの変更を受け入れ条件にしてよいのは、流れ・責務と境界・不変条件・コードから読めない約束が変わるときと、記述が今のコードかacceptedのADRと食い違うとき（食い違いの解消だけ。下の4の削除と6を含む）だけにし、前者では何が変わるか（約束・境界・不変条件のどれが、どう変わるか）を受け入れ条件に書かせる。
-   designに新しい行を求めるときは、入口（知りたいこと→コードの入口1つ）の1行と、変わる約束・境界・不変条件の1行に限る。
-   振る舞いの細部（場面・分岐ごとに何をどの順に揃える・書く・読むか、関数・型・欄の追加とその意味）は、designでなく定義のそばのdoc commentを受け入れ条件にする（designに書けば同じ「design」の「書かないもの」のDL-1・DL-2・DL-5に当たる）。
+1. designに行を足させてよいのは、[文書の規則](documents.md#書くもの書かないもの)の(a)(b)(c)に当たる変更があるときだけとし、受け入れ条件に何がどう集約・係・BCをまたがるか、またはコードから読めないインフラの何が変わるかを書く（[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)決定1）。
+   既存の記述を直させるのは、今のコードかacceptedのADRと食い違うときだけとする。
+   1つの単位で閉じる振る舞いや、名前・欄・既定値の意味はコードの型・名前・testが持ち、designにもdoc commentにも書き写させない。
 2. designにtask・goalの番号と「以前は」のような経緯を書かせない（同じ「design」）。
    [文書の規則](documents.md#書くもの書かないもの)の「直し対象の印」の項に従い、直すtaskが消す一時の指し先の印に限ってdesignにtask番号を求めてよい。
 3. designを含むADR以外の文書に`updated`・`last_verified`の更新を求めない（[文書の規則](documents.md)の「frontmatter」、[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)）。
 4. designの記述を消させるときは、[文書の規則](documents.md)の「形と予算」の1・2・4に合わせる。
-   doc commentへ移させるのはコードから読める細かい事実で他に記述の無いものに限り、follow_upに回すだけにせず同じ変更で移させ、地図として要る約束・入口は残すか適切な文書へ移させる。
+   コードから読める細かい事実はdoc commentへ移さず消させ、地図として要る約束・入口は残すか適切な文書へ移させる。
 5. pluginのskill・referenceに書かせる文言に、このrepositoryのADRの番号と固有の規則を入れない（[文書の規則](documents.md)の「pluginの汎用性」、[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1）。
 6. 実装のtaskの「触った振る舞いを書く`docs/design/`の記述が実装と合っている」の形の受け入れは、記述と実装の食い違いを直すことだけを求め、記述の追加を求めない。
-   食い違いが無ければdesignの差分は要らず、designを書き直す条件は[文書の規則](documents.md)の「書くもの・書かないもの」の「designを書き直すのは」の箇条（流れ・境界・不変条件・約束の変化か、今のコード・ADRとの食い違い）のままにする（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)・[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定2）。
+   食い違いが無ければdesignの差分は要らず、designを書き直す条件は[文書の規則](documents.md)の「書くもの・書かないもの」の「designに行を足すのは」の箇条（(a)(b)(c)に当たる変更を追記し、今のコードかacceptedのADRとの食い違いを直す）のとおりとする（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)・[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定2）。
 
 ## plan reviewが当てはめる規則
 
@@ -280,8 +279,12 @@ descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に�
 - 現行のADRの決定に触れるtaskが、上の「ADRを書くtask」のとおりADRの扱い（(a)保つ決定を名指して書かない、か(b)書く）をdescriptionに確定していること。workerに選ばせる・既存のADRの本文（Consequencesを含む）の変更を許す・`superseded`のADRを今の決定として引く、のどれかに当たれば`revise`にする。
 - runtimeのtaskが上の「runtimeの汎用性」のとおり、言語・道具・外への宛先・hostで流すコマンド・cache・資源の値をruntimeに固定せず設定で受けること。固定していれば`revise`にし、設定に出す形と、このrepositoryの値を`dagq.toml`かdocsのdogfoodingの値として登録する形に直させる（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
 - 文書の変更を求めるtaskのdescriptionとacceptanceが上の「文書の変更を求めるtask」の1〜6に反していれば、`concern`でなく`revise`にする（直し方が規則から一意に決まり人の判断が要らないため）。ADRの決定と矛盾して人の判断が要るものは上のADRの行のとおり`concern`にする。
-  1と6に当たる例: 「`builder.rs`のdoc commentと`measurement.md`の『台帳を作る係』が、作り直しが何を揃えるかと書き終えた範囲の関数を書く」のように、場面ごとの処理や関数の追加をdesignに書かせる受け入れ条件は、名前を入口として指していても`revise`にし、細部はdoc commentだけを受け入れ条件にして、designには入口の1行と、変わる約束・境界・不変条件の1行だけを求めるよう直させる。
-  「designの記述が実装と合っている」の形の受け入れが記述の追加（新しい場面・関数・欄の説明）を求めていれば、同じく`revise`にして食い違いの解消だけに直させる。
+  designに記述を必須とする受け入れ条件には、まず[文書の規則](documents.md#機械の検査)の機械の検査の境界を当て、該当すれば`revise`にする。
+  機械が拾わなくても、1つの集約か集約に属さない1つの係で閉じる話を必須にするなど、DS-1に明確に当たれば`revise`にする（識別子を使わない地の文も含む）。
+  DS-1に当たるか迷う記述は`revise`の理由にせず、差分がdesignの記述とだけ食い違うことは`revise`・`concern`の理由にしない（[ADR-t5395-1](../adr/2026-11-20-t5395-1-design-docs-hold-what-code-cannot-show.md)決定6）。
+  1と6に当たる例として、識別子の列挙や、帳簿を作る係が場面ごとに行う処理・欄の意味・内部の部品どうしの受け渡しをdesignに必須とする条件は`revise`にする。
+  designには(a)(b)(c)に当たる変更と食い違いの解消だけを求め、細部をdoc commentに移すことも受け入れ条件にしない。
+  「designの記述が実装と合っている」の形の受け入れが新しい場面・関数・欄の説明を求めていれば、`revise`にして食い違いの解消だけを求める形に直させる。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
 - 優先度と所属は由来で分けて見る（[ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md)）。由来はproposal単位でなく、runtimeがgoal・taskの作成時に記録した由来で見る（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)決定5〜7。由来が`unknown`の既存の行は人間由来と同じく扱う）。人間由来のtaskとgoalの優先度と所属は自分で変えず（`lower_priority`を付けない）、疑いがあれば`concern`にする。由来を問わず、人の出どころ（`human`）の優先度（taskの個別の指定と、taskが継ぐgoalの優先度）はactionで変えず（付けても適用されず記録だけが残る）、疑いがあれば`concern`にする（同決定3）。人の言葉に優先度の無い新しいgoalにplannerが付けた段は下のAI由来のgoalと同じ目安で見てよいが、外れていれば`revise`にする。

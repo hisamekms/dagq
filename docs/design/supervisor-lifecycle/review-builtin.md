@@ -21,11 +21,11 @@ related:
 **built-inのagent（security・tests）のevalは実装済みで[Agent eval](../agent-eval.md)が持つ。**
 **文書の照合は実装済みで[Review](review.md#文書の照合)の今の節が持つ。**
 変えた挙動に対する文書の古さ・欠けの照合は全体のreview（`builtin:acceptance`）だけが持ち、`builtin:docs`は同梱しない。
-コードの書き写しと経緯の指摘はruntimeに置かず、pjの規則のfile（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
+コードの書き写しと経緯の指摘はrepositoryの規則が持ち、このrepositoryで誰が判じるかは[文書の規則](../../development/documents.md#文書を理由に差し戻す条件)が持つ。
 残りは決定済みの予定で、まだ実装していない。
 決定は[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)と、それを直した[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)が持つ。
 未実装の部分の今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりである。
-実装したら、各文書の今の節をこの形に直し、名前・欄・既定値の意味は定義のそばのdoc commentに置き、この文書には流れ・境界だけを残すか消す。
+実装したら、[文書の規則](../../development/documents.md#書くもの書かないもの)に従って各文書の今の節を直す。
 
 被覆の確認の入口は`src/application/supervise/execution/landing.rs`の`Supervisor::start_acceptance_precheck`。
 

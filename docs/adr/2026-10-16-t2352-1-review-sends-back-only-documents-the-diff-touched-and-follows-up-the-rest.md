@@ -9,6 +9,8 @@ accepted_on: 2026-10-16
 amends:
   - adr-t1942-2 decision 4
   - adr-t1428-1 decision 5
+amended_by:
+  - adr-t5395-1
 owners:
   - hisamekms
 tags:

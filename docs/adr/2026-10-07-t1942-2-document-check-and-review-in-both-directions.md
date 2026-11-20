@@ -16,6 +16,7 @@ amended_by:
   - adr-t2259-1
   - adr-t2389-1
   - adr-t2352-1
+  - adr-t5395-1
 owners:
   - hisamekms
 tags:

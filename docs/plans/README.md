@@ -36,6 +36,7 @@ tags:
 - [cmux を inbox だけが使う形の前後の、着地の関門の test 段・e2e の本数と時間・cmux の fake を使う it の数](cmux-inbox-only.md)（goal 92、task 1444）
 - [tests/it の全 1,192 本の分類（境界・判断・代表あり・goal 92 で消える）と、it でないと担保できない test の見積もり](it-reduction.md)（goal 118、task 1706）
 - [docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値](docs-slim.md)（goal 159、task 1946・1966）
+- [designの記載基準を変えた前後の文書量とreviewの基準値・測り方](design-docs-criterion.md)
 - [design 文書の削減（A・C）の前後比較に使う run の review の差し戻しの指標（M7）の定義と、比べる区間・参考の値・想定効果](docs-reduction.md)（goal 194）
 - [review の 3 回目以降まで進む run で後の回の指摘が前の回に出なかった理由（取りこぼし・直しが入れた・task の大きさ・範囲の外）の判定と、人の send_back の後の resume の結末](review-rounds-resume-spike.md)（goal 227）
 - [人の send_back・review の差し戻しの後の resume が resume_timeout で receipt 無しに終わる原因（検証の流し直し・fresh_session の切り替え・background の待ち・その他）の判定](resume-timeout-spike.md)（goal 228）

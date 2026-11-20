@@ -174,7 +174,8 @@ validationを通ったrun（awaiting_integration）
 
 文書の照合は全体のreview（`builtin:acceptance`）だけが行う（[ADR-t2352-1](../../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)、[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)、[built-in](review-builtin.md)）。
 
-差し戻すのは差分が変えた文書と差分の食い違いと、差分が文書の不変条件・約束・境界を破ることだけで、触っていない文書の古い記述は`follow_ups`で返し`docs_drift`のdraftにする（[Draft planners](draft-planners.md)）。
+このrepositoryで文書を理由に差し戻す条件は[文書の規則](../../development/documents.md#文書を理由に差し戻す条件)が持つ。
+触っていない文書の古い記述は`follow_ups`で返し、`docs_drift`のdraftにする（[Draft planners](draft-planners.md)）。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
 
