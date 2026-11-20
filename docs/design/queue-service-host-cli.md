@@ -21,8 +21,9 @@ related:
 
 # Queue serviceのhostのCLI
 
-人・inbox・plannerがhostで打つ`dagq`とqueue serviceの責務の境界。
-workerとjobの経路は[Queue serviceのクライアントモード](queue-service.md#クライアントモード)、決定の理由は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)・[ADR-t3102-2](../adr/2026-10-22-t3102-2-only-the-queue-service-opens-the-db-schema-by-the-service-build-and-migration-order.md)・[ADR-t3102-3](../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)が持つ。
+人・hostのinbox・Claudeのruntimeのplannerが使うhostのCLIとqueue serviceの責務の境界。
+Codexのruntimeのplannerの`dagq`はworkerやheadlessのjobと同じく[クライアントモード](queue-service.md#クライアントモード)で動く。
+hostのCLIの決定の理由は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)・[ADR-t3102-2](../adr/2026-10-22-t3102-2-only-the-queue-service-opens-the-db-schema-by-the-service-build-and-migration-order.md)・[ADR-t3102-3](../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)が持つ。
 
 ## 送る範囲
 
@@ -124,7 +125,7 @@ roleを名乗るだけの要求は認めず、tokenが無ければ拒む（`Queu
 inboxとplannerの次の手は`domain::queue_service::missing_token_next`。
 互換の決定と開き直しの理由は[ADR-t3105-1](../adr/2026-10-23-t3105-1-reopen-the-inbox-once-after-the-host-cli-reaches-the-queue-service.md)、運用の手順はpluginの`dagq-recover`の`reference/update.md`を読む。
 
-inboxとplannerのtokenはserviceのdirのfileから送り、別のqueueへは送らない（`infrastructure::queue_service::issued_by`）。
+hostのinboxとClaudeのplannerのCLIはserviceのdirのfileからtokenを送り、別のqueueへは送らない（`infrastructure::queue_service::issued_by`）。
 sessionが続くかぎり自動更新とserviceの起動し直しをまたいで使える。
 inboxを開き直したときは前のsessionが新しいtokenを読めず、同時に開いても残るのは1つだけ。
 inboxはserviceが答えなければ開かない。
