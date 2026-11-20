@@ -1068,6 +1068,16 @@ impl<'s> JobDesk<'s> {
         )
     }
 
+    /// Make a newly opened hold ask visible to routing in this pass.
+    pub(in crate::application::supervise) fn remember_queue_hold(
+        &mut self,
+        ask: &crate::domain::Ask,
+    ) {
+        if self.queue_hold.is_none() {
+            *self.queue_hold = crate::domain::queue_hold::hold_of(ask);
+        }
+    }
+
     /// Why a headless job cannot start on `provider` now
     /// ([`job_unusable_of`]).
     pub(in crate::application::supervise) fn job_unusable(
@@ -1193,9 +1203,7 @@ impl<'s> JobDesk<'s> {
                 }
             }
         }
-        if self.queue_hold.is_none() {
-            *self.queue_hold = crate::domain::queue_hold::hold_of(&outcome.ask);
-        }
+        self.remember_queue_hold(&outcome.ask);
         warn!(ask_id = %outcome.ask.id, "the headless {} stopped at the {} wall: ask {} holds {} run(s) and job(s)", job.entry(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len());
         Ok(())
     }

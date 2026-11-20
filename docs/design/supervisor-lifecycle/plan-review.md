@@ -116,7 +116,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
   保留したtaskについてのplannerの問いの答えの行き先は`draft_planners::route_of`。
 - 開き直すplannerのeffortの段上げは[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)、同じgoalを再計画する依頼の待ちは[Spikeの再計画の依頼](plan-planners.md#spikeの再計画の依頼)。
 - 落とし穴: sessionが見つからないだけではplannerが終わった証拠にせず、wrapperで判定する（`PlanningState::planner_gone`）。
-- 落とし穴: plannerはClaudeのsessionなので、Claudeの控えの間はruntimeのplannerへの配送を止める。
+- 落とし穴: 宛先のplannerのproviderが控えられている間は配送を止め、使えるproviderのplannerへの配送は続ける。
 
 ## runtimeのplannerの終わり
 

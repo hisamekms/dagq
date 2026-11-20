@@ -49,7 +49,7 @@ use crate::domain::retention::{RetentionConfig, Swept};
 use crate::domain::{
     ActorContext, IdleProbe, PlannerCloseCode, PlannerId, PlannerOrigin, PlannerProbe,
     PlannerRoute, PlannerSession, PlannerState, ProposalId, Task,
-    actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
+    actor_model::{ActorLaunch, REVISE_ESCALATION},
     background_wrapper::{BACKGROUND_FLAG, BackgroundHandle, BackgroundSession},
     language::Language,
     turn::{self, LIMITS_FILE, TurnLimits, TurnMark, exit_path, request_path, turns_dir},
@@ -96,10 +96,8 @@ pub struct PlannerLaunch<'a> {
     /// The language every planner's prompt names (ADR-t616-2), resolved
     /// when the launch is made; `None` names none.
     pub language: Option<Language>,
-    /// `[roles.<role>]` of `dagq.toml` (ADR-0079 decision 7), read when
-    /// the launch is made: the model and effort a planner's agent starts
-    /// with.
-    pub roles: RoleModels,
+    /// The actor selected for this new planner, before revise escalation.
+    pub actor: ActorLaunch,
     /// The limits of a planner's turns, from the supervisor's `[stall]`
     /// settings, as a headless worker's.
     pub turn_limits: TurnLimits,
@@ -138,8 +136,8 @@ was opened";
 /// them) and the `reasons` plan review sent it back with. It submits as the
 /// runtime's planner (`DAGQ_PLANNER_ORIGIN=runtime`), which makes it the
 /// proposal's owner. Being opened for a plan review's `revise`, its agent
-/// starts one effort step above `[roles.runtime_planner]` (or `medium`),
-/// up to `xhigh` (ADR-0079 decision 7 (c)).
+/// starts one effort step above the selected provider's launch
+/// (ADR-t2930-1 decision 4).
 pub fn open_runtime_planner(
     launch: &PlannerLaunch<'_>,
     proposal: ProposalId,
@@ -171,10 +169,7 @@ pub fn open_runtime_planner(
         .and_then(|event| event.task_id);
     let prompt =
         runtime_planner_prompt(launch.db, proposal, tasks, reasons, review_anchor, carried)?;
-    let actor = launch
-        .roles
-        .launch(ModelRole::RuntimePlanner)
-        .escalated(REVISE_ESCALATION);
+    let actor = launch.actor.clone().escalated(REVISE_ESCALATION);
     let planner = launch
         .queue
         .open_planner(PlannerOrigin::Runtime, Some(proposal))?;
@@ -185,15 +180,14 @@ pub fn open_runtime_planner(
 /// Start the wrapper of a planner the runtime recorded for a draft
 /// (ADR-0041 decision 16, [`super::DraftPlannerStore::open_draft_planner`]),
 /// a finding or a planning request (`kind`: `draft`, `finding`, `request`)
-/// with `prompt`, its agent starting with `[roles.runtime_planner]`.
+/// with `prompt` on the selected provider.
 pub fn open_draft_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
     (kind, prompt): (&'static str, &FittedPrompt),
     snapshot: Option<&Path>,
 ) -> Result<OpenedPlanner> {
-    let actor = launch.roles.launch(ModelRole::RuntimePlanner);
-    launch_planner(launch, planner, (kind, prompt), &actor, snapshot)
+    launch_planner(launch, planner, (kind, prompt), &launch.actor, snapshot)
 }
 
 /// Record `planner` headless, write its directory and start its wrapper in
@@ -439,6 +433,8 @@ pub struct PlannerWrapper<'a> {
     pub pid: u32,
     /// The clock a headless planner's turns read their times on.
     pub clock: &'a dyn Clock,
+    /// How often the wrapper checks for newly written turns or agent output.
+    pub poll_interval: Duration,
     /// Where a headless planner's wrapper sends the steps of its turns,
     /// with the planner's telemetry token (ADR-t1662-3 decisions 1 and
     /// 10).
@@ -481,6 +477,7 @@ pub fn run_planner_session(
         processes,
         pid,
         clock,
+        poll_interval,
         telemetry,
         queue_service,
         read_snapshot,
@@ -546,6 +543,7 @@ pub fn run_planner_session(
             containers: None,
             background,
             clock,
+            poll_interval,
             telemetry: Some(telemetry),
             steps: Default::default(),
         }
@@ -732,15 +730,19 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         let marker = match probes.files.read_stamped(&marker_path)? {
             None => Err(MarkerState::Missing),
             Some((modified, _)) if modified < last_input => Err(MarkerState::Stale),
-            Some((modified, bytes)) => Ok((
-                IdleProbe {
-                    since: super::unix_seconds(modified),
-                    background_running: probes.signals.idle_hook(&bytes).background_running,
-                },
-                TurnMark::parse(&bytes),
-            )),
+            Some((modified, bytes)) => {
+                let mark = TurnMark::parse(&bytes);
+                Ok((
+                    IdleProbe {
+                        since: super::unix_seconds(modified),
+                        background_running: probes.signals.idle_hook(&bytes).background_running,
+                        at_provider_wall: mark.as_ref().is_some_and(TurnMark::at_provider_wall),
+                    },
+                    mark,
+                ))
+            }
         };
-        // A turn that met Claude's wall leaves the requests written behind
+        // A turn that met its provider's wall leaves the requests written behind
         // it waiting until its `provider retry` (the wrapper takes none
         // before it, task 1596): the planner is idle at the wall all the
         // same, for `tend_planner_walls` ([`turn::idle_after_turn`]).
@@ -750,7 +752,7 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
             // A headless planner has no screen (ADR-t1394-2 decision 3):
             // it is idle once the marker its wrapper wrote at the end of a
             // turn is newer than the last input stamped for it and no
-            // request waits in its `turns/` (or that turn met Claude's
+            // request waits in its `turns/` (or that turn met its provider's
             // wall, above), and at work until then (a
             // request written while a turn ran, such as `planner request`'s,
             // waits for the next turn; the wrapper stamps the input as it

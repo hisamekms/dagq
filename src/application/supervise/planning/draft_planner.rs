@@ -64,22 +64,25 @@ impl PlanningState {
                     let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                         continue;
                     };
+                    let provider_wait = self.planner_delivery_waits(env, view)?;
                     // An answer whose sending to it failed goes to a new
                     // planner, not to it again.
                     if let Some(workspace) = view.planner.workspace_id.as_deref()
                         && env.queue.ask_delivery_failed(ask.id, planner.id)?
                     {
-                        self.hand_over_undelivered_answer(env, view, workspace, ask.id)?;
+                        if !provider_wait {
+                            self.hand_over_undelivered_answer(env, view, workspace, ask.id)?;
+                        }
                         continue;
                     }
                     // The planner that asked is typed to once it stopped
                     // after asking; a question someone else opened about
                     // its draft waits only for it to be idle.
-                    // One that waits for Claude gets it after its retry
+                    // A planner at a provider wall takes its retry first
                     // (ADR-t1394-2 decision 5).
                     if answer_waits(
                         view.state,
-                        self.planner_at_wall(env, view).is_some(),
+                        provider_wait,
                         ask.asked_by == SessionRole::Planner.as_str(),
                         view.idle_since,
                         ask.created_at,
@@ -200,6 +203,9 @@ impl PlanningState {
         drafts: &[TaskId],
         answer: Option<&Ask>,
     ) -> Result<Option<String>> {
+        let Some(actor) = self.planner_launch(env) else {
+            return Ok(None);
+        };
         let (planner, key, members, exhausted) = match env
             .queue
             .open_draft_planner(drafts, answer.map(|ask| ask.id))?
@@ -233,7 +239,7 @@ impl PlanningState {
         };
         let id = planner.id;
         let opened = open_draft_planner(
-            &self.planner_launch(env),
+            &Self::planner_wrapper_launch(env, actor),
             *planner,
             ("draft", &prompt),
             None,

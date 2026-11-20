@@ -23,7 +23,7 @@
 //! the same turns in its planner directory: its initial prompt is the
 //! first turn, and the revise, the answer of its `planner_question` and the
 //! exit come as requests; its turns are events of the queue that name it
-//! by `planner_id`, and it stays on Claude ([`TurnOwner::Planner`]).
+//! by `planner_id`, and it stays on its original provider ([`TurnOwner::Planner`]).
 //!
 //! Silence stops a turn only when its reader supplies heartbeats; the
 //! other stop conditions are the time limit, a permission-mode mismatch,
@@ -234,6 +234,7 @@ pub(super) struct Turns<'a> {
     pub(super) background: bool,
     /// The clock the turns' stamps and the recorded times are read on.
     pub(super) clock: &'a dyn Clock,
+    pub(super) poll_interval: Duration,
     /// Reads where `dagq.toml` puts the worker, before each turn of a run:
     /// a worker set to the container is refused there and never started on
     /// the host, a run started on the host before the change too, and so is
@@ -847,7 +848,7 @@ impl<'a> Turns<'a> {
             // waits for its next request.
             self.steps
                 .tick(self.files, self.telemetry, self.db, now_millis(self.clock));
-            thread::sleep(self.provider.wait_interval());
+            thread::sleep(self.poll_interval);
         }
     }
 
@@ -895,7 +896,7 @@ impl<'a> Turns<'a> {
                         return true;
                     }
                     self.heartbeat();
-                    thread::sleep(self.provider.wait_interval());
+                    thread::sleep(self.poll_interval);
                 }
             }
         };
@@ -1430,10 +1431,7 @@ impl<'a> Turns<'a> {
         // A planner's turn names the model and effort its opener started
         // it with, which its session span keeps (ADR-t1394-2 decision 4).
         let launch = match &self.owner {
-            TurnOwner::Planner { launch, .. } if launch.effort.is_some() => {
-                Some(json!({"model": launch.model, "effort": launch.effort}))
-            }
-            TurnOwner::Planner { .. } => None,
+            TurnOwner::Planner { launch, .. } => Some(launch.to_value()),
             TurnOwner::Run(_) => None,
         };
         let mut payload = json!({
@@ -1784,7 +1782,7 @@ impl<'a> Turns<'a> {
             self.heartbeat();
             self.steps
                 .tick(self.files, self.telemetry, self.db, now_millis(self.clock));
-            thread::sleep(self.provider.wait_interval());
+            thread::sleep(self.poll_interval);
         }
     }
 }

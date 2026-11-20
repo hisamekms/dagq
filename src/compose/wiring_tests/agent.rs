@@ -17,9 +17,9 @@ use serde_json::{Value, json};
 use super::{git::FakeGit, host::exit};
 use crate::{
     application::{
-        AgentJobLaunch, AgentProvider, AgentSignals, CommandSpec, Exit, IdleHook, RunFiles,
-        RunReads, Spawned, Spawner, StepReader, Streams, TranscriptSource, Transcripts, TurnReader,
-        TurnTarget, memory_files::MemoryFiles,
+        AgentJobLaunch, AgentProvider, AgentReads, AgentSignals, CommandSpec, Exit, IdleHook,
+        RunFiles, RunReads, Spawned, Spawner, StepReader, Streams, TranscriptSource, Transcripts,
+        TurnReader, TurnTarget, memory_files::MemoryFiles,
     },
     domain::{
         RunId, TaskRun,
@@ -28,7 +28,7 @@ use crate::{
         transcript::{TRANSCRIPT_MISSING, Transcript, Unreadable},
         turn::TurnSession,
     },
-    infrastructure::{adapters::ClaudeCode, sqlite::SqliteQueue},
+    infrastructure::{adapters::ClaudeCode, codex::Codex, sqlite::SqliteQueue},
 };
 
 /// What a worker's turn does in its run's worktree (`worktree` of `git`)
@@ -220,6 +220,9 @@ pub(super) struct FakeAgent {
     /// until it says so.
     held_recovery: Mutex<VecDeque<mpsc::Receiver<()>>>,
     held_update: Mutex<Option<(u32, mpsc::Receiver<()>)>>,
+    /// Scripted Codex planner turns. None refuses the executable spawn.
+    pub(super) planner_turns: Mutex<VecDeque<Option<(String, i32)>>>,
+    pub(super) planner_commands: Mutex<Vec<CommandSpec>>,
 }
 
 impl FakeAgent {
@@ -257,6 +260,8 @@ impl FakeAgent {
             recovery_prompts: Mutex::default(),
             held_recovery: Mutex::default(),
             held_update: Mutex::default(),
+            planner_turns: Mutex::default(),
+            planner_commands: Mutex::default(),
         }
     }
 
@@ -434,6 +439,17 @@ impl FakeAgent {
             0 => bail!("the wiring test's script has no verdict"),
             1 => Ok(verdicts[0].clone()),
             _ => Ok(verdicts.pop_front().expect("a verdict")),
+        }
+    }
+
+    fn run_turn_hook(&self) {
+        let hook = self
+            .on_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
@@ -647,6 +663,66 @@ impl AgentProvider for FakeAgent {
     }
 }
 
+/// Codex's planner commands and output reader on the in-memory host.
+pub(super) struct CodexPlannerAgent(Codex);
+
+impl CodexPlannerAgent {
+    pub(super) fn new() -> Self {
+        Self(Codex {
+            executable: "wiring-codex".into(),
+            home: Some(PathBuf::from("/wiring/codex-home")),
+        })
+    }
+}
+
+impl AgentProvider for CodexPlannerAgent {
+    fn preflight(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
+        bail!("the planner's fake agent does not run reviews")
+    }
+
+    fn turn_command(
+        &self,
+        target: &TurnTarget<'_>,
+        prompt: &str,
+        session: TurnSession<'_>,
+    ) -> Result<CommandSpec> {
+        // The host adapter stages references on disk. The wiring has
+        // memory files and its fake process does not read those references.
+        self.0.planner_turn_command(target, prompt, session)
+    }
+
+    fn turn_reader(
+        &self,
+        toolchains: &crate::domain::toolchain::Toolchains,
+    ) -> Result<Box<dyn TurnReader>> {
+        self.0.turn_reader(toolchains)
+    }
+
+    fn turn_session_from_output(&self) -> bool {
+        self.0.turn_session_from_output()
+    }
+
+    fn apply_launch(
+        &self,
+        command: &mut CommandSpec,
+        launch: &crate::domain::actor_model::ActorLaunch,
+    ) {
+        self.0.apply_launch(command, launch);
+    }
+
+    fn restrict_role_job_reads(&self, command: &mut CommandSpec, reads: &AgentReads) -> Result<()> {
+        self.0.restrict_role_job_reads(command, reads)
+    }
+
+    fn reach_queue_service(&self, command: &mut CommandSpec, socket: &Path) {
+        self.0.reach_queue_service(command, socket);
+    }
+}
+
 impl AgentSignals for FakeAgent {
     fn job_failure(&self, output: &str) -> JobFailure {
         AgentSignals::job_failure(&self.claude, output)
@@ -705,6 +781,24 @@ impl Spawner for FakeAgent {
         let args: Vec<PathBuf> = command.get_args().map(PathBuf::from).collect();
         let mut code = 0;
         let stdout = match program.as_str() {
+            "wiring-codex" => {
+                self.run_turn_hook();
+                self.planner_commands.lock().unwrap().push(command.clone());
+                let (output, status) = self
+                    .planner_turns
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("unexpected Codex planner turn")?
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "the wiring test refuses to spawn Codex",
+                        )
+                    })?;
+                code = status;
+                output
+            }
             TURN => {
                 let [run_dir, session] = args.as_slice() else {
                     bail!("a worker's turn names its run directory and session");
@@ -713,14 +807,7 @@ impl Spawner for FakeAgent {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(command.get_stdin().unwrap_or_default().to_owned());
-                let hook = self
-                    .on_turn
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(hook) = hook {
-                    hook();
-                }
+                self.run_turn_hook();
                 let turn = self.turn(run_dir, &session.to_string_lossy())?;
                 let held = self
                     .held_turn

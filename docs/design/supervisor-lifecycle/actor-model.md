@@ -79,6 +79,7 @@ effort = "high"         # 省けば既定
   どちらも使えなければ起動せずに待つ。
   `provider`を書いたこと（`switchable`）は失敗を使えないことに分類してそのproviderを控えることを決め、もう一方へ移ってよいかは別の引数の`[provider_fallback] jobs`（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）が決める: `jobs = false`なら`job_route`は使えない理由（`SwitchReason::unusable`）ではもう一方へ移さず`JobRoute::Wait`を返し、控えが解けた後に同じproviderで起動する（Claudeを使わない運転（ADR-t1204-1）の`Disabled`だけはoffでも移る。[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」）。
   これを使うjobと、Claudeを使わない運転で切り替え先が無いときのjobごとの振る舞いは各jobの文書が持つ（[Goal review](goal-review.md#起動とprovider)の「起動とprovider」と「verdictの適用と失敗」、[Review](review.md)（[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)）、[Plan review](plan-review.md#codexで動かす)、[Throughput review](throughput-review.md#codexで動かす)、[Observer](observer.md#codexで動かす)、[Triage](triage.md#codexで動かす)・[生きているsessionの復旧job](background-recovery-job.md#codexで動かす)）。
+  runtimeのplannerも新たに立てるときはこの規則に従う（[Plan planners](plan-planners.md#runtimeのplannerの経路)の「使えないとき」）。
   他の役割は`provider = "claude"`を書いても、`provider`を書かない役割と同じ起動と控え。
   `setup_review`は`job_route`を通らず、`provider`のproviderが使えなくても切り替えず待たず、起動の失敗や0でない終了をそのまま人かinboxのコマンドの誤りにする（[setup-review](setup-review.md#権限)）
 - **inbox**: `[roles.inbox]`がinboxの既定のproviderとmodelで、`dagq inbox`の起動の引数がその起動だけ上書きし、どちらも無ければ今のClaudeのinboxと同じに開く（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1。`actor_model::inbox_launch`と`lifecycle::inbox_route`、[`up` / `down`](up-down.md)の「`dagq inbox`」）。

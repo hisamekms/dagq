@@ -75,12 +75,23 @@ pub fn planner_session(
             home,
         }),
     };
-    let launch = ActorLaunch {
-        provider: kind,
-        model,
-        effort,
-        ..ActorLaunch::default_of(ModelRole::RuntimePlanner)
-    };
+    // The opener passes the launch's provenance alongside the wrapper's
+    // arguments. Direct invocations have only those arguments.
+    let launch = std::env::var(crate::domain::sessions::LAUNCH_ENV)
+        .ok()
+        .and_then(|launch| serde_json::from_str::<ActorLaunch>(&launch).ok())
+        .filter(|launch| {
+            launch.role == ModelRole::RuntimePlanner
+                && launch.provider == kind
+                && launch.model == model
+                && launch.effort == effort
+        })
+        .unwrap_or(ActorLaunch {
+            provider: kind,
+            model,
+            effort,
+            ..ActorLaunch::default_of(ModelRole::RuntimePlanner)
+        });
     let mut queue = crate::infrastructure::queue_service::ServiceWrapperStore::of_queue(
         db,
         crate::domain::session_step::StepTarget::of(
@@ -88,7 +99,7 @@ pub fn planner_session(
             id.as_i64(),
         ),
     );
-    planner_session_on(
+    planner_session_on_host(
         &mut queue,
         db,
         id,
@@ -129,12 +140,12 @@ pub fn planner_session_with_provider(
         launch.model = Some(model.to_owned());
         launch.effort = Some(effort.to_owned());
     }
-    planner_session_on(&mut queue, db, id, provider, plugin_dir, &launch, None)
+    planner_session_on_host(&mut queue, db, id, provider, plugin_dir, &launch, None)
 }
 
 /// The wrapper of planner `id` of the queue at `db`, reading and recording
 /// on `queue`.
-fn planner_session_on(
+fn planner_session_on_host(
     queue: &mut dyn crate::application::session::WrapperStore,
     db: &Path,
     id: PlannerId,
@@ -144,7 +155,7 @@ fn planner_session_on(
     read_snapshot: Option<&Path>,
 ) -> Result<Value> {
     let cwd = std::env::current_dir().context("working directory is unavailable")?;
-    planner::run_planner_session(
+    super::planner_session_on(
         PlannerWrapper {
             queue,
             db,
@@ -154,12 +165,12 @@ fn planner_session_on(
             processes: &SystemProcesses,
             pid: std::process::id(),
             clock: &crate::infrastructure::clock::SystemClock,
+            poll_interval: provider.wait_interval(),
             telemetry: &crate::infrastructure::queue_service::SystemServiceAccess,
             queue_service: Some(&crate::infrastructure::queue_service::HandedServiceAccess),
             read_snapshot,
         },
         id,
-        &planner::planner_dir(&planners_dir(db), id),
         &cwd,
         plugin_dir,
         launch,

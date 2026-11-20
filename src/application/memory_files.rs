@@ -130,6 +130,19 @@ impl MemoryFiles {
         }
     }
 
+    /// Align ticking files with a test's queue clock before running a wrapper.
+    #[cfg(test)]
+    pub(crate) fn advance_clock_to(&self, now: SystemTime) {
+        let ticks = self.ticks.as_ref().expect("ticking files");
+        let elapsed = now
+            .duration_since(UNIX_EPOCH + START)
+            .expect("file clock start");
+        ticks.fetch_max(
+            u64::try_from(elapsed.as_millis()).expect("file clock ticks"),
+            Ordering::SeqCst,
+        );
+    }
+
     /// Inject a write failure only for the named file suffix.
     pub fn reject_writes_ending_with(&self, suffix: &str) {
         *self.rejected_suffix.lock().unwrap() = Some(suffix.to_owned());

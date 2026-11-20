@@ -83,7 +83,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
     それ以外でidleになれば終了の依頼を受けてwrapperがsessionを終え、行は閉じられ、まだ動いているbackgroundのwrapperは止められる（`end_runtime_planners`）。
     idleはwrapperがturnの終わりに書くidle markerで判じ、時間は`--planner-timeout`でなくturnの`[stall]`の上限で見る。
     wrapperがturnを`[stall]`の上限で止めたときは、plannerごとに1回`planner_unresponsive`がinboxに届き、止めたturnでsessionが終わるので、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。
-    最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わったplannerは、Claudeを待って終了の依頼を受けず、決めずに終わったplannerにも数えない（`provider_wall`）。
+    最後のturnがproviderの壁で終わったplannerは、そのproviderを待って終了の依頼を受けず、決めずに終わったplannerにも数えない（`provider_wall`）。
     どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。
     未回答の`planner_question`のほかに待つものが無いidleのplannerは、人の答えだけを待つとして終了の依頼を受け、行は`runtime_answer_wait`で閉じ、askは開いたまま残る（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1。[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「人の答えだけを待つplannerの終わり」）。
     findingは2のとおりそのaskが閉じるまで対象にならず、answerで9の新しいplannerが続ける。
@@ -112,7 +112,7 @@ findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればp
 [ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)。
 人が開くplannerは無く、`dagq plan`は何も開かずにinboxへの計画の依頼の案内を付けて拒む（ADR-t1394-1）。
 人が開いたplannerの閉じていない行は、supervisorが閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
-非対話の経路（ADR-t1394-2の決定1・2・3・5）では、answerは次のturnの依頼として届き、読み終えたかとClaudeを待つplannerの扱いは[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」が持つ。
+非対話の経路（ADR-t1394-2の決定1・2・3・5）では、answerは次のturnの依頼として届き、読み終えたかとproviderを待つplannerの扱いは[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」が持つ。
 
 - 9の「runtimeのplannerが一度も立っていないfindingのanswerは人」は、人が開いたplannerの質問だけに当たる。
   findingを決める経路は、inboxがそのfindingを参照にした計画の依頼を記録し、依頼のplannerが`submit --finding`か`finding dismiss`で決めるものになる。

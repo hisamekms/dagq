@@ -200,7 +200,7 @@ ADR-t813-2決定2〜6と、切り替えを止める設定の[ADR-t1857-1](../adr
 - 約束: Claudeの認証と利用上限の控えは`queue_hold`のaskで、常に人に届く（[Queue hold](supervisor-lifecycle/queue-hold.md)）。
 - 控えの間のresumeの待ちは[needs_session](supervisor-lifecycle/needs-session.md)の「providerだけの試行」。
 - 落とし穴: 切り替えた後は会話が引き継がれない（`domain::turn::new_session_prompt`）。
-- runtimeのplannerは同じ壁で待つが、providerは切り替えない（[Plan planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
+- runtimeのplannerは起動先を選び、開始済みのsessionは同じproviderの控えを待つ（[Plan planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
 - reviewの起動し直しは[Review](supervisor-lifecycle/review.md)と[Goal review](supervisor-lifecycle/goal-review.md)、設定は[Run environment](supervisor-lifecycle/run-environment.md)。
 - 約束: providerの組の試しは切り替えの規則を変えず、割り当てどおりに動いた組を主に、切り替えたrunを割り当てた群ごとの別の層に、割り当てた群を副に数える（[ADR-t4118-1](../adr/2026-11-04-t4118-1-provider-pair-primary-and-switched-strata.md)）。
   環境が原因のrunは、切り替えの判定と別の軸で主から外し、割り当てた群ごとの別の層に並べ、副には残す（[ADR-t4163-1](../adr/2026-11-05-t4163-1-environment-caused-failures-are-judged-by-the-recovery-job-and-kept-in-their-own-stratum.md)）。
@@ -242,5 +242,6 @@ folder trust以外のダイアログの扱いは`adapters.rs`の`stop_hook_setti
 `--no-claude`はClaudeを起動しない明示的な運転方針で、既定は無効（[ADR-t1204-1](../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)）。
 
 - 入口: `provider_switch::held`・`actor_model::job_start_route`・`HostActorExecutor`。
-- 約束: 方針の違うsupervisorは再利用・引き継ぎせず先にdrainを求め、workerもjobもClaudeへ戻さず、Codexで続けられないjobは役割の手動の経路に渡し、plannerは起動せず人が代行する。
+- 約束: 方針の違うsupervisorは再利用・引き継ぎせず先にdrainを求め、workerもjobもClaudeへ戻さず、Codexで続けられないjobは役割の手動の経路に渡す。
+  runtimeのplannerはCodexが使えるときに立ち、Codexが使えない間は仕事を待ちに残す。
 - `dagq inbox`はClaudeのinboxを開かず、Codexで開くか、開けなければ理由を出す（[`up` / `down`](supervisor-lifecycle/up-down.md#dagq-inbox)）。

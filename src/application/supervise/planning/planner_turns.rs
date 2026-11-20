@@ -1,17 +1,9 @@
-//! How the turns of a headless planner of the runtime's ended, as the
-//! supervisor acts on them (ADR-t1394-2 decisions 3 and 5): a turn that
-//! failed at its provider's login, usage limit or start leaves the planner
-//! waiting in the queue's hold, neither ended nor counted as a planner that
-//! ended undecided, and once the hold is gone the call it failed at is made
-//! again as its next turn; a turn its wrapper stopped at the `[stall]`
-//! limits tells the inbox.
-//!
-//! While Claude is held, the supervisor's planner pass does not run at
-//! all, and a planner that waits at the wall gets no revise or answer
-//! either: written behind the failed call, such a request would hide it
-//! from the retry, so it is written once the retry's turn ended. The
-//! provider is not switched for a planner, and under `--no-claude` no
-//! planner is opened.
+//! An existing runtime planner keeps its provider (ADR-t2930-1 decision
+//! 5). At a wall it stays open and its failed call takes priority once
+//! that provider's hold ends. Only Claude's login and usage limit open
+//! the queue's hold ask. Revise and answer delivery waits on the
+//! destination's provider and on its failed turn's retry. A turn stopped
+//! by the wrapper's `[stall]` limits is reported to the inbox.
 
 use super::headless::{last_turn, provider_failure};
 use super::provider::{PROVIDER_RETRY, retry_text};
@@ -51,27 +43,41 @@ enum WallStep {
         reason: SwitchReason,
         wall: Option<Wall>,
     },
-    /// It waits already: repeat its call once the provider can be used.
+    /// The recorded hold ended: repeat the failed call.
     Retry(SwitchReason),
 }
 
 /// [`WallStep`] for a turn that failed with `failure`, the retry after it
 /// written and finished (`answered`) or not, and `provider_waiting` of the
-/// turn recorded (`waiting`) or not.
-fn wall_step(failure: TurnFailure, answered: bool, waiting: bool) -> WallStep {
+/// turn recorded (`waiting`) or not. A recorded wait permits a retry once
+/// that provider's hold ends.
+fn wall_step(
+    provider: Provider,
+    failure: TurnFailure,
+    answered: bool,
+    waiting: bool,
+    held: bool,
+) -> WallStep {
     let Some(reason) = SwitchReason::of_failure(failure) else {
         return WallStep::Nothing;
     };
-    if answered {
+    if answered || (waiting && held) {
         WallStep::Nothing
     } else if waiting {
         WallStep::Retry(reason)
     } else {
         WallStep::Hold {
             reason,
-            wall: provider_switch::wall_of(reason),
+            wall: provider_switch::wall_of(reason).filter(|_| provider == Provider::Claude),
         }
     }
+}
+
+fn turn_provider(payload: &Value) -> Provider {
+    payload["provider"]
+        .as_str()
+        .and_then(|provider| provider.parse().ok())
+        .unwrap_or(Provider::Claude)
 }
 
 /// The payload of `provider_waiting` of planner `id` whose turn `turn`
@@ -175,15 +181,36 @@ impl PlanningState {
     /// The provider failure the idle headless planner of `view` stopped at
     /// in its last turn, if it did: it waits at its provider's hold rather than being
     /// done (ADR-t1394-2 decision 5).
-    pub(in crate::application::supervise) fn planner_at_wall(
-        &self,
-        env: &PlanningEnv<'_>,
-        view: &PlannerView,
-    ) -> Option<TurnFailure> {
+    fn planner_at_wall(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> Option<TurnFailure> {
         if view.state != PlannerState::Idle {
             return None;
         }
         provider_failure(self.planner_last_turn(env, view))
+    }
+
+    /// Whether to leave an idle planner's ordinary inputs waiting. For
+    /// old turn records without a provider, the planner ran on Claude.
+    pub(super) fn planner_delivery_waits(
+        &self,
+        env: &PlanningEnv<'_>,
+        view: &PlannerView,
+    ) -> Result<bool> {
+        if self.planner_at_wall(env, view).is_some() {
+            return Ok(true);
+        }
+        if [Provider::Claude, Provider::Codex]
+            .into_iter()
+            .all(|provider| env.jobs.provider_held(provider).is_none())
+        {
+            return Ok(false);
+        }
+        let provider = env
+            .queue
+            .planner_turn_events(view.planner.id)?
+            .iter()
+            .rfind(|event| event.kind == EventKind::TurnStarted)
+            .map_or(Provider::Claude, |event| turn_provider(&event.payload));
+        Ok(env.jobs.provider_held(provider).is_some())
     }
 
     /// Hold or go on with each idle headless planner of the runtime's whose
@@ -228,25 +255,24 @@ impl PlanningState {
         else {
             return Ok(());
         };
-        let provider = if finished["provider"] == Provider::Codex.as_str() {
-            Provider::Codex
-        } else {
-            Provider::Claude
-        };
+        let provider = turn_provider(&finished);
         let turn = finished["turn"].as_u64().unwrap_or(0);
         let message = finished["message"].as_str().unwrap_or("no message");
         let reason = match wall_step(
+            provider,
             failure,
             // The retry after the turn answers it ([`wall_answered`]).
             wall_answered(&events, finished_at),
             provider_switch::waiting_on(&events, turn),
+            env.jobs.provider_held(provider).is_some(),
         ) {
             WallStep::Nothing => return Ok(()),
             WallStep::Hold { reason, wall } => {
                 let ask_id = match wall {
-                    Some(wall) if provider == Provider::Claude => {
+                    Some(wall) => {
                         let (outcome, _) =
                             ask::hold(&mut *env.queue, NewHold::wall(wall, None, None))?;
+                        env.jobs.remember_queue_hold(&outcome.ask);
                         Some(outcome.ask.id)
                     }
                     _ => {
@@ -272,9 +298,6 @@ impl PlanningState {
             }
             WallStep::Retry(reason) => reason,
         };
-        if env.jobs.provider_held(provider).is_some() {
-            return Ok(());
-        }
         // The call that first met the wall, which a retry that met it
         // again carries too.
         let undelivered = request_to_retry(&events).and_then(|seq| {
@@ -403,44 +426,44 @@ mod tests {
     // checks the wiring of the hold and the retry.
     #[test]
     fn a_turn_at_the_wall_holds_at_first_sight_then_is_made_again_once_and_only_then() {
-        // A login or a usage limit holds in the queue's hold ask of its
-        // wall; an agent that did not start holds Claude itself.
-        for (failure, reason, wall) in [
-            (
-                TurnFailure::Authentication,
-                SwitchReason::Authentication,
-                Some(Wall::Authentication),
-            ),
-            (
-                TurnFailure::UsageLimit,
-                SwitchReason::UsageLimit,
-                Some(Wall::UsageLimit),
-            ),
-            (TurnFailure::Launch, SwitchReason::LaunchFailed, None),
-        ] {
-            assert_eq!(
-                wall_step(failure, false, false),
-                WallStep::Hold { reason, wall },
-                "{failure:?}"
-            );
-            // Waiting already: the call is made again.
-            assert_eq!(
-                wall_step(failure, false, true),
-                WallStep::Retry(reason),
-                "{failure:?}"
-            );
-            // The retry after the turn answered it.
-            for waiting in [false, true] {
-                assert_eq!(wall_step(failure, true, waiting), WallStep::Nothing);
-            }
-        }
-        // A failure that is not the provider's is not tended here.
-        for failure in [TurnFailure::Model, TurnFailure::Sandbox, TurnFailure::Other] {
-            for (answered, waiting) in [(false, false), (false, true), (true, false)] {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for (failure, reason, claude_wall) in [
+                (
+                    TurnFailure::Authentication,
+                    SwitchReason::Authentication,
+                    Some(Wall::Authentication),
+                ),
+                (
+                    TurnFailure::UsageLimit,
+                    SwitchReason::UsageLimit,
+                    Some(Wall::UsageLimit),
+                ),
+                (TurnFailure::Launch, SwitchReason::LaunchFailed, None),
+            ] {
+                let wall = claude_wall.filter(|_| provider == Provider::Claude);
                 assert_eq!(
-                    wall_step(failure, answered, waiting),
-                    WallStep::Nothing,
-                    "{failure:?}"
+                    wall_step(provider, failure, false, false, false),
+                    WallStep::Hold { reason, wall }
+                );
+                assert_eq!(
+                    wall_step(provider, failure, false, true, true),
+                    WallStep::Nothing
+                );
+                assert_eq!(
+                    wall_step(provider, failure, false, true, false),
+                    WallStep::Retry(reason)
+                );
+                for waiting in [false, true] {
+                    assert_eq!(
+                        wall_step(provider, failure, true, waiting, false),
+                        WallStep::Nothing
+                    );
+                }
+            }
+            for failure in [TurnFailure::Model, TurnFailure::Sandbox, TurnFailure::Other] {
+                assert_eq!(
+                    wall_step(provider, failure, false, false, false),
+                    WallStep::Nothing
                 );
             }
         }
@@ -488,7 +511,13 @@ mod tests {
             retry(4),
         ];
         assert_eq!(
-            wall_step(TurnFailure::UsageLimit, wall_answered(&late, 1), false),
+            wall_step(
+                Provider::Claude,
+                TurnFailure::UsageLimit,
+                wall_answered(&late, 1),
+                false,
+                false
+            ),
             WallStep::Hold {
                 reason: SwitchReason::UsageLimit,
                 wall: Some(Wall::UsageLimit),
@@ -498,7 +527,13 @@ mod tests {
         // answers it as before.
         let answered = [late, vec![retry(5)]].concat();
         assert_eq!(
-            wall_step(TurnFailure::UsageLimit, wall_answered(&answered, 1), false),
+            wall_step(
+                Provider::Claude,
+                TurnFailure::UsageLimit,
+                wall_answered(&answered, 1),
+                false,
+                false
+            ),
             WallStep::Nothing
         );
     }

@@ -201,7 +201,9 @@ fn launch<'a>(
         codex_home: None,
         plugin_dir: plugin_dir.as_deref(),
         language,
-        roles: Default::default(),
+        actor: dagq::domain::actor_model::ActorLaunch::default_of(
+            dagq::domain::actor_model::ModelRole::RuntimePlanner,
+        ),
         turn_limits: dagq::domain::stall::StallConfig::default().turn_limits(),
         telemetry: Some(dagq::application::telemetry_tokens::TargetTelemetry {
             // This test's process keeps no service: the session is

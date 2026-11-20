@@ -89,8 +89,10 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   idleのまま仕事が終わらないものは、reviseの時間切れが見る（[Plan review](plan-review.md#reviseの配送)）。
 - **人の答えだけを待つplannerの終わり**: 残るのが自分の未回答の`planner_question`（と並んで渡されたrevise）だけなら、終了の依頼を置いて枠を空け、決めずに終わった回数に数えない（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)、`planner_answer_wait`）。
   answerは新しいplannerの初期promptで運ばれる（`PlannerHandover`）。
-- **使えないとき**: 壁に当たったplannerはそのproviderの控えを待ち、解けたら同じproviderで失敗した依頼をやり直す（`planner_turns.rs`）。
-  壁の後に取る依頼の順は`turn::request_to_take`が持つ。
+- **使えないとき**: 新しいplannerは、明示したproviderが使えなければjobと同じ切り替えの規則に従い、使える起動先が戻るまで仕事を待ちに残す（[ADR-t2930-1](../../adr/2026-11-19-t2930-1-headless-codex-runtime-planner.md)決定5）。
+  `--no-claude`では、設定がClaudeか未指定でもCodexが使えればplannerを立てる。
+  開始済みのplannerは自分のproviderの控えが解けるまで待ち、壁で失敗した依頼があれば同じproviderで先にやり直す（`planner_turns.rs`）。
+  壁で待つ間は、決めずに終わった回数に数えない。
 - **区間**: providerごとにturnから稼働時間とtokenを取る（`domain::sessions::RUNTIME_PLANNER`、[計測](../measurement.md)）。
   Codexの実際のmodelはthreadのrolloutから読み、観測できなかったときは要求modelと区別する。
   `stats`の区間と`kpi --by provider`でplannerのproviderを比較できる。
@@ -119,7 +121,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 5. **`planner_question`**: 依頼のaskを開けるのはその依頼の閉じていないruntimeのplanner自身だけである（[Authorization](../authorization.md#対話と記録のコマンドapplication)）。
    answerの行き先は`plan_requests.rs`の`route_of`、配送は`request_planner.rs`が持つ。
 6. **終わりと時間切れ**: 上の[runtimeのplannerの経路](#runtimeのplannerの経路)に従う。
-7. **人に見せる**: `--no-claude`の間などplannerが立たないあいだも、inboxの`status`（`--role`なしを含む）が`open`の依頼を古い順に、閉じていないplannerと`planner_question`から待っている理由を添えて出す（ADR-t1394-1のConsequences）。
+7. **人に見せる**: plannerが立たないあいだも、inboxの`status`（`--role`なしを含む）が`open`の依頼を古い順に、閉じていないplannerと`planner_question`から待っている理由を添えて出す（ADR-t1394-1のConsequences）。
    plannerの`status`には出さない。
    欄の意味は`application::health::requests`のdoc commentが持つ。
 

@@ -631,6 +631,42 @@ pub fn job_route(
     }
 }
 
+/// The route for a new runtime planner. A start carries the selected launch
+/// and any switch reason. A wait names the unavailable providers considered.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RuntimePlannerRoute {
+    Start(ActorLaunch),
+    NoTarget(Vec<(Provider, SwitchReason)>),
+}
+
+/// Apply the headless job rules to a new planner (ADR-t2930-1 decision 5).
+/// Explicitly disabling Claude also sends an unnamed planner to Codex when
+/// available. An existing planner's turns keep their original provider.
+pub fn runtime_planner_route(
+    launch: &ActorLaunch,
+    switchable: bool,
+    no_claude: bool,
+    fallback: bool,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> RuntimePlannerRoute {
+    let unusable = |provider| match (no_claude, provider) {
+        (true, Provider::Claude) => Some(SwitchReason::Disabled),
+        _ => unusable(provider),
+    };
+    match job_route(launch, switchable || no_claude, fallback, unusable) {
+        JobRoute::Start(launch) => RuntimePlannerRoute::Start(launch),
+        JobRoute::Wait { provider, reason } => {
+            let mut reasons = vec![(provider, reason)];
+            if (switchable || no_claude)
+                && let Some(reason) = unusable(provider.other())
+            {
+                reasons.push((provider.other(), reason));
+            }
+            RuntimePlannerRoute::NoTarget(reasons)
+        }
+    }
+}
+
 /// What [`job_start_route`] does under `--no-claude` with a job whose role
 /// names no provider, which runs on Claude only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -887,6 +923,98 @@ pub const fn records_unusable(provider: Provider, switchable: bool, fallback: bo
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn runtime_planner_starts_on_its_configured_provider_or_uses_the_jobs_fallback() {
+        use RuntimePlannerRoute::{NoTarget, Start};
+        for (configured, other) in [
+            (Provider::Codex, Provider::Claude),
+            (Provider::Claude, Provider::Codex),
+        ] {
+            let mut roles = RoleModels::default();
+            let role = roles.entry(ModelRole::RuntimePlanner);
+            role.provider = Some(configured);
+            role.model = Some("configured-model".into());
+            role.effort = Some("low".into());
+            let launch = roles.launch(ModelRole::RuntimePlanner);
+            for fallback in [true, false] {
+                assert_eq!(
+                    runtime_planner_route(&launch, true, false, fallback, |_| None),
+                    Start(launch.clone())
+                );
+            }
+            for reason in [
+                SwitchReason::ExecutableMissing,
+                SwitchReason::LaunchFailed,
+                SwitchReason::Authentication,
+                SwitchReason::UsageLimit,
+            ] {
+                let held = |provider| (provider == configured).then_some(reason);
+                let Start(moved) = runtime_planner_route(&launch, true, false, true, held) else {
+                    panic!("{configured:?} should move for {reason:?}");
+                };
+                assert_eq!(
+                    (moved.provider, moved.switched_from, moved.switch_reason),
+                    (other, Some(configured), Some(reason))
+                );
+                assert_eq!(
+                    (moved.model, moved.effort, moved.source),
+                    (None, None, LaunchSource::Default)
+                );
+                assert_eq!(
+                    runtime_planner_route(&launch, true, false, false, held),
+                    NoTarget(vec![(configured, reason)])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_planner_without_a_named_provider_waits_and_no_claude_always_uses_codex() {
+        use RuntimePlannerRoute::{NoTarget, Start};
+        let mut roles = RoleModels::default();
+        let role = ModelRole::RuntimePlanner;
+        let unavailable =
+            |provider| (provider == Provider::Claude).then_some(SwitchReason::Authentication);
+        assert_eq!(
+            runtime_planner_route(&roles.launch(role), false, false, true, unavailable),
+            NoTarget(vec![(Provider::Claude, SwitchReason::Authentication)])
+        );
+        for configured in [None, Some(Provider::Claude), Some(Provider::Codex)] {
+            roles.entry(role).provider = configured;
+            let launch = roles.launch(role);
+            for fallback in [true, false] {
+                let Start(chosen) =
+                    runtime_planner_route(&launch, configured.is_some(), true, fallback, |_| None)
+                else {
+                    panic!("Codex should start under --no-claude");
+                };
+                assert_eq!(chosen.provider, Provider::Codex);
+                if configured == Some(Provider::Codex) {
+                    assert_eq!(chosen, launch);
+                } else {
+                    assert_eq!(chosen.switched_from, Some(Provider::Claude));
+                    assert_eq!(chosen.switch_reason, Some(SwitchReason::Disabled));
+                    assert_eq!((chosen.model, chosen.effort), (None, None));
+                }
+                let unavailable = |provider| {
+                    (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
+                };
+                let NoTarget(reasons) = runtime_planner_route(
+                    &launch,
+                    configured.is_some(),
+                    true,
+                    fallback,
+                    unavailable,
+                ) else {
+                    panic!("neither provider may start");
+                };
+                assert_eq!(reasons.len(), 2);
+                assert!(reasons.contains(&(Provider::Claude, SwitchReason::Disabled)));
+                assert!(reasons.contains(&(Provider::Codex, SwitchReason::ExecutableMissing)));
+            }
+        }
+    }
 
     /// With neither `[roles.inbox]` nor an argument the inbox starts as
     /// before: Claude, nothing given, the default's source.

@@ -97,6 +97,9 @@ pub struct PlannerProbe {
 pub struct IdleProbe {
     pub since: i64,
     pub background_running: bool,
+    /// The wrapper recorded a turn at its provider's wall, possibly
+    /// before it could start its first agent process.
+    pub at_provider_wall: bool,
 }
 
 impl PlannerSession {
@@ -109,11 +112,10 @@ impl PlannerSession {
     /// `lost`, while a background wrapper is `lost` only once its process
     /// is gone, a late heartbeat being no sign of its death (ADR-t1404-1
     /// decisions 2 and 10); before the wrapper registers it is
-    /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed; a live
-    /// wrapper that has not recorded its agent's pid is `opening` too. A
-    /// live agent is `idle` once its `Stop` hook wrote the marker with no
-    /// background work left, and `working` without one (or with one older
-    /// than its last input).
+    /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed. A live
+    /// wrapper without an agent pid is still opening until it records a
+    /// turn at a provider wall. An agent is `idle` when its current marker
+    /// shows no background work remains, and `working` otherwise.
     pub fn state(&self, probe: &PlannerProbe) -> PlannerState {
         if self.closed_at.is_some() || (self.workspace_id.is_some() && !probe.workspace_listed) {
             return PlannerState::Closed;
@@ -143,10 +145,12 @@ impl PlannerSession {
         if lost {
             return PlannerState::Lost;
         }
-        if self.agent_pid.is_none() {
-            // The wrapper runs but has not recorded its agent yet: no idle
-            // marker is the agent's (task 1329), and input sent now would
-            // reach no agent.
+        if self.agent_pid.is_none()
+            && !(self.route == PlannerRoute::Headless
+                && probe.idle.is_some_and(|idle| idle.at_provider_wall))
+        {
+            // Without an agent pid, only the wrapper's recorded provider
+            // wall makes a headless planner idle and eligible for retry.
             return PlannerState::Opening;
         }
         match probe.idle {
@@ -394,6 +398,7 @@ mod tests {
         let idle = IdleProbe {
             since: 105,
             background_running: false,
+            at_provider_wall: false,
         };
         let idle_probe = PlannerProbe {
             idle: Some(idle),
@@ -571,6 +576,32 @@ mod tests {
     }
 
     #[test]
+    fn a_live_headless_wrapper_that_could_not_spawn_its_first_agent_can_wait_at_the_wall() {
+        let planner = PlannerSession {
+            origin: PlannerOrigin::Runtime,
+            route: PlannerRoute::Headless,
+            agent_pid: None,
+            ..session()
+        };
+        let wall = PlannerProbe {
+            idle: Some(IdleProbe {
+                since: 105,
+                background_running: false,
+                at_provider_wall: true,
+            }),
+            ..probe()
+        };
+        assert_eq!(planner.state(&wall), PlannerState::Idle);
+        assert_eq!(
+            planner.state(&PlannerProbe {
+                wrapper_alive: false,
+                ..wall
+            }),
+            PlannerState::Lost
+        );
+    }
+
+    #[test]
     fn a_planner_opens_exits_and_closes() {
         let opening = PlannerSession {
             workspace_id: None,
@@ -584,8 +615,8 @@ mod tests {
             ..session()
         };
         assert_eq!(unregistered.state(&probe()), PlannerState::Opening);
-        // A wrapper that has not recorded its agent is opening, whatever an
-        // idle marker shows (task 1329).
+        // An ordinary idle marker before any agent is registered leaves
+        // the planner opening.
         let agentless = PlannerSession {
             agent_pid: None,
             ..session()
@@ -593,6 +624,7 @@ mod tests {
         let idle = IdleProbe {
             since: 105,
             background_running: false,
+            at_provider_wall: false,
         };
         for seen in [
             probe(),

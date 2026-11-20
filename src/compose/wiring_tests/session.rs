@@ -5,7 +5,7 @@
 //! joined by the test ([`FakeSessions::join_by`]).
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{
-    agent::FakeAgent,
+    agent::{CodexPlannerAgent, FakeAgent},
     host::{FakeProcesses, Nothing},
     service::MemoryTokens,
 };
@@ -71,6 +71,9 @@ pub(super) struct FakeSessions {
     /// Whether a new run's wrapper fails to start, as a launch that the
     /// host refused.
     pub(super) fail_claims: std::sync::atomic::AtomicBool,
+    pub(super) fail_planners: std::sync::atomic::AtomicBool,
+    pub(super) drive_codex_planners: std::sync::atomic::AtomicBool,
+    planner_commands: Mutex<Vec<String>>,
 }
 
 impl FakeSessions {
@@ -93,7 +96,10 @@ impl FakeSessions {
             planners: Mutex::default(),
             launch_gate: Mutex::default(),
             fail_resumes: std::sync::atomic::AtomicBool::new(false),
-            fail_claims: std::sync::atomic::AtomicBool::new(false),
+            fail_claims: Default::default(),
+            fail_planners: Default::default(),
+            drive_codex_planners: Default::default(),
+            planner_commands: Mutex::default(),
         }
     }
 
@@ -109,7 +115,100 @@ impl FakeSessions {
 
     /// Number of planner wrappers started; their turns are played by the test.
     pub(super) fn planner_launches(&self) -> usize {
-        self.planners.lock().unwrap().len()
+        self.planner_commands.lock().unwrap().len()
+    }
+
+    pub(super) fn planner_commands(&self) -> Vec<String> {
+        self.planner_commands.lock().unwrap().clone()
+    }
+
+    fn start_planner(
+        &self,
+        id: crate::domain::PlannerId,
+        cwd: &Path,
+        command: &str,
+        env: &[(String, String)],
+    ) -> Result<String> {
+        use std::sync::atomic::Ordering;
+        if self.fail_planners.load(Ordering::SeqCst) {
+            anyhow::bail!("the wiring test refuses to start the wrapper of planner {id}");
+        }
+        let (pid, start) = self.processes.start();
+        let handle = BackgroundHandle {
+            pid,
+            start: start_token(&start),
+        }
+        .to_string();
+        if self.drive_codex_planners.load(Ordering::SeqCst) {
+            self.files.advance_clock_to(self.clock.system_time());
+            let launch = env
+                .iter()
+                .find(|(key, _)| key == crate::domain::sessions::LAUNCH_ENV)
+                .context("the wrapper has no launch")?;
+            let launch: crate::domain::actor_model::ActorLaunch = serde_json::from_str(&launch.1)?;
+            anyhow::ensure!(
+                launch.provider == crate::domain::Provider::Codex,
+                "the test drives Codex planner wrappers"
+            );
+            let (db, cwd, agent, tokens, processes, files, clock) = (
+                self.db.clone(),
+                cwd.to_owned(),
+                self.agent.clone(),
+                self.tokens.clone(),
+                self.processes.clone(),
+                self.files.clone(),
+                self.clock.clone(),
+            );
+            let run_dir = crate::infrastructure::location::planners_dir(&db).join(id.to_string());
+            let (returned, returns) = mpsc::channel();
+            let thread = std::thread::Builder::new()
+                .name(format!("planner wrapper {id}"))
+                .spawn(move || {
+                    let result = (|| {
+                        let mut queue = SqliteQueue::open(&db)?.with_actor(ActorContext::instance(
+                            ActorRole::Wrapper,
+                            format_args!("planner:{id}"),
+                        ));
+                        let provider = CodexPlannerAgent::new();
+                        crate::compose::planner_session_on(
+                            crate::application::planner::PlannerWrapper {
+                                queue: &mut queue,
+                                db: &db,
+                                provider: &provider,
+                                spawner: &*agent,
+                                files: &*files,
+                                processes: &*processes,
+                                pid,
+                                clock: &*clock,
+                                poll_interval: Duration::from_millis(20),
+                                telemetry: &Nothing,
+                                queue_service: Some(&*tokens),
+                                read_snapshot: None,
+                            },
+                            id,
+                            &cwd,
+                            None,
+                            &launch,
+                        )
+                    })();
+                    processes.end(pid);
+                    let _ = returned.send(());
+                    result
+                })?;
+            self.lock().push(Wrapper {
+                handle: handle.clone(),
+                run_dir,
+                thread,
+                returned: returns,
+            });
+        } else {
+            self.planners.lock().unwrap().push(handle.clone());
+        }
+        self.planner_commands
+            .lock()
+            .unwrap()
+            .push(command.to_owned());
+        Ok(handle)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Wrapper>> {
@@ -162,24 +261,22 @@ impl SessionWrappers for FakeSessions {
     /// `--resume`), on a thread as a new process.
     fn launch_background(
         &self,
-        _: &std::path::Path,
+        cwd: &Path,
         command: &str,
-        _: &[(String, String)],
+        env: &[(String, String)],
         _: &std::path::Path,
     ) -> Result<String> {
         let words: Vec<&str> = command
             .split(' ')
             .map(|word| word.trim_matches('\''))
             .collect();
-        if after(&words, "--planner").is_some() {
-            let (pid, start) = self.processes.start();
-            let handle = BackgroundHandle {
-                pid,
-                start: start_token(&start),
-            }
-            .to_string();
-            self.planners.lock().unwrap().push(handle.clone());
-            return Ok(handle);
+        if let Some(id) = after(&words, "--planner") {
+            return self.start_planner(
+                crate::domain::PlannerId::new(id.parse()?),
+                cwd,
+                command,
+                env,
+            );
         }
         let id = RunId::new(after(&words, "--run").context("the wrapper names no run")?)?;
         let token =

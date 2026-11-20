@@ -644,7 +644,7 @@ impl Codex {
     ///
     /// The same read-only profile is added by the executor on each turn,
     /// together with the socket and the planner's own credential.
-    fn planner_turn_command(
+    pub(crate) fn planner_turn_command(
         &self,
         target: &TurnTarget<'_>,
         prompt: &str,

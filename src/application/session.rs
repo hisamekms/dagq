@@ -240,6 +240,7 @@ pub fn run_session(
         sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
         background: start == WrapperStart::Background,
         clock,
+        poll_interval: provider.wait_interval(),
         runtimes: Some(runtimes),
         toolchains: Some(toolchains),
         containers: Some(containers),

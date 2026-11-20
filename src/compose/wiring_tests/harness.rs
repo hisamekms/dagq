@@ -154,6 +154,7 @@ pub(super) struct Wiring {
     /// Whether the supervisor also runs Codex headless workers and jobs
     /// (on the same fake agent); Claude only by default.
     codex: bool,
+    no_claude: bool,
     /// Whether program reviews run, on [`super::host::FakePrograms`]; none
     /// may by default.
     programs: bool,
@@ -279,6 +280,7 @@ impl Wiring {
             generators,
             pid,
             codex: false,
+            no_claude: false,
             programs: false,
             planning: std::cell::Cell::new((None, super::super::wiring_planner_timeout())),
             worker_fallback: true,
@@ -523,6 +525,15 @@ impl Wiring {
         self
     }
 
+    pub(super) fn with_no_claude(mut self) -> Self {
+        self.no_claude = true;
+        self
+    }
+
+    pub(super) fn set_codex_available(&mut self, available: bool) {
+        self.codex = available;
+    }
+
     /// The wiring whose program reviews run as [`super::host::FakePrograms`]
     /// says.
     pub(super) fn with_programs(mut self) -> Self {
@@ -567,6 +578,19 @@ impl Wiring {
     /// told.
     pub(super) fn passes(&self) -> u64 {
         self.passes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Open the queue's Claude hold ask through its normal write path.
+    pub(super) fn hold_claude_queue(&self) -> crate::domain::AskId {
+        self.queue()
+            .hold(crate::domain::NewHold::wall(
+                crate::domain::queue_hold::Wall::Authentication,
+                None,
+                None,
+            ))
+            .expect("open the Claude hold ask")
+            .ask
+            .id
     }
 
     /// `provider` held for its usage limit, as a supervisor records it,
@@ -626,6 +650,12 @@ impl Wiring {
     pub(super) fn fail_claim_launches(&self, fail: bool) {
         self.sessions
             .fail_claims
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn fail_planner_launches(&self, fail: bool) {
+        self.sessions
+            .fail_planners
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -1002,6 +1032,7 @@ impl Wiring {
                 db: self.db.clone(),
                 pid: self.pid,
                 codex: self.codex,
+                no_claude: self.no_claude,
                 programs: self.programs,
                 worker_fallback: self.worker_fallback,
                 job_fallback: self.job_fallback,
@@ -1103,6 +1134,7 @@ struct Parts {
     db: PathBuf,
     pid: u32,
     codex: bool,
+    no_claude: bool,
     programs: bool,
     worker_fallback: bool,
     job_fallback: bool,
@@ -1313,6 +1345,7 @@ impl Parts {
                 self.passes,
             )
         };
+        settings.no_claude = self.no_claude;
         settings.update.register = self.auto_update;
         settings.tick = self.tick;
         settings.idle_poll = self.tick;

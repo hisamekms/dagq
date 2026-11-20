@@ -144,6 +144,21 @@ fn wiring_lifecycle_queues(
     control::lifecycle_queues(caller)
 }
 
+/// Run a planner wrapper with ports supplied by the host or the wiring harness.
+fn planner_session_on(
+    wrapper: crate::application::planner::PlannerWrapper<'_>,
+    id: crate::domain::PlannerId,
+    cwd: &Path,
+    plugin_dir: Option<&Path>,
+    launch: &crate::domain::actor_model::ActorLaunch,
+) -> Result<Value> {
+    use crate::application::planner::{planner_dir, run_planner_session};
+    use crate::infrastructure::location::planners_dir;
+
+    let dir = planner_dir(&planners_dir(wrapper.db), id);
+    run_planner_session(wrapper, id, &dir, cwd, plugin_dir, launch)
+}
+
 /// The binary's limit of a planner's revise ([`PLANNER_TIMEOUT`]), for
 /// [`wiring_tests`]' loop.
 #[cfg(test)]

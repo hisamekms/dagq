@@ -71,7 +71,8 @@ main checkoutでは、commitしない期限つきの運用設定を隣の`dagq.l
   flagを付けて起動したsupervisorは引き継ぎ後もflagを優先する。
   fileに従わせる操作と再起動の呼び出し元は`domain::slot_limits`のdoc commentが持つ。
 - `[provider_fallback]`は使えないproviderからもう一方への切り替えを止める設定で（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)。`domain::provider_switch::ProviderFallback`）、`workers`と`jobs`を受け付ける。
-  振る舞いと優先順位は[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」。
+  `jobs`はruntimeのplannerの起動先にも効く。
+  `--no-claude`でCodexを選ぶ規則はこの設定で止められない（[Provider lifecycle](../provider-lifecycle.md#claude-を使わない運転)）。
   読み手は`compose::supervisor`で、supervisorが起動時に読み（読めなければ既定で起動する）、各passで`[supervisor]`の後に読み直す（再起動なしで効く。ファイルが無いときは黙って、読めない・値が誤っているときはerrorごとに1回logにwarnを出して、使っている値のまま続ける）。
 - `[fresh_session]`は`peak_context_above`（意味は`FreshSessionConfig`）だけを持つ（[ADR-t2080-1](../../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、振る舞いは[Provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
   keyが無ければ新しいsessionを始めない。

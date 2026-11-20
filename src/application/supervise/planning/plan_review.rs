@@ -35,7 +35,10 @@ use crate::{
         PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict, PlannerCloseCode,
         PlannerOrigin, PlannerRoute, PlannerSession, PlannerState, Proposal, ProposalId, Task,
         TaskDetail,
-        actor_model::{ActorLaunch, JobRoute, ModelRole, job_route, job_wait_text},
+        actor_model::{
+            ActorLaunch, JobRoute, ModelRole, RuntimePlannerRoute, job_route, job_wait_text,
+            runtime_planner_route,
+        },
         next_to_review,
         plan_review::{
             PlanConcernDecision, PlanConcernEscalation, PlanRecommendation, PlanVerdictDecision,
@@ -330,10 +333,7 @@ impl PlanningState {
         if let Err(error) = self.start_plan_review(env) {
             warn!(error = %format_args!("{error:#}"), "plan review: could not start a plan review: {error:#}");
         }
-        // The queue's Claude hold also pauses the planning pass.
-        if !env.jobs.held()
-            && let Err(error) = self.tend_planners(env, options)
-        {
+        if let Err(error) = self.tend_planners(env, options) {
             warn!(error = %format_args!("{error:#}"), "plan review: could not deliver the revises: {error:#}");
         }
         progressed
@@ -1144,18 +1144,16 @@ impl PlanningState {
     /// `[stall]` limit tells the inbox once per planner. A
     /// delivery claimed and not recorded (its supervisor died in between)
     /// is delivered again after the time a supervisor is judged dead in.
-    /// Under `--no-claude` no planner is started: a person stands in.
+    /// Under `--no-claude` new planners start on Codex when it is available.
     fn tend_planners(&mut self, env: &mut PlanningEnv<'_>, options: &LoopSettings) -> Result<()> {
         self.close_person_planners(env);
         // The recurring drafts whose interval came (ADR-0072) are drafts
         // like the others below, taken by a planner of the runtime's.
         self.register_recurring_drafts(env);
-        if env.jobs.no_claude() {
-            return Ok(());
-        }
         let now = env.generators.clock.now();
         let timeout = i64::try_from(options.planner_timeout.as_secs())?;
         let mut views = self.planner_views(env)?;
+        self.tend_planner_walls(env, &views)?;
         for revise in env.queue.revising_proposals()? {
             let proposal = revise.proposal.id();
             let gone = |planner_id: PlannerId| {
@@ -1202,7 +1200,9 @@ impl PlanningState {
                 // A revise held back by a question nobody answered yet waits
                 // for the person, not for a planner (ADR-t1704-1
                 // decision 4).
-                ReviseWatch::NoPlanner { .. } if self.revise_questions(env, proposal)?.0 => {}
+                ReviseWatch::NoPlanner { .. }
+                    if self.revise_questions(env, proposal)?.0
+                        || self.planner_launch(env).is_none() => {}
                 ReviseWatch::NoPlanner { waited } => {
                     let holders = self.planner_holds(env, &views)?;
                     warn!(
@@ -1242,10 +1242,9 @@ impl PlanningState {
                 Some(view) if view.planner.answer_wait_at.is_some() => {}
                 Some(view) if view.alive => {
                     // A planner at work gets the revise once it is idle.
-                    // One that waits for Claude gets it after its retry
-                    // (ADR-t1394-2 decision 5).
+                    // A planner at a provider wall takes its retry first.
                     if view.state != PlannerState::Idle
-                        || self.planner_at_wall(env, view).is_some()
+                        || self.planner_delivery_waits(env, view)?
                         || !env.queue.claim_revise(proposal.id())?
                     {
                         continue;
@@ -1286,7 +1285,13 @@ impl PlanningState {
                     // go with the revise to the same new planner
                     // (ADR-t1704-1 decision 4).
                     let (held, answers) = self.revise_questions(env, proposal.id())?;
-                    if held || !env.queue.claim_revise(proposal.id())? {
+                    if held {
+                        continue;
+                    }
+                    let Some(actor) = self.planner_launch(env) else {
+                        continue;
+                    };
+                    if !env.queue.claim_revise(proposal.id())? {
                         continue;
                     }
                     // What each planner that stopped at one of them left,
@@ -1302,7 +1307,8 @@ impl PlanningState {
                         replacement: None,
                     };
                     let opened =
-                        match self.open_planner_for(env, proposal, &revise.reasons, carried) {
+                        match self.open_planner_for(env, actor, proposal, &revise.reasons, carried)
+                        {
                             Ok(opened) => opened,
                             Err(error) => {
                                 env.queue.revise_lost(
@@ -1345,6 +1351,7 @@ impl PlanningState {
                             env.queue.revise_goal_wait(proposal.id())?,
                         )
                         .is_some_and(|at| now - at > timeout)
+                        && self.planner_launch(env).is_some()
                     {
                         starved = Some(proposal.id());
                     }
@@ -1369,10 +1376,6 @@ impl PlanningState {
         // Then the improvements marked for a proposal (ADR-0044 decision
         // 19), within the same limit.
         self.open_finding_planners(env, &mut runtime_open)?;
-        // A headless planner's turn that hit a provider wall waits, and
-        // one its wrapper stopped at its limit tells the inbox
-        // (ADR-t1394-2 decisions 3 and 5).
-        self.tend_planner_walls(env, &views)?;
         self.tell_of_stopped_planner_turns(env, &views)?;
         self.end_runtime_planners(env, &views)?;
         if let Some(proposal) = starved {
@@ -1421,10 +1424,10 @@ impl PlanningState {
     /// not from `views`, judged before this pass wrote its requests. One at a time: none while a
     /// planner of the runtime's is already asked to exit, which frees its
     /// place anyway.
-    /// It runs at the end of the pass. One waiting for Claude is not
-    /// chosen: ending it would count as a wait that ended undecided. The
-    /// exit is a request in its `turns/` (`/exit` is not typed), recorded
-    /// as `planner_released`; the planner closes as
+    /// It runs at the end of the pass. A planner waiting at its provider's
+    /// wall keeps its place because ending it would count as a wait that
+    /// ended undecided. The exit is written to `turns/` and recorded as
+    /// `planner_released`. The planner closes as
     /// [`Self::end_runtime_planners`] closes one, and the revise gets a new
     /// planner on a later pass (one that went to the planner released is
     /// taken back by `plan_revise_lost` and waits at the limit again).
@@ -1455,9 +1458,9 @@ impl PlanningState {
             };
             let busy = self.busy_reasons(env, view, &revising)?;
             // An answer not sent yet is sent on a later pass (one whose
-            // sending failed ends the planner and goes to a new one). One
-            // that waits for Claude is not done either (ADR-t1394-2
-            // decision 5).
+            // sending failed ends the planner and goes to a new one). A
+            // planner waiting at its provider's wall keeps its place
+            // (ADR-t1394-2 decision 5).
             if busy.is_empty()
                 || busy.contains(&PlannerBusy::QuestionOpen)
                 || busy.contains(&PlannerBusy::AnswerUndelivered)
@@ -1537,7 +1540,7 @@ impl PlanningState {
         if let Some(wait) = self.question_wait(env, view)? {
             busy.push(wait);
         }
-        if self.planner_at_wall(env, view).is_some() {
+        if view.state == PlannerState::Idle && self.planner_delivery_waits(env, view)? {
             busy.push(PlannerBusy::ProviderWall);
         }
         if self.planner_exits.iter().any(|(sent, _)| *sent == id) {
@@ -1618,6 +1621,7 @@ impl PlanningState {
     fn open_planner_for(
         &mut self,
         env: &mut PlanningEnv<'_>,
+        actor: ActorLaunch,
         proposal: &Proposal,
         reasons: &[String],
         carried: Carried<'_>,
@@ -1635,7 +1639,7 @@ impl PlanningState {
             ..carried
         };
         open_runtime_planner(
-            &self.planner_launch(env),
+            &Self::planner_wrapper_launch(env, actor),
             proposal.id(),
             &tasks,
             reasons,
@@ -1660,20 +1664,39 @@ impl PlanningState {
         Ok((!open.is_empty(), answered))
     }
 
-    /// What opening a planner of the runtime's works with. `[roles]` is
-    /// read as each planner opens; an old `[roles.runtime_planner] route`
-    /// in it is warned of once per supervisor
-    /// ([`Self::warn_ignored_route_setting`]).
-    pub(in crate::application::supervise) fn planner_launch<'e>(
-        &mut self,
-        env: &'e PlanningEnv<'_>,
-    ) -> PlannerLaunch<'e> {
-        let layout = env.layout;
+    /// Select a provider before claiming any work for a new planner.
+    pub(super) fn planner_launch(&mut self, env: &PlanningEnv<'_>) -> Option<ActorLaunch> {
         let roles = env.verifier.role_models().unwrap_or_else(|error| {
             warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
             Default::default()
         });
         self.warn_ignored_route_setting(&roles);
+        let role = ModelRole::RuntimePlanner;
+        match runtime_planner_route(
+            &roles.launch(role),
+            roles.switchable(role),
+            env.jobs.no_claude(),
+            env.jobs.fallback_jobs(),
+            |provider| {
+                env.jobs.job_unusable(provider).or_else(|| {
+                    env.layout
+                        .providers
+                        .iter()
+                        .any(|check| check.provider == provider && !check.found)
+                        .then_some(SwitchReason::ExecutableMissing)
+                })
+            },
+        ) {
+            RuntimePlannerRoute::Start(actor) => Some(actor),
+            RuntimePlannerRoute::NoTarget(_) => None,
+        }
+    }
+
+    pub(super) fn planner_wrapper_launch<'e>(
+        env: &'e PlanningEnv<'_>,
+        actor: ActorLaunch,
+    ) -> PlannerLaunch<'e> {
+        let layout = env.layout;
         PlannerLaunch {
             queue: &*env.queue,
             backend: env.sessions,
@@ -1687,7 +1710,7 @@ impl PlanningState {
             codex_home: layout.codex_home.as_deref(),
             plugin_dir: layout.plugin_dir.as_deref(),
             language: env.verifier.language(),
-            roles,
+            actor,
             turn_limits: env.turn_limits,
             telemetry: Some(env.jobs.target_telemetry(&env.pass)),
             service: env.jobs.service_access(),
@@ -1711,11 +1734,10 @@ impl PlanningState {
     /// Close the row of every person's planner still open, without cmux
     /// (ADR-t1433-2 decision 5, [`planner::close_person_planners`]), so a
     /// revise or an answer for what it owned goes to a new planner of the
-    /// runtime's. It runs first in the planner pass, under `--no-claude`
-    /// too, and not on the passes that skip the planners (a stopping or
-    /// draining supervisor, claims stopped, the queue service down, Claude's
-    /// hold). A queue that cannot
-    /// close one is logged; the next pass tries again.
+    /// runtime's. It runs first on every planner pass, including under
+    /// `--no-claude` and during Claude's queue hold. If the queue fails
+    /// to close one, the supervisor logs the error and retries on the
+    /// next planner pass.
     fn close_person_planners(&mut self, env: &mut PlanningEnv<'_>) {
         match planner::close_person_planners(&*env.queue) {
             Ok(closed) => {
@@ -2293,8 +2315,8 @@ fn asked_about_proposal(ask: &Ask, tasks: &[TaskId]) -> bool {
 /// answer (ADR-t1704-1 decision 1): its `planner_question` is not
 /// answered, and nothing else holds it but a revise it took, whose fixes
 /// it did not need the answer for. An answer delivered and not read yet,
-/// a follow-up request or a turn at work, Claude's wall, a revise not
-/// delivered yet, or an exit request already sent keep it.
+/// a follow-up request or a turn at work, the planner's own provider wall,
+/// a revise not delivered yet, or an exit request already sent keep it.
 fn answer_wait_only(busy: &[PlannerBusy]) -> bool {
     busy.contains(&PlannerBusy::QuestionOpen)
         && busy
@@ -2358,8 +2380,7 @@ enum PlannerBusy {
     AnswerTyped,
     /// It was asked to exit.
     Exiting,
-    /// Headless, its last turn failed at Claude's login, usage limit or
-    /// start, and it waits for Claude (ADR-t1394-2 decision 5).
+    /// The planner waits at its own provider's hold or for its retry.
     ProviderWall,
 }
 
@@ -2516,11 +2537,10 @@ impl PlanningState {
             if !env.queue.ask_delivered_to(ask.id, workspace)? {
                 continue;
             }
-            // A headless planner took the answer up once a turn carrying
-            // it finished otherwise than at Claude's wall (the turn of its
-            // request, or the provider retry after it): its turns are
-            // recorded, and a stub's turn may end within the second the
-            // answer was claimed.
+            // A headless planner took up the answer once its request or
+            // provider retry finished without hitting its provider's wall.
+            // The turn record can show this even when a stub's turn ends
+            // within the second the answer was claimed.
             if let Some(taken) = self.headless_answer_taken(env, view, ask.id)? {
                 if !taken {
                     return Ok(true);
