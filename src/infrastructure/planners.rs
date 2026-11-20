@@ -17,6 +17,8 @@ use crate::domain::{
     ProposalId, RunEvent, TaskStatus, event_kind,
 };
 
+pub(super) mod switch;
+
 impl<E: TransactionEntries> StoreQueue<E> {
     /// Mark planner `id` of the runtime's as asked to exit because only a
     /// person's answer to `asks`, its `planner_question`s, is left
@@ -184,14 +186,16 @@ impl<E: TransactionEntries> StoreQueue<E> {
 
     /// The UUID of the workspace cmux opened for the planner.
     pub fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()> {
+        let tx = self.write_entry("planner_workspace_created")?;
         ensure!(
-            self.write_sql(
-                "planner_workspace_created",
-                "UPDATE planners SET workspace_id=?2 WHERE id=?1 AND workspace_id IS NULL",
+            tx.execute(
+                "UPDATE planners SET workspace_id=?2 WHERE id=?1 AND workspace_id IS NULL AND closed_at IS NULL",
                 sql_params![id, workspace_id],
             )? == 1,
             "planner {id} already has a workspace or does not exist"
         );
+        switch::complete(&tx, id, workspace_id, self.generators.clock.now())?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -211,7 +215,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
              WHERE id=?1 AND closed_at IS NULL",
             sql_params![id, now, error],
         )?;
-        if closed == 1 {
+        if closed == 1 && !switch::pending(&tx, id)? {
             super::draft_planners::settle_bundle(&tx, id, now)?;
             super::plan_requests::decline_after_planner(&tx, id, now)?;
             // A headless session that had started ends with the row
@@ -342,12 +346,13 @@ impl<E: TransactionEntries> StoreQueue<E> {
 pub(super) fn planner_turn_events_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT * FROM run_events WHERE +run_id IS NULL
-           AND kind IN ('{}','{}','{}','{}','{}')
+           AND kind IN ('{}','{}','{}','{}','{}','{}')
            AND {planner_id}=?1 ORDER BY id",
         event_kind::TURN_REQUESTED,
         event_kind::TURN_STARTED,
         event_kind::TURN_FINISHED,
         event_kind::TURN_SESSION_IDENTIFIED,
+        event_kind::EventKind::PlannerTurnProcessStarted.as_str(),
         event_kind::PROVIDER_WAITING,
         planner_id = dialect.json_field_spaced("payload", "$.planner_id", JsonType::Integer),
     )

@@ -20,7 +20,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-fn fixture(name: &str) -> Wiring {
+pub(super) fn fixture(name: &str) -> Wiring {
     Wiring::new(
         name,
         Script {
@@ -30,18 +30,18 @@ fn fixture(name: &str) -> Wiring {
     )
 }
 
-fn plan(fx: &Wiring) {
+pub(super) fn plan(fx: &Wiring) {
     fx.supervise_planning(5, Duration::from_secs(3600));
 }
 
-fn configure(fx: &Wiring, provider: Provider) {
+pub(super) fn configure(fx: &Wiring, provider: Provider) {
     fx.verifier.set_config(&format!(
         "[roles.runtime_planner]\nprovider = \"{}\"\nmodel = \"requested-model\"\neffort = \"low\"",
         provider.as_str()
     ));
 }
 
-fn request(queue: &mut SqliteQueue, text: &str) -> RequestId {
+pub(super) fn request(queue: &mut SqliteQueue, text: &str) -> RequestId {
     queue
         .record_plan_request(
             &NewPlanRequest {
@@ -57,7 +57,7 @@ fn request(queue: &mut SqliteQueue, text: &str) -> RequestId {
         .id
 }
 
-fn for_request(queue: &SqliteQueue, request: RequestId) -> PlannerSession {
+pub(super) fn for_request(queue: &SqliteQueue, request: RequestId) -> PlannerSession {
     queue
         .planners(false)
         .unwrap()
@@ -109,7 +109,7 @@ fn release_claude(queue: &mut SqliteQueue, ask: AskId) {
     queue.close_ask(ask).unwrap();
 }
 
-fn payloads(queue: &SqliteQueue, kind: EventKind) -> Vec<Value> {
+pub(super) fn payloads(queue: &SqliteQueue, kind: EventKind) -> Vec<Value> {
     queue
         .latest_events_of(kind.as_str(), 20)
         .unwrap()
@@ -118,7 +118,7 @@ fn payloads(queue: &SqliteQueue, kind: EventKind) -> Vec<Value> {
         .collect()
 }
 
-fn planner_dir(fx: &Wiring, id: PlannerId) -> PathBuf {
+pub(super) fn planner_dir(fx: &Wiring, id: PlannerId) -> PathBuf {
     planners_dir(&fx.db).join(id.to_string())
 }
 
@@ -444,6 +444,7 @@ fn assert_codex_hold(queue: &SqliteQueue, id: PlannerId, reason: &str) {
 fn a_codex_spawn_refusal_becomes_a_launch_wall_inside_the_planner_wrapper() {
     let fx = fixture("planner-spawn-refused")
         .with_codex()
+        .without_job_fallback()
         .with_continuous_passes();
     configure(&fx, Provider::Codex);
     fx.sessions

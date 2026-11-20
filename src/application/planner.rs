@@ -145,6 +145,19 @@ pub fn open_runtime_planner(
     reasons: &[String],
     carried: Carried<'_>,
 ) -> Result<OpenedPlanner> {
+    open_runtime_planner_with_reservation(launch, proposal, tasks, reasons, carried, None)
+}
+
+/// Start a revise, either on the usual path or with its reserved planner
+/// and the launch whose effort was raised when it was reserved.
+pub(super) fn open_runtime_planner_with_reservation(
+    launch: &PlannerLaunch<'_>,
+    proposal: ProposalId,
+    tasks: &[Task],
+    reasons: &[String],
+    carried: Carried<'_>,
+    reserved: Option<PlannerSession>,
+) -> Result<OpenedPlanner> {
     // The proposal must exist; its record is the one the planner opens for.
     launch.queue.show_proposal(proposal)?;
     // Reopens have a proposal of their own: the finished review belongs
@@ -169,10 +182,15 @@ pub fn open_runtime_planner(
         .and_then(|event| event.task_id);
     let prompt =
         runtime_planner_prompt(launch.db, proposal, tasks, reasons, review_anchor, carried)?;
-    let actor = launch.actor.clone().escalated(REVISE_ESCALATION);
-    let planner = launch
-        .queue
-        .open_planner(PlannerOrigin::Runtime, Some(proposal))?;
+    let (planner, actor) = match reserved {
+        Some(planner) => (planner, launch.actor.clone()),
+        None => (
+            launch
+                .queue
+                .open_planner(PlannerOrigin::Runtime, Some(proposal))?,
+            launch.actor.clone().escalated(REVISE_ESCALATION),
+        ),
+    };
     let snapshot = carried.replacement.and_then(|(_, snapshot)| snapshot);
     launch_planner(launch, planner, ("runtime", &prompt), &actor, snapshot)
 }
@@ -499,9 +517,14 @@ pub fn run_planner_session(
         // Its turns submit as the owner its record names: the opener
         // records the background handle after it started this wrapper, so
         // the first turn waits for it.
-        let recorded = super::session::WrapperStart::Workspace
-            .wait(super::session::REGISTRATION_POLL, || {
-                Ok(queue.planner(id)?.workspace_id.is_some())
+        let recorded =
+            super::session::WrapperStart::Workspace.wait(super::session::REGISTRATION_POLL, || {
+                let planner = queue.planner(id)?;
+                anyhow::ensure!(
+                    planner.closed_at.is_none(),
+                    "planner {id} was closed before its wrapper started"
+                );
+                Ok(planner.workspace_id.is_some())
             });
         if let Err(error) = recorded {
             let _ = queue.planner_exited(id, pid, 127);

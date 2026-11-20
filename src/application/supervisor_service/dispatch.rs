@@ -1939,6 +1939,27 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 workspace_id.as_str(),
             ))
         }
+        "planner_switch_events" => answer(SessionRegistry::planner_switch_events(&*store)),
+        "planner_has_operations" => {
+            let (source,): (PlannerId,) = read(op, args)?;
+            answer(SessionRegistry::planner_has_operations(&*store, source))
+        }
+        "reserve_planner_switch" => {
+            let (source, previous, launch) = read(op, args)?;
+            answer(SessionRegistry::reserve_planner_switch(
+                &*store, source, previous, &launch,
+            ))
+        }
+        "retire_planner_switch" => {
+            let (switch, workspace, stalled): (_, Option<String>, Option<Vec<AskId>>) =
+                read(op, args)?;
+            answer(SessionRegistry::retire_planner_switch(
+                &*store,
+                &switch,
+                workspace.as_deref(),
+                stalled.as_deref(),
+            ))
+        }
         "close_planner" => {
             let (id, error): (PlannerId, Option<String>) = read(op, args)?;
             answer(SessionRegistry::close_planner(

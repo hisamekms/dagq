@@ -90,6 +90,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 - **人の答えだけを待つplannerの終わり**: 残るのが自分の未回答の`planner_question`（と並んで渡されたrevise）だけなら、終了の依頼を置いて枠を空け、決めずに終わった回数に数えない（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)、`planner_answer_wait`）。
   answerは新しいplannerの初期promptで運ばれる（`PlannerHandover`）。
 - **使えないとき**: 新しいplannerは、明示したproviderが使えなければjobと同じ切り替えの規則に従い、使える起動先が戻るまで仕事を待ちに残す（[ADR-t2930-1](../../adr/2026-11-19-t2930-1-headless-codex-runtime-planner.md)決定5）。
+  最初のturnでproviderの壁に当たり、再開できる会話も実行済みのplanner操作も無ければ、切り替えの規則に従い、運んだ回答と引き継ぎごと同じ仕事をもう一方のproviderへ一度だけ移す。
   `--no-claude`では、設定がClaudeか未指定でもCodexが使えればplannerを立てる。
   開始済みのplannerは自分のproviderの控えが解けるまで待ち、壁で失敗した依頼があれば同じproviderで先にやり直す（`planner_turns.rs`）。
   壁で待つ間は、決めずに終わった回数に数えない。

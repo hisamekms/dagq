@@ -1995,6 +1995,21 @@ pub trait SessionRegistry: SessionReads {
     ) -> Result<PlannerSession>;
     /// The UUID of the workspace cmux opened for the planner.
     fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()>;
+    /// Active handoffs and the history needed to recover them.
+    fn planner_switch_events(&self) -> Result<Vec<RunEvent>>;
+    fn planner_has_operations(&self, source: PlannerId) -> Result<bool>;
+    fn reserve_planner_switch(
+        &self,
+        source: PlannerId,
+        previous: Option<PlannerId>,
+        launch: &crate::domain::actor_model::ActorLaunch,
+    ) -> Result<Option<PlannerSession>>;
+    fn retire_planner_switch(
+        &self,
+        switch: &crate::domain::planner::PlannerSwitch,
+        workspace: Option<&str>,
+        stalled: Option<&[AskId]>,
+    ) -> Result<bool>;
     /// Give the planner up; the first close and its error are kept.
     fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession>;
     /// Close the planner's row as the runtime ends it and record

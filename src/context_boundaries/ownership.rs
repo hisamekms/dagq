@@ -400,6 +400,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/replan_apply.rs", Planning),
     store("src/infrastructure/task_holds.rs", Planning),
     store("src/infrastructure/planners.rs", Planning),
+    store("src/infrastructure/planners/switch.rs", Planning),
     store("src/infrastructure/draft_planners.rs", Planning),
     store("src/infrastructure/finding_planners.rs", Planning),
     store("src/infrastructure/follow_up_membership.rs", Planning),

@@ -15,6 +15,20 @@ use super::{
     heartbeat_stale,
 };
 
+/// The queue's reservation of a new wrapper for the original planner's work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerSwitch {
+    pub source: PlannerId,
+    pub planner_id: PlannerId,
+    pub launch: super::actor_model::ActorLaunch,
+    pub request_id: Option<RequestId>,
+    pub finding_id: Option<FindingId>,
+    pub proposal_id: Option<ProposalId>,
+    pub drafts: Vec<TaskId>,
+}
+
+pub const PLANNER_SWITCH_ATTEMPTS: usize = 3;
+
 /// One planner as the queue records it. Times are Unix seconds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannerSession {

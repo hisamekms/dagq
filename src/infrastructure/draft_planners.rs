@@ -89,7 +89,7 @@ fn targets_in(dialect: super::sql_exec::SqlDialect, now: i64) -> String {
         OR {due})
     AND t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
         WHERE x.id=t.proposal_id AND x.status!='canceled')
-    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.closed_at IS NULL
+    AND NOT EXISTS(SELECT 1 FROM planners p WHERE {owns_work}
         AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id)))
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.task_id=t.id AND a.run_id IS NULL
@@ -103,6 +103,7 @@ fn targets_in(dialect: super::sql_exec::SqlDialect, now: i64) -> String {
     AND ({person} OR NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
         AND e.kind='{exhausted}'))",
         person = revisit_due(now, Some("('user','inbox')")),
+        owns_work = super::planners::switch::owns_work(dialect),
         exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED, refs = dialect.json_elements("q.refs"), proposal_id = dialect.json_field("r.material", "$.proposal_id", JsonType::Integer), kind = dialect.json_field("j.value", "$.kind", JsonType::Text), id = dialect.json_field("j.value", "$.id", JsonType::Integer),
 )
 }
@@ -524,6 +525,16 @@ impl<E: TransactionEntries> StoreQueue<E> {
                 // An answer about a draft an open planning request names
                 // waits for the request's planner (ADR-t1540-1).
                 if ask.task_id == Some(lead)
+                    && !SqlRead::query_row(
+                        &tx,
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM draft_bundle_members m
+                            JOIN planners p ON p.id=m.planner_id WHERE m.task_id=?1 AND {})",
+                            super::planners::switch::pending_switch(tx.dialect(), "p.id")
+                        ),
+                        sql_params![lead],
+                        |r| r.get::<_, bool>(0),
+                    )?
                     && route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
                     && !named_by_open_request(&tx, lead)?
                 {
@@ -1044,8 +1055,11 @@ fn waiting(conn: &impl SqlRead, draft: TaskId, now: i64) -> Result<Option<DraftT
 /// The keys of the bundles whose planner is not closed.
 fn open_bundle_keys(conn: &impl SqlRead) -> Result<Vec<BundleKey>> {
     let rows: Vec<(String, String)> = conn.query_map(
-        "SELECT b.key_kind, b.key_value FROM draft_bundles b
-             JOIN planners p ON p.id=b.planner_id WHERE p.closed_at IS NULL",
+        &format!(
+            "SELECT b.key_kind, b.key_value FROM draft_bundles b
+             JOIN planners p ON p.id=b.planner_id WHERE {}",
+            super::planners::switch::owns_work(conn.dialect())
+        ),
         sql_params![],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;

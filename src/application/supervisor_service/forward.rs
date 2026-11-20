@@ -1973,6 +1973,34 @@ impl SessionRegistry for SupervisorQueue {
             vec![to_value(id)?, to_value(workspace_id)?],
         )
     }
+    fn planner_switch_events(&self) -> Result<Vec<RunEvent>> {
+        self.remote("planner_switch_events", vec![])
+    }
+    fn planner_has_operations(&self, source: PlannerId) -> Result<bool> {
+        self.remote("planner_has_operations", vec![to_value(source)?])
+    }
+    fn reserve_planner_switch(
+        &self,
+        source: PlannerId,
+        previous: Option<PlannerId>,
+        launch: &crate::domain::actor_model::ActorLaunch,
+    ) -> Result<Option<PlannerSession>> {
+        self.remote(
+            "reserve_planner_switch",
+            vec![to_value(source)?, to_value(previous)?, to_value(launch)?],
+        )
+    }
+    fn retire_planner_switch(
+        &self,
+        switch: &crate::domain::planner::PlannerSwitch,
+        workspace: Option<&str>,
+        stalled: Option<&[crate::domain::AskId]>,
+    ) -> Result<bool> {
+        self.remote(
+            "retire_planner_switch",
+            vec![to_value(switch)?, to_value(workspace)?, to_value(stalled)?],
+        )
+    }
     fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
         self.remote("close_planner", vec![to_value(id)?, to_value(error)?])
     }

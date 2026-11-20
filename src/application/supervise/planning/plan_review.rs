@@ -21,7 +21,7 @@ use crate::{
         PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RefusedPass,
         ReviseGoalWait, RevisingProposal, StatusFilter, TaskListItem, TaskQuery, job_start_failure,
         planner::{
-            self, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
+            self, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner_with_reservation,
             planner_last_activity, planner_view, retired_workspace,
         },
         planner_idle_marker,
@@ -1152,10 +1152,16 @@ impl PlanningState {
         self.register_recurring_drafts(env);
         let now = env.generators.clock.now();
         let timeout = i64::try_from(options.planner_timeout.as_secs())?;
+        let mut switches = self.recover_planner_switches(env)?;
         let mut views = self.planner_views(env)?;
-        self.tend_planner_walls(env, &views)?;
+        if self.tend_planner_walls(env, &views, &mut switches)? {
+            views = self.planner_views(env)?;
+        }
         for revise in env.queue.revising_proposals()? {
             let proposal = revise.proposal.id();
+            if switches.holds_proposal(proposal) {
+                continue;
+            }
             let gone = |planner_id: PlannerId| {
                 views
                     .iter()
@@ -1217,12 +1223,13 @@ impl PlanningState {
         let mut runtime_open = views
             .iter()
             .filter(|view| view.planner.origin == PlannerOrigin::Runtime && view.alive)
-            .count();
+            .count()
+            + switches.reserved_slots(&views);
         // A revise with no planner that waited at the limit past the
         // timeout (task 884).
         let mut starved = None;
         for revise in env.queue.revising_proposals()? {
-            if revise.sent_at.is_some() {
+            if revise.sent_at.is_some() || switches.holds_proposal(revise.proposal.id()) {
                 continue;
             }
             let proposal = &revise.proposal;
@@ -1306,19 +1313,24 @@ impl PlanningState {
                         handovers: &handovers,
                         replacement: None,
                     };
-                    let opened =
-                        match self.open_planner_for(env, actor, proposal, &revise.reasons, carried)
-                        {
-                            Ok(opened) => opened,
-                            Err(error) => {
-                                env.queue.revise_lost(
-                                    proposal.id(),
-                                    None,
-                                    "the planner could not be opened",
-                                )?;
-                                return Err(error);
-                            }
-                        };
+                    let opened = match self.open_planner_for(
+                        env,
+                        actor,
+                        proposal,
+                        &revise.reasons,
+                        carried,
+                        None,
+                    ) {
+                        Ok(opened) => opened,
+                        Err(error) => {
+                            env.queue.revise_lost(
+                                proposal.id(),
+                                None,
+                                "the planner could not be opened",
+                            )?;
+                            return Err(error);
+                        }
+                    };
                     runtime_open += 1;
                     let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
                     info!(
@@ -1377,6 +1389,9 @@ impl PlanningState {
         // 19), within the same limit.
         self.open_finding_planners(env, &mut runtime_open)?;
         self.tell_of_stopped_planner_turns(env, &views)?;
+        views.retain(|view| {
+            !switches.holds_recipient(view.planner.id) && !switches.holds_source(view.planner.id)
+        });
         self.end_runtime_planners(env, &views)?;
         if let Some(proposal) = starved {
             self.release_runtime_planner(env, proposal, timeout, &views)?;
@@ -1556,7 +1571,7 @@ impl PlanningState {
     /// is). A planner of the runtime's an older binary opened in a
     /// workspace is over: the interactive route is retired (ADR-t1433-2
     /// decision 3) and nothing is sent to it.
-    fn planner_gone(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> bool {
+    pub(super) fn planner_gone(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> bool {
         if retired_workspace(&view.planner) {
             return true;
         }
@@ -1583,7 +1598,11 @@ impl PlanningState {
     }
 
     /// `planner` judged by [`planner_view`] now.
-    fn judge_planner(&self, env: &PlanningEnv<'_>, planner: PlannerSession) -> Result<PlannerView> {
+    pub(super) fn judge_planner(
+        &self,
+        env: &PlanningEnv<'_>,
+        planner: PlannerSession,
+    ) -> Result<PlannerView> {
         let probes = PlannerProbes {
             sessions: env.sessions,
             processes: &**env.processes,
@@ -1618,13 +1637,14 @@ impl PlanningState {
     /// them, the snapshot and the latest plan ([`Carried::replacement`],
     /// ADR-t1521-2 decision 3), so the new planner submits it again with
     /// `--replacement`.
-    fn open_planner_for(
+    pub(super) fn open_planner_for(
         &mut self,
         env: &mut PlanningEnv<'_>,
         actor: ActorLaunch,
         proposal: &Proposal,
         reasons: &[String],
         carried: Carried<'_>,
+        reserved: Option<PlannerSession>,
     ) -> Result<crate::application::planner::OpenedPlanner> {
         let tasks = proposal
             .task_ids()
@@ -1638,12 +1658,13 @@ impl PlanningState {
                 .map(|brief| (brief, snapshot.as_deref())),
             ..carried
         };
-        open_runtime_planner(
+        open_runtime_planner_with_reservation(
             &Self::planner_wrapper_launch(env, actor),
             proposal.id(),
             &tasks,
             reasons,
             carried,
+            reserved,
         )
     }
 
@@ -1677,15 +1698,7 @@ impl PlanningState {
             roles.switchable(role),
             env.jobs.no_claude(),
             env.jobs.fallback_jobs(),
-            |provider| {
-                env.jobs.job_unusable(provider).or_else(|| {
-                    env.layout
-                        .providers
-                        .iter()
-                        .any(|check| check.provider == provider && !check.found)
-                        .then_some(SwitchReason::ExecutableMissing)
-                })
-            },
+            |provider| super::planner_switch::planner_unusable(env, provider),
         ) {
             RuntimePlannerRoute::Start(actor) => Some(actor),
             RuntimePlannerRoute::NoTarget(_) => None,
@@ -2346,7 +2359,7 @@ fn answer_taken(claimed: Option<i64>, idle_since: Option<i64>) -> bool {
 /// What the planners that stopped at the answered questions a revise
 /// carries left (ADR-t1704-1 decision 3), each planner's once, in the
 /// order of their first question.
-fn once_per_planner(
+pub(super) fn once_per_planner(
     found: impl IntoIterator<Item = crate::domain::PlannerHandover>,
 ) -> Vec<crate::domain::PlannerHandover> {
     let mut handovers: Vec<crate::domain::PlannerHandover> = Vec::new();

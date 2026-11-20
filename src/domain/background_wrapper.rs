@@ -273,14 +273,17 @@ pub fn last_turn_of(events: &[super::RunEvent], handle: &str) -> Option<Backgrou
         })
 }
 
-/// The last turn a headless planner recorded starting (ADR-t1394-2), from
-/// its `turn_*` events (`events`, the queue's that name it): a planner has
-/// one session, so its last turn is its session's, as [`last_turn_of`]
-/// finds a run's session's.
+/// The last turn's process. A switched planner records its first input before
+/// spawn and its process identity separately once the agent starts.
 pub fn last_planner_turn(events: &[super::RunEvent]) -> Option<BackgroundHandle> {
     events
         .iter()
-        .rfind(|event| event.kind == EventKind::TurnStarted)
+        .rfind(|event| {
+            matches!(
+                event.kind.known(),
+                Some(EventKind::TurnStarted | EventKind::PlannerTurnProcessStarted)
+            )
+        })
         .and_then(|event| {
             let pid = u32::try_from(event.payload["pid"].as_u64()?).ok()?;
             Some(BackgroundHandle {
@@ -793,6 +796,15 @@ mod tests {
             ),
         ];
         assert_eq!(last_planner_turn(&events), None);
+        let mut events = events.to_vec();
+        events.push(event(
+            "planner_turn_process_started",
+            serde_json::json!({"planner_id": 1, "pid": 72, "start": start_token(OTHER)}),
+        ));
+        assert_eq!(
+            last_planner_turn(&events),
+            Some(BackgroundHandle::new(72, OTHER))
+        );
     }
 
     #[test]

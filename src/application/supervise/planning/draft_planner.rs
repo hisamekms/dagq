@@ -256,7 +256,7 @@ impl PlanningState {
 
     /// The initial prompt of the planner for the bundle `members` of `key`,
     /// from the queue as it is now.
-    fn draft_planner_material(
+    pub(super) fn draft_planner_material(
         &mut self,
         env: &mut PlanningEnv<'_>,
         key: &BundleKey,

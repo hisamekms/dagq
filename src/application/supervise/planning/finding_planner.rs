@@ -317,7 +317,7 @@ impl PlanningState {
 
     /// The initial prompt of the planner for `finding`, from the queue as
     /// it is now.
-    fn finding_planner_material(
+    pub(super) fn finding_planner_material(
         &mut self,
         env: &mut PlanningEnv<'_>,
         finding: FindingId,

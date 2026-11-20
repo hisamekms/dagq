@@ -343,12 +343,28 @@ event_kinds! {
     PlanReviewOutcome => "plan_review_outcome",
     PlanReviewStarted => "plan_review_started",
     PlanReviseLost => "plan_revise_lost",
+    /// The revise's recipient and launch. Its initial input uses `reasons`.
+    /// `answers` names the asks carried and closed with this delivery.
     PlanReviseSent => "plan_revise_sent",
     PlannerAnswerClaimed => "planner_answer_claimed",
     PlannerAnswerClosed => "planner_answer_closed",
     PlannerAnswerWait => "planner_answer_wait",
     PlannerClosed => "planner_closed",
     PlannerPromptWritten => "planner_prompt_written",
+    /// Reserves `planner_id` with its `launch` (provider, source provider
+    /// and reason) for `source`'s work. The work fields identify the
+    /// request, finding, proposal or all draft members. No handle exists yet.
+    PlannerSwitchReserved => "planner_switch_reserved",
+    /// The reservation (`source`, `planner_id`) acquired its handle and
+    /// owns the work. Its first turn_started acknowledges the initial input.
+    PlannerSwitchCompleted => "planner_switch_completed",
+    /// The handoff (`source`, `planner_id`, work IDs) used up its launches.
+    /// `asks` names all carried answers, `ask_id` the first for compact
+    /// attention, and `reason` explains the last recipient's end.
+    PlannerSwitchStalled => "planner_switch_stalled",
+    /// The switched planner's first turn process. Its logical turn_started
+    /// acknowledges the input before spawn and has no process identity.
+    PlannerTurnProcessStarted => "planner_turn_process_started",
     PlannerReleased => "planner_released",
     PlannerRequestHanded => "planner_request_handed",
     PlannerUnresponsive => "planner_unresponsive",
@@ -692,6 +708,10 @@ impl EventKind {
                 // What the prompt of a planner of the runtime's takes
                 // (task 1571), by `planner_id`.
                 | PlannerPromptWritten
+                | PlannerSwitchReserved
+                | PlannerSwitchCompleted
+                | PlannerSwitchStalled
+                | PlannerTurnProcessStarted
                 | AskDelivered
                 | AskDeliveryFailed
                 | PlannerAnswerClosed
@@ -2035,6 +2055,16 @@ mod tests {
             (EventKind::PlannerAnswerWait, "planner_answer_wait"),
             (EventKind::PlannerClosed, "planner_closed"),
             (EventKind::PlannerPromptWritten, "planner_prompt_written"),
+            (EventKind::PlannerSwitchReserved, "planner_switch_reserved"),
+            (
+                EventKind::PlannerSwitchCompleted,
+                "planner_switch_completed",
+            ),
+            (EventKind::PlannerSwitchStalled, "planner_switch_stalled"),
+            (
+                EventKind::PlannerTurnProcessStarted,
+                "planner_turn_process_started",
+            ),
             (EventKind::PlannerReleased, "planner_released"),
             (EventKind::PlannerRequestHanded, "planner_request_handed"),
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),

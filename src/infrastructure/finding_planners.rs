@@ -36,13 +36,14 @@ fn targets(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT f.id FROM findings f
     WHERE f.status='open' AND f.propose_reason IS NOT NULL
-    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.finding_id=f.id AND p.closed_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.finding_id=f.id AND {owns_work})
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.finding_id=f.id
         AND a.kind='planner_question' AND a.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
         AND {finding_id}=f.id
         AND {marked_at} IS NOT DISTINCT FROM f.propose_requested_at)",
         event_kind::FINDING_PLANNER_EXHAUSTED,
+        owns_work = super::planners::switch::owns_work(dialect),
         finding_id = dialect.json_field("e.payload", "$.finding_id", JsonType::Integer),
         marked_at = dialect.json_field("e.payload", "$.marked_at", JsonType::Integer),
     )
@@ -159,8 +160,10 @@ impl<E: TransactionEntries> StoreQueue<E> {
                     && route_of(&tx, finding)? == PlannerAnswerRoute::NewPlanner
                     && !SqlRead::query_row(
                         &tx,
-                        "SELECT EXISTS(SELECT 1 FROM planners WHERE finding_id=?1
-                         AND closed_at IS NULL)",
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM planners p WHERE finding_id=?1 AND {})",
+                            super::planners::switch::owns_work(tx.dialect())
+                        ),
                         sql_params![finding],
                         |r| r.get::<_, bool>(0),
                     )?
@@ -441,8 +444,11 @@ fn is_target(conn: &impl SqlRead, finding: FindingId) -> Result<bool> {
 /// so counted only when it ends without deciding the finding.
 fn planners_since_mark(conn: &impl SqlRead, finding: &Finding) -> Result<usize> {
     let count: i64 = conn.query_row(
-        "SELECT count(*) FROM planners WHERE finding_id=?1 AND created_at>=?2
-         AND answer_wait_at IS NULL",
+        &format!(
+            "SELECT count(*) FROM planners p WHERE finding_id=?1 AND created_at>=?2
+         AND answer_wait_at IS NULL AND {}",
+            super::planners::switch::counts_as_planner(conn.dialect())
+        ),
         sql_params![finding.id, finding.propose_requested_at.unwrap_or(0)],
         |r| r.get(0),
     )?;

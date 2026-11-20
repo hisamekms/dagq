@@ -139,7 +139,7 @@ impl FakeSessions {
             start: start_token(&start),
         }
         .to_string();
-        if self.drive_codex_planners.load(Ordering::SeqCst) {
+        if self.drive_codex_planners.load(Ordering::SeqCst) && command.contains("'--codex' ") {
             self.files.advance_clock_to(self.clock.system_time());
             let launch = env
                 .iter()

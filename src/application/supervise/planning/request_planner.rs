@@ -246,7 +246,7 @@ impl PlanningState {
 
     /// The initial prompt of `planner` for `request`, from the queue as it
     /// is now, after handing it the request's words.
-    fn request_planner_material(
+    pub(super) fn request_planner_material(
         &mut self,
         env: &mut PlanningEnv<'_>,
         planner: &PlannerSession,

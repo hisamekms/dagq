@@ -1117,16 +1117,20 @@ where
     /// work ([`super::plan_requests::REVISE_WAITS_FOR_GOAL`]): it waits.
     fn claim_revise(&mut self, proposal_id: ProposalId) -> Result<bool> {
         let now = self.generators.clock.now();
-        Ok(self.write_sql(
-            "claim_revise",
+        let tx = self.write_entry("claim_revise")?;
+        let changed = tx.execute(
             &format!(
                 "UPDATE proposals SET revise_sent_at=?2, revise_planner_id=NULL
                  WHERE id=?1 AND status='revising' AND revise_sent_at IS NULL
-                 AND NOT {}",
-                super::plan_requests::REVISE_WAITS_FOR_GOAL
+                 AND NOT {}
+                 AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.proposal_id=proposals.id AND {})",
+                super::plan_requests::REVISE_WAITS_FOR_GOAL,
+                super::planners::switch::pending_switch(tx.dialect(), "p.id")
             ),
             sql_params![proposal_id, now],
-        )? == 1)
+        )? == 1;
+        tx.commit()?;
+        Ok(changed)
     }
 
     fn revise_goal_wait(&self, proposal_id: ProposalId) -> Result<ReviseGoalWait> {
@@ -1161,33 +1165,15 @@ where
         answers: &[AskId],
     ) -> Result<()> {
         let tx = self.write_entry("revise_sent")?;
-        SqlWrite::execute(
+        record_revise_sent(
             &tx,
-            "UPDATE proposals SET revise_planner_id=?2, unresponsive_at=NULL
-             WHERE id=?1 AND status='revising'",
-            sql_params![proposal_id, planner],
+            proposal_id,
+            planner,
+            workspace,
+            opened,
+            answers,
+            self.generators.clock.now(),
         )?;
-        event(
-            &tx,
-            anchor(&tx, proposal_id)?,
-            None,
-            EventKind::PlanReviseSent,
-            json!({
-                "proposal_id": proposal_id,
-                "planner_id": planner,
-                "workspace_id": workspace,
-                "opened": opened.is_some(),
-                "launch": opened.map(ActorLaunch::to_value),
-                "effort_raised": opened.is_some_and(|launch| {
-                    launch.escalated_from.is_some() && launch.escalated_from != launch.effort
-                }),
-                "effort_not_raised": opened.is_none().then_some(LIVE_PLANNER_NOT_RAISED),
-            }),
-        )?;
-        let now = self.generators.clock.now();
-        for &ask in answers {
-            deliver_ask_in(&tx, ask, workspace, now)?;
-        }
         tx.commit()?;
         Ok(())
     }
@@ -1517,6 +1503,58 @@ where
         )?;
         ids.into_iter().map(|id| read_ask(&tx, id)).collect()
     }
+}
+
+/// Change the revise recipient and record the reasons and answers that
+/// went with its input. The answers close in the same transaction.
+pub(super) fn record_revise_sent(
+    tx: &impl SqlWrite,
+    proposal_id: ProposalId,
+    planner: PlannerId,
+    workspace: &str,
+    opened: Option<&ActorLaunch>,
+    answers: &[AskId],
+    now: i64,
+) -> Result<()> {
+    let reasons: Option<String> = tx.query_row(
+        "SELECT revise_reasons FROM proposals WHERE id=?1",
+        sql_params![proposal_id],
+        |row| row.get(0),
+    )?;
+    let reasons: Vec<String> = reasons
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    SqlWrite::execute(
+        tx,
+        "UPDATE proposals SET revise_planner_id=?2, unresponsive_at=NULL
+         WHERE id=?1 AND status='revising'",
+        sql_params![proposal_id, planner],
+    )?;
+    event(
+        tx,
+        anchor(tx, proposal_id)?,
+        None,
+        EventKind::PlanReviseSent,
+        json!({
+            "proposal_id": proposal_id,
+            "planner_id": planner,
+            "workspace_id": workspace,
+            "opened": opened.is_some(),
+            "answers": answers,
+            "reasons": reasons,
+            "launch": opened.map(ActorLaunch::to_value),
+            "effort_raised": opened.is_some_and(|launch| {
+                launch.escalated_from.is_some() && launch.escalated_from != launch.effort
+            }),
+            "effort_not_raised": opened.is_none().then_some(LIVE_PLANNER_NOT_RAISED),
+        }),
+    )?;
+    for &ask in answers {
+        deliver_ask_in(tx, ask, workspace, now)?;
+    }
+    Ok(())
 }
 
 /// Record `predictions` as one `task_weight_predicted` per task (ADR-0079

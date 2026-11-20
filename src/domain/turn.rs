@@ -364,6 +364,49 @@ pub fn new_session_prompt(task_prompt: &str, request: &str) -> String {
     format!("{task_prompt}\n\n{request}")
 }
 
+/// The current session's model response and last identified thread. A
+/// session-missing record has a null ID and clears the previous thread.
+pub fn session_facts(events: &[RunEvent]) -> (bool, Option<String>) {
+    let current = super::provider_switch::since_session_start(events);
+    let created = current
+        .iter()
+        .any(|e| e.kind == EventKind::TurnFinished && e.payload["session_created"] == true);
+    let identified = current
+        .iter()
+        .rfind(|e| e.kind == EventKind::TurnSessionIdentified)
+        .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned));
+    (created, identified)
+}
+
+/// The wrapper's resume choice for a provider that names its own thread,
+/// or a named session that has created or kept a conversation.
+pub fn session_to_resume(
+    name: &str,
+    created: bool,
+    identified: Option<&str>,
+    from_output: bool,
+    kept: bool,
+) -> Option<String> {
+    if from_output {
+        identified.map(str::to_owned)
+    } else {
+        (created || kept).then(|| name.to_owned())
+    }
+}
+
+/// Whether a planner's next turn has a session it can resume.
+pub fn planner_resumes(
+    name: String,
+    provider: super::Provider,
+    events: &[RunEvent],
+    kept: impl FnOnce(&str) -> bool,
+) -> bool {
+    let (created, identified) = session_facts(events);
+    let from_output = provider == super::Provider::Codex;
+    let kept = !from_output && !created && kept(&name);
+    session_to_resume(&name, created, identified.as_deref(), from_output, kept).is_some()
+}
+
 /// The name of the session of the headless planner opened at `created_at`
 /// (Unix seconds) whose directory is `dir` (ADR-t1394-2 decision 2): a
 /// UUID of its own, which a planner of the same ID in a queue made again

@@ -45,6 +45,7 @@ mod review_revise_limit;
 mod review_subagents;
 mod ruleset_gate;
 mod runtime_planner_provider;
+mod runtime_planner_switch;
 mod stage_peaks;
 mod task_release;
 mod triage;

@@ -436,6 +436,8 @@ string_enum!(PlannerCloseCode {
     RuntimeExitTimedOut => "runtime_exit_timed_out",
     RuntimeAnswerWait => "runtime_answer_wait",
     Abandoned => "abandoned",
+    ProviderSwitched => "provider_switched",
+    SwitchNotStarted => "switch_not_started",
 });
 
 // How a planner session stands (see [`PlannerSession::state`]): `opening`
@@ -2883,6 +2885,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "plan_review_failed",
     "goal_review_failed",
     "planner_unresponsive",
+    EventKind::PlannerSwitchStalled.as_str(),
     "draft_planner_exhausted",
     "finding_planner_exhausted",
     // Never recorded: `status` derives it on each read, so no event wakes
@@ -3197,7 +3200,9 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
             None
         }
         (Some(EventKind::GoalReviewFailed), _) => Some(AttentionNext::GoalReviewByHand),
-        (Some(EventKind::PlannerUnresponsive), _) => Some(AttentionNext::CheckPlanner),
+        (Some(EventKind::PlannerUnresponsive | EventKind::PlannerSwitchStalled), _) => {
+            Some(AttentionNext::CheckPlanner)
+        }
         (Some(EventKind::DraftPlannerExhausted), _) => Some(AttentionNext::DecideDraft),
         (Some(EventKind::FindingPlannerExhausted), _) => Some(AttentionNext::DecideFinding),
         // A Spike's request has nobody who asked (ADR-t1487-1): its

@@ -66,7 +66,7 @@ use super::{
 };
 use crate::domain::{
     ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun,
-    provider_switch::{session_starts, since_session_start},
+    provider_switch::session_starts,
     sccache::SccacheTarget,
     stall::StallConfig,
     tokens::{ExecutionTokens, ModelTokens, TokenSource, TokenUsage},
@@ -74,7 +74,8 @@ use crate::domain::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
         TurnSignal, commands_path, counted_rollout_turns, exit_path, idle_marker,
         new_session_prompt, output_path, pending, renew_wall_marker, request_path, request_to_take,
-        session_name, taken_path, thread_total_own, turn_own_cost, turn_own_models, turns_dir,
+        session_facts, session_name, session_to_resume, taken_path, thread_total_own,
+        turn_own_cost, turn_own_models, turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -291,17 +292,12 @@ struct Agent {
 
 impl Agent {
     fn new(name: String, provider: Provider, events: &[RunEvent]) -> Self {
-        let current = since_session_start(events);
+        let (created, identified) = session_facts(events);
         Self {
             provider,
             starts: session_starts(events),
-            created: current
-                .iter()
-                .any(|e| e.kind == EventKind::TurnFinished && e.payload["session_created"] == true),
-            identified: current
-                .iter()
-                .rfind(|e| e.kind == EventKind::TurnSessionIdentified)
-                .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned)),
+            created,
+            identified,
             name,
         }
     }
@@ -320,11 +316,13 @@ fn starts_anew(on: &Agent, provider: Provider, events: &[RunEvent]) -> bool {
 /// agent `kept` it (a turn that failed before an answer may have left it).
 /// The caller looks for a kept session only when the answer depends on it.
 fn resumed_session(on: &Agent, from_output: bool, kept: bool) -> Option<String> {
-    if from_output {
-        on.identified.clone()
-    } else {
-        (on.created || kept).then(|| on.name.clone())
-    }
+    session_to_resume(
+        &on.name,
+        on.created,
+        on.identified.as_deref(),
+        from_output,
+        kept,
+    )
 }
 
 /// How a turn ended.
@@ -1018,6 +1016,11 @@ impl<'a> Turns<'a> {
         }
     }
 
+    fn acknowledges_handoff_before_spawn(&self, turn: u64) -> bool {
+        turn == 1
+            && matches!(&self.owner, TurnOwner::Planner { launch, .. } if launch.switched_from.is_some())
+    }
+
     /// Run turn `turn` with `prompt` on the agent `on` is of, resuming the
     /// session `resume` (or starting one), and record it. A turn that may
     /// still run when an error ends the wrapper is stopped with its group
@@ -1063,6 +1066,11 @@ impl<'a> Turns<'a> {
             prepare_local_checks(self.files, run);
         }
         let (without_env, with_env) = self.sccache_turn(run_dir, turn);
+        if self.acknowledges_handoff_before_spawn(turn) {
+            // Claim receipt of the initial prompt before any agent can use
+            // it. The queue refuses this record for a retired recipient.
+            self.started(turn, resume, on, request, None, limits)?;
+        }
         let session = match resume {
             Some(id) => TurnSession::Resume(id),
             None => TurnSession::New(&on.name),
@@ -1335,7 +1343,21 @@ impl<'a> Turns<'a> {
                 *registered = true;
             }
         }
-        self.started(turn, resume, on, request, Some(child.id()), limits)?;
+        if self.acknowledges_handoff_before_spawn(turn) {
+            let pid = child.id();
+            let start = self
+                .processes
+                .start_identity(pid)
+                .map(|start| crate::domain::background_wrapper::start_token(&start));
+            self.record(
+                EventKind::PlannerTurnProcessStarted,
+                json!({
+                    "turn": turn, "pid": pid, "start": start,
+                }),
+            )?;
+        } else {
+            self.started(turn, resume, on, request, Some(child.id()), limits)?;
+        }
         let (exit, stop, mut tail) =
             self.follow(run_dir, turn, on, child, reader, stdout, limits)?;
         // What it wrote after the last look, said as what came before: a
@@ -1456,6 +1478,9 @@ impl<'a> Turns<'a> {
         if let Some(launch) = launch {
             payload["launch"] = launch;
         }
+        if self.acknowledges_handoff_before_spawn(turn) {
+            payload["before_spawn"] = json!(true);
+        }
         self.record(EventKind::TurnStarted, payload)?;
         say(self.background, &format!("turn {turn} started: {what}"));
         Ok(())
@@ -1481,7 +1506,9 @@ impl<'a> Turns<'a> {
                 .as_deref(),
             StallConfig::default().turn_limits(),
         );
-        self.started(turn, resume, on, request, None, limits)?;
+        if !self.acknowledges_handoff_before_spawn(turn) {
+            self.started(turn, resume, on, request, None, limits)?;
+        }
         let result = TurnResult {
             is_error: true,
             failure: Some(TurnFailure::Launch),
@@ -1816,6 +1843,65 @@ fn turn_look(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_planner_resumes_an_identified_thread_or_a_created_or_kept_named_session() {
+        use crate::domain::turn::planner_resumes;
+        let event = |kind: EventKind, payload: serde_json::Value| RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let identified = event(
+            EventKind::TurnSessionIdentified,
+            json!({"session_id": "thread"}),
+        );
+        let finished = event(
+            EventKind::TurnFinished,
+            json!({"session_id": null, "session_created": false}),
+        );
+        assert!(planner_resumes(
+            "unused".into(),
+            Provider::Codex,
+            &[identified.clone(), finished.clone()],
+            |_| panic!("Codex names its own thread")
+        ));
+        let missing = event(
+            EventKind::TurnSessionIdentified,
+            json!({"session_id": null, "missing": "thread"}),
+        );
+        assert!(!planner_resumes(
+            "unused".into(),
+            Provider::Codex,
+            &[identified, finished, missing],
+            |_| false
+        ));
+        let named_at_start = event(EventKind::TurnStarted, json!({"session_id": "named"}));
+        assert!(!planner_resumes(
+            "named".into(),
+            Provider::Claude,
+            std::slice::from_ref(&named_at_start),
+            |_| false
+        ));
+        assert!(planner_resumes(
+            "named".into(),
+            Provider::Claude,
+            &[named_at_start],
+            |name| name == "named"
+        ));
+        let created = event(EventKind::TurnFinished, json!({"session_created": true}));
+        assert!(planner_resumes(
+            "named".into(),
+            Provider::Claude,
+            &[created],
+            |_| panic!("already created")
+        ));
+    }
     use crate::application::memory_files::MemoryFiles;
     use crate::domain::event_kind;
 

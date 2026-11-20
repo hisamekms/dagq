@@ -82,6 +82,21 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
+    if event.kind == EventKind::PlannerSwitchStalled {
+        for key in [
+            "source",
+            "planner_id",
+            "request_id",
+            "finding_id",
+            "proposal_id",
+            "drafts",
+            "asks",
+        ] {
+            if let Some(value) = payload.get(key).filter(|value| !value.is_null()) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
     if event.kind == EventKind::AdmissionStalled {
         for key in ["supervisor", "reasons"] {
             if let Some(value) = payload.get(key) {

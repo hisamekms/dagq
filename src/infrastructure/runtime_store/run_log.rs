@@ -551,6 +551,18 @@ impl<E: TransactionEntries> StoreQueue<E> {
         // the busy timeout, when another supervisor wrote at the same time.
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
         let tx = self.write_entry("record_queue_event")?;
+        if kind == EventKind::TurnStarted && payload["before_spawn"] == true {
+            let planner = payload["planner_id"]
+                .as_i64()
+                .context("initial turn must name its planner")?;
+            let can_start: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM planners WHERE id=?1 AND closed_at IS NULL
+                    AND workspace_id IS NOT NULL)",
+                sql_params![planner],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(can_start, "planner {planner} has no open wrapper handle");
+        }
         let id = queue_event(&tx, kind, &payload)?;
         audit_of_queue_event(&tx, kind, &payload)?;
         tx.commit()?;

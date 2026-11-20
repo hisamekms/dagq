@@ -115,6 +115,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
     /// `false`, with nothing recorded, when the row was closed already.
     pub fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
         let tx = self.write_entry("end_planner")?;
+        // The switch pass owns a recipient until its first turn is recorded.
+        use crate::infrastructure::planners::switch::{pending, pending_source};
+        if pending(&tx, id)? || pending_source(&tx, id)? {
+            return Ok(false);
+        }
         let now = self.generators.clock.now();
         let closed = SqlWrite::execute(
             &tx,
@@ -187,6 +192,28 @@ impl<E: TransactionEntries> SessionRegistry for StoreQueue<E> {
     }
     fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()> {
         StoreQueue::planner_workspace_created(self, id, workspace_id)
+    }
+    fn planner_switch_events(&self) -> Result<Vec<RunEvent>> {
+        StoreQueue::planner_switch_events(self)
+    }
+    fn planner_has_operations(&self, source: PlannerId) -> Result<bool> {
+        StoreQueue::planner_has_operations(self, source)
+    }
+    fn reserve_planner_switch(
+        &self,
+        source: PlannerId,
+        previous: Option<PlannerId>,
+        launch: &crate::domain::actor_model::ActorLaunch,
+    ) -> Result<Option<PlannerSession>> {
+        StoreQueue::reserve_planner_switch(self, source, previous, launch)
+    }
+    fn retire_planner_switch(
+        &self,
+        switch: &crate::domain::planner::PlannerSwitch,
+        workspace: Option<&str>,
+        stalled: Option<&[crate::domain::AskId]>,
+    ) -> Result<bool> {
+        StoreQueue::retire_planner_switch(self, switch, workspace, stalled)
     }
     fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
         StoreQueue::close_planner(self, id, error)

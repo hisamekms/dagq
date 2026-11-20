@@ -539,6 +539,28 @@ impl SessionRegistry for SessionRecords {
     fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()> {
         unreachable!("planner_workspace_created is not what the test reaches")
     }
+    fn planner_switch_events(&self) -> Result<Vec<RunEvent>> {
+        unreachable!()
+    }
+    fn planner_has_operations(&self, source: PlannerId) -> Result<bool> {
+        unreachable!()
+    }
+    fn reserve_planner_switch(
+        &self,
+        source: PlannerId,
+        previous: Option<PlannerId>,
+        launch: &crate::domain::actor_model::ActorLaunch,
+    ) -> Result<Option<PlannerSession>> {
+        unreachable!()
+    }
+    fn retire_planner_switch(
+        &self,
+        switch: &crate::domain::planner::PlannerSwitch,
+        workspace: Option<&str>,
+        stalled: Option<&[crate::domain::AskId]>,
+    ) -> Result<bool> {
+        unreachable!()
+    }
     fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
         unreachable!("close_planner is not what the test reaches")
     }

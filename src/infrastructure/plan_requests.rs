@@ -153,7 +153,7 @@ fn targets(conn: &impl SqlRead) -> String {
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
         AND o.status IN ('parked','planning','reviewing','awaiting_answer')))
-    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id AND p.closed_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id AND {owns_work})
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.request_id=r.id
         AND a.kind='planner_question' AND a.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM asks a JOIN tasks t ON t.id=a.task_id AND t.status='draft'
@@ -167,11 +167,12 @@ fn targets(conn: &impl SqlRead) -> String {
             AND {reopened_proposal}=t.proposal_id)
         AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=t.proposal_id AND x.status!='canceled'))
     AND NOT ", goal_replanned_elsewhere!(), "
-    AND NOT EXISTS(SELECT 1 FROM {refs} j JOIN planners p ON p.closed_at IS NULL
+    AND NOT EXISTS(SELECT 1 FROM {refs} j JOIN planners p ON {owns_work}
         AND p.origin='runtime' AND (p.draft_task_id={ref_id}
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
                  AND m.task_id={ref_id}))
         WHERE {ref_kind}='task')"),
+        owns_work = super::planners::switch::owns_work(conn.dialect()),
         refs = conn.dialect().json_elements("r.refs"),
         reopened_proposal = conn.dialect().json_field("d.material", "$.proposal_id", JsonType::Integer),
         ref_id = conn.dialect().json_field("j.value", "$.id", JsonType::Integer),
@@ -365,7 +366,15 @@ impl<E: TransactionEntries> PlanRequestStore for StoreQueue<E> {
                 super::draft_planners::answer_request_port(&tx, &ask)? == Some(request)
                     && super::draft_planners::route_of_port(&tx, &ask)?
                         == PlannerAnswerRoute::NewPlanner
-                    && open_planner_of(&tx, request)?.is_none()
+                    && !SqlRead::query_row(
+                        &tx,
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=?1 AND {})",
+                            super::planners::switch::owns_work(tx.dialect())
+                        ),
+                        sql_params![request],
+                        |r| r.get::<_, bool>(0),
+                    )?
                     && !SqlRead::query_row(
                         &tx,
                         concat!(
@@ -768,7 +777,10 @@ pub(super) fn read_request(conn: &impl SqlRead, id: RequestId) -> Result<PlanReq
         |r| r.get(0),
     )?;
     let planners: i64 = conn.query_row(
-        "SELECT count(*) FROM planners WHERE request_id=?1 AND answer_wait_at IS NULL",
+        &format!(
+            "SELECT count(*) FROM planners p WHERE request_id=?1 AND answer_wait_at IS NULL AND {}",
+            super::planners::switch::counts_as_planner(conn.dialect())
+        ),
         sql_params![id],
         |r| r.get(0),
     )?;

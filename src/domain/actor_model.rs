@@ -641,7 +641,7 @@ pub enum RuntimePlannerRoute {
 
 /// Apply the headless job rules to a new planner (ADR-t2930-1 decision 5).
 /// Explicitly disabling Claude also sends an unnamed planner to Codex when
-/// available. An existing planner's turns keep their original provider.
+/// available.
 pub fn runtime_planner_route(
     launch: &ActorLaunch,
     switchable: bool,
@@ -664,6 +664,66 @@ pub fn runtime_planner_route(
             }
             RuntimePlannerRoute::NoTarget(reasons)
         }
+    }
+}
+
+/// A wall on an initial planner turn, if it is a provider failure. A
+/// resumable session, a queue operation or a prior switch keeps its provider.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PlannerFirstTurn {
+    Switch(ActorLaunch, SwitchReason),
+    Wait,
+}
+
+pub struct PlannerSwitchConditions {
+    pub switchable: bool,
+    pub no_claude: bool,
+    pub fallback: bool,
+    pub resumes: bool,
+    pub operated: bool,
+    pub already_switched: bool,
+}
+
+pub fn planner_first_turn_switch(
+    launch: &ActorLaunch,
+    provider: Provider,
+    failure: crate::domain::turn::TurnFailure,
+    conditions: PlannerSwitchConditions,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> Option<PlannerFirstTurn> {
+    let reason = SwitchReason::of_failure(failure)?;
+    if !conditions.switchable
+        || !conditions.fallback
+        || conditions.resumes
+        || conditions.operated
+        || conditions.already_switched
+    {
+        return Some(PlannerFirstTurn::Wait);
+    }
+    let actual = ActorLaunch {
+        provider,
+        ..launch.clone()
+    };
+    match runtime_planner_route(&actual, true, conditions.no_claude, true, |candidate| {
+        if candidate == provider {
+            Some(reason)
+        } else {
+            unusable(candidate)
+        }
+    }) {
+        RuntimePlannerRoute::Start(mut next) if next.provider != provider => {
+            if launch.provider == next.provider {
+                next = ActorLaunch {
+                    switched_from: Some(provider),
+                    switch_reason: Some(reason),
+                    ..launch.clone()
+                };
+            } else {
+                next.switch_reason = Some(reason);
+            }
+            Some(PlannerFirstTurn::Switch(next, reason))
+        }
+        _ => Some(PlannerFirstTurn::Wait),
     }
 }
 
@@ -923,6 +983,95 @@ pub const fn records_unusable(provider: Provider, switchable: bool, fallback: bo
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_initial_planner_wall_routes_from_the_actual_provider_only() {
+        use crate::domain::turn::TurnFailure;
+        let from = ActorLaunch::default_of(ModelRole::RuntimePlanner);
+        let allowed = || PlannerSwitchConditions {
+            switchable: true,
+            no_claude: false,
+            fallback: true,
+            resumes: false,
+            operated: false,
+            already_switched: false,
+        };
+        for (failure, reason) in [
+            (TurnFailure::Authentication, SwitchReason::Authentication),
+            (TurnFailure::UsageLimit, SwitchReason::UsageLimit),
+            (TurnFailure::Launch, SwitchReason::LaunchFailed),
+        ] {
+            for (provider, destination) in [
+                (Provider::Claude, Provider::Codex),
+                (Provider::Codex, Provider::Claude),
+            ] {
+                let Some(PlannerFirstTurn::Switch(used, classified)) =
+                    planner_first_turn_switch(&from, provider, failure, allowed(), |_| None)
+                else {
+                    panic!("{provider:?} should switch after {failure:?}");
+                };
+                assert_eq!(classified, reason);
+                assert_eq!(used.provider, destination);
+                assert_eq!(used.switched_from, Some(provider));
+                assert_eq!(used.switch_reason, Some(reason));
+                assert_eq!(used.model, None);
+                assert_eq!(used.effort, None);
+            }
+        }
+        for conditions in [
+            PlannerSwitchConditions {
+                switchable: false,
+                ..allowed()
+            },
+            PlannerSwitchConditions {
+                no_claude: true,
+                ..allowed()
+            },
+            PlannerSwitchConditions {
+                fallback: false,
+                ..allowed()
+            },
+            PlannerSwitchConditions {
+                resumes: true,
+                ..allowed()
+            },
+            PlannerSwitchConditions {
+                operated: true,
+                ..allowed()
+            },
+            PlannerSwitchConditions {
+                already_switched: true,
+                ..allowed()
+            },
+        ] {
+            assert_eq!(
+                planner_first_turn_switch(
+                    &from,
+                    Provider::Codex,
+                    TurnFailure::UsageLimit,
+                    conditions,
+                    |_| None
+                ),
+                Some(PlannerFirstTurn::Wait)
+            );
+        }
+        assert_eq!(
+            planner_first_turn_switch(
+                &from,
+                Provider::Codex,
+                TurnFailure::Launch,
+                allowed(),
+                |_| Some(SwitchReason::ExecutableMissing)
+            ),
+            Some(PlannerFirstTurn::Wait)
+        );
+        for failure in [TurnFailure::Model, TurnFailure::Sandbox, TurnFailure::Other] {
+            assert_eq!(
+                planner_first_turn_switch(&from, Provider::Claude, failure, allowed(), |_| None),
+                None
+            );
+        }
+    }
 
     #[test]
     fn runtime_planner_starts_on_its_configured_provider_or_uses_the_jobs_fallback() {

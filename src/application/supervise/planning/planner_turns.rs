@@ -1,11 +1,12 @@
-//! An existing runtime planner keeps its provider (ADR-t2930-1 decision
-//! 5). At a wall it stays open and its failed call takes priority once
+//! A runtime planner with a resumable session or recorded work keeps its
+//! provider (ADR-t2930-1 decision 5). Its failed call takes priority once
 //! that provider's hold ends. Only Claude's login and usage limit open
 //! the queue's hold ask. Revise and answer delivery waits on the
 //! destination's provider and on its failed turn's retry. A turn stopped
 //! by the wrapper's `[stall]` limits is reported to the inbox.
 
 use super::headless::{last_turn, provider_failure};
+use super::planner_switch::{SwitchHistory, recorded_wall};
 use super::provider::{PROVIDER_RETRY, retry_text};
 use super::*;
 use crate::application::{planner::PlannerView, planner_idle_marker};
@@ -217,20 +218,28 @@ impl PlanningState {
     /// last turn failed at a provider wall: Claude's login and usage limit
     /// raise the queue's hold ask, and other walls raise a provider hold.
     /// Once the hold ends, retry the failed call as the next request.
-    pub(in crate::application::supervise) fn tend_planner_walls(
+    pub(super) fn tend_planner_walls(
         &mut self,
         env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
-    ) -> Result<()> {
+        switches: &mut SwitchHistory,
+    ) -> Result<bool> {
+        let mut changed = false;
         for view in views {
+            if switches.holds_recipient(view.planner.id) {
+                continue;
+            }
             let Some(failure) = self.planner_at_wall(env, view) else {
                 continue;
             };
-            if let Err(error) = self.planner_wall(env, view, failure) {
-                warn!(error = %format_args!("{error:#}"), "planner {}: its turn at {} could not be tended: {error:#}", view.planner.id, failure.as_str());
+            match self.planner_wall(env, view, failure, switches) {
+                Ok(switched) => changed |= switched,
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "planner {}: its turn at {} could not be tended: {error:#}", view.planner.id, failure.as_str())
+                }
             }
         }
-        Ok(())
+        Ok(changed)
     }
 
     fn planner_wall(
@@ -238,13 +247,14 @@ impl PlanningState {
         env: &mut PlanningEnv<'_>,
         view: &PlannerView,
         failure: TurnFailure,
-    ) -> Result<()> {
+        switches: &mut SwitchHistory,
+    ) -> Result<bool> {
         let id = view.planner.id;
         if SwitchReason::of_failure(failure).is_none() {
-            return Ok(());
+            return Ok(false);
         }
         let Some(workspace) = view.planner.workspace_id.clone() else {
-            return Ok(());
+            return Ok(false);
         };
         let events = env.queue.planner_turn_events(id)?;
         let Some((finished_at, finished)) = events
@@ -253,50 +263,55 @@ impl PlanningState {
             .rfind(|(_, e)| e.kind == EventKind::TurnFinished)
             .map(|(at, e)| (at, e.payload.clone()))
         else {
-            return Ok(());
+            return Ok(false);
         };
         let provider = turn_provider(&finished);
         let turn = finished["turn"].as_u64().unwrap_or(0);
         let message = finished["message"].as_str().unwrap_or("no message");
-        let reason = match wall_step(
+        let step = wall_step(
             provider,
             failure,
             // The retry after the turn answers it ([`wall_answered`]).
             wall_answered(&events, finished_at),
             provider_switch::waiting_on(&events, turn),
             env.jobs.provider_held(provider).is_some(),
-        ) {
-            WallStep::Nothing => return Ok(()),
-            WallStep::Hold { reason, wall } => {
-                let ask_id = match wall {
-                    Some(wall) => {
-                        let (outcome, _) =
-                            ask::hold(&mut *env.queue, NewHold::wall(wall, None, None))?;
-                        env.jobs.remember_queue_hold(&outcome.ask);
-                        Some(outcome.ask.id)
-                    }
-                    _ => {
-                        env.jobs
-                            .hold_provider(&mut env.pass, provider, reason, None, message)?;
-                        None
-                    }
-                };
-                // Kept as a result, though the next pass would find it
-                // missing: found again, the hold would be taken again, and
-                // a hold ask a person answered meanwhile opened again. What
-                // is kept goes before each pass reads the queue.
-                env.queue.record_queue_event(
-                    EventKind::ProviderWaiting,
-                    waiting_payload(provider, id, turn, reason, message, ask_id),
-                )?;
-                warn!(
-                    "planner {id} of the runtime: its turn {turn} failed on {} ({}); it waits for that provider: {message}",
-                    provider.as_str(),
-                    reason.as_str()
-                );
-                return Ok(());
-            }
-            WallStep::Retry(reason) => reason,
+        );
+        if let WallStep::Hold { reason, wall } = step {
+            let ask_id = match wall {
+                Some(wall) => {
+                    let (outcome, _) = ask::hold(&mut *env.queue, NewHold::wall(wall, None, None))?;
+                    env.jobs.remember_queue_hold(&outcome.ask);
+                    Some(outcome.ask.id)
+                }
+                _ => {
+                    env.jobs
+                        .hold_provider(&mut env.pass, provider, reason, None, message)?;
+                    None
+                }
+            };
+            // Kept as a result, though the next pass would find it
+            // missing: found again, the hold would be taken again, and
+            // a hold ask a person answered meanwhile opened again. What
+            // is kept goes before each pass reads the queue.
+            env.queue.record_queue_event(
+                EventKind::ProviderWaiting,
+                waiting_payload(provider, id, turn, reason, message, ask_id),
+            )?;
+            warn!(
+                "planner {id} of the runtime: its turn {turn} failed on {} ({}); the provider is held: {message}",
+                provider.as_str(),
+                reason.as_str()
+            );
+        }
+        if turn == 1
+            && !wall_answered(&events, finished_at)
+            && let Some((provider, recorded)) = recorded_wall(&finished)
+            && self.try_first_turn_switch(env, switches, view, &events, provider, recorded)?
+        {
+            return Ok(true);
+        }
+        let WallStep::Retry(reason) = step else {
+            return Ok(false);
         };
         // The call that first met the wall, which a retry that met it
         // again carries too.
@@ -322,7 +337,7 @@ impl PlanningState {
             "planner {id} of the runtime: {} can be used again; the call of turn {turn} is made again",
             provider.as_str()
         );
-        Ok(())
+        Ok(false)
     }
 
     /// Tell the inbox, once per planner, of a headless planner of the

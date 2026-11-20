@@ -12,6 +12,7 @@ pub(super) mod draft_planner;
 pub(super) mod finding_planner;
 pub(super) mod goal_review;
 pub(super) mod plan_review;
+mod planner_switch;
 pub(super) mod planner_turns;
 pub(super) mod recurring;
 pub(super) mod replan_apply;
