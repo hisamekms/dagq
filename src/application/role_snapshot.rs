@@ -180,12 +180,35 @@ impl RunInput {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "role", content = "input", rename_all = "snake_case")]
 pub enum Input {
     Plan(Box<PlanInput>),
     Goal(Box<GoalInput>),
     Run(Box<RunInput>),
+}
+
+impl<'de> Deserialize<'de> for Input {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "role", content = "input", rename_all = "snake_case")]
+        enum Tagged {
+            Plan(serde_json::Value),
+            Goal(serde_json::Value),
+            Run(serde_json::Value),
+        }
+
+        // Resolve the tag before reading the body as JSON text. Serde's
+        // buffered tagged content (and from_value) cannot read string map
+        // keys as TaskId's integer newtype, unlike JSON's text deserializer.
+        // Buffering can occur when `input` precedes `role` in the object.
+        let input = match Tagged::deserialize(d)? {
+            Tagged::Plan(value) => serde_json::from_str(&value.to_string()).map(Self::Plan),
+            Tagged::Goal(value) => serde_json::from_str(&value.to_string()).map(Self::Goal),
+            Tagged::Run(value) => serde_json::from_str(&value.to_string()).map(Self::Run),
+        };
+        input.map_err(serde::de::Error::custom)
+    }
 }
 
 /// One file's exact bytes, not UTF-8 text: review.md may contain non-UTF-8

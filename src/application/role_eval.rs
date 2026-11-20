@@ -316,6 +316,103 @@ mod tests {
     use super::*;
     use crate::application::role_fixtures::{plan_snapshot as snapshot, run_snapshot};
     use serde_json::json;
+    mod volume {
+        use super::*;
+
+        #[test]
+        fn repository_dev_case_snapshots_remain_readable() {
+            for (harness, text) in [
+                (
+                    RoleHarness::PlanReview,
+                    include_str!("../../.dagq/role-evals/plan_review/dev.json"),
+                ),
+                (
+                    RoleHarness::GoalReview,
+                    include_str!("../../.dagq/role-evals/goal_review/dev.json"),
+                ),
+            ] {
+                let list: verdict::List = serde_json::from_str(text).unwrap();
+                assert!(!list.cases.is_empty());
+                for case in list.cases {
+                    let read = harness.snapshot(&case.snapshot).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(read).unwrap(),
+                        case.snapshot,
+                        "{}",
+                        case.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn production_plan_snapshot_round_trips_task_id_maps() {
+        use crate::domain::{TaskDetail, TaskId};
+        use std::collections::BTreeMap;
+
+        let mut original = snapshot(&"a".repeat(40));
+        let Input::Plan(plan) = &mut original.input else {
+            panic!("plan")
+        };
+        let Input::Run(run) = run_snapshot(&"a".repeat(40), None).input else {
+            panic!("run")
+        };
+        let expected = BTreeMap::from([
+            (TaskId::new(3953), vec!["production cases".into()]),
+            (
+                TaskId::new(3956),
+                vec!["compare candidates".into(), "measure".into()],
+            ),
+        ]);
+        let duplicate_reasons = BTreeMap::from([
+            (TaskId::new(3949), "duplicate".into()),
+            (TaskId::new(3950), "already_done".into()),
+        ]);
+        plan.expected = expected.clone();
+        plan.tasks.0.push(TaskDetail {
+            task: run.task.0,
+            membership_judgements: vec![],
+            dependencies: vec![],
+            goal_dependencies: vec![],
+            duplicate_of: None,
+            cancel_reason: None,
+            duplicates: duplicate_reasons.keys().copied().collect(),
+            duplicate_reasons: duplicate_reasons.clone(),
+            runs: vec![],
+            events: vec![],
+            processes: vec![],
+            origin: None,
+            follow_up_drafts: vec![],
+            revisit: None,
+            asks: vec![],
+            replans: vec![],
+            hold: None,
+        });
+
+        // Production record() writes JSON bytes; case loading first reads
+        // those bytes into a Value before the harness sees the snapshot.
+        let recorded = serde_json::to_vec_pretty(&original).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&recorded).unwrap();
+        let restored: Snapshot = serde_json::from_slice(&recorded).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), value);
+        assert_eq!(
+            value["input"]["input"]["expected"]["3953"],
+            json!(["production cases"])
+        );
+        assert_eq!(
+            value["input"]["input"]["tasks"][0]["duplicate_reasons"]["3949"],
+            "duplicate"
+        );
+        let read = RoleHarness::PlanReview.snapshot(&value).unwrap();
+        let Input::Plan(plan) = &read.input else {
+            panic!("plan")
+        };
+        assert_eq!(plan.expected, expected);
+        assert_eq!(plan.tasks.0[0].duplicate_reasons, duplicate_reasons);
+        assert_eq!(serde_json::to_value(&read).unwrap(), value);
+    }
+
     #[test]
     fn snapshots_build_the_production_prompt_and_reject_wrong_records() {
         let harness = RoleHarness::PlanReview;
