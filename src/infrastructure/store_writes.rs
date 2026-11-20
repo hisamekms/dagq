@@ -79,9 +79,25 @@ pub(super) fn set_task_owner(
 /// follows when the default changes (ADR-t1340-1).
 pub(super) fn insert_task(
     tx: &impl SqlWrite,
+    new: NewTask,
+    now: &str,
+    creator: Creator,
+) -> Result<Task> {
+    insert_task_recommended(
+        tx,
+        new,
+        now,
+        creator,
+        DependencyRecommendation::from_process(None),
+    )
+}
+
+pub(super) fn insert_task_recommended(
+    tx: &impl SqlWrite,
     mut new: NewTask,
     now: &str,
     creator: Creator,
+    recommendation: DependencyRecommendation<'_>,
 ) -> Result<Task> {
     let dependencies = new.dependencies.clone();
     let goal_dependencies = new.goal_dependencies.clone();
@@ -140,10 +156,10 @@ pub(super) fn insert_task(
     // Inserted after the task, which is in its goal already, so the
     // cycle checks see the goal's wait for it (ADR-0038).
     for predecessor in dependencies {
-        insert_dependency(tx, id, predecessor, now)?;
+        insert_dependency(tx, id, predecessor, now, recommendation)?;
     }
     for goal_id in goal_dependencies {
-        insert_goal_dependency(tx, id, goal_id, now)?;
+        insert_goal_dependency(tx, id, goal_id, now, recommendation)?;
     }
     read_task(tx, id)
 }
@@ -232,11 +248,88 @@ pub(in crate::infrastructure) fn next_id(tx: &impl SqlRead, table: &str) -> Resu
     Ok(tx.next_id(table)?)
 }
 
+/// Only notices retain reasons. An issuer enables the team policy; plan
+/// review applies a verdict with no recommendation field and bypasses the
+/// planner requirement, while retaining the transaction's event actor.
+#[derive(Clone, Copy)]
+pub(super) struct DependencyRecommendation<'a> {
+    pub reason: Option<&'a str>,
+    pub team: bool,
+    pub require_reason: bool,
+}
+impl<'a> DependencyRecommendation<'a> {
+    pub fn from_process(reason: Option<&'a str>) -> Self {
+        Self::from_env(reason, |name| std::env::var_os(name).is_some())
+    }
+
+    // Startup validates both deployment forms before serving writes; only
+    // their presence is needed here, so mounted files are not re-read per edge.
+    fn from_env(reason: Option<&'a str>, configured: impl Fn(&str) -> bool) -> Self {
+        Self {
+            reason,
+            team: configured("DAGQ_OIDC_ISSUER") || configured("DAGQ_OIDC_ISSUER_FILE"),
+            require_reason: true,
+        }
+    }
+}
+
+/// Called only for a new edge, before its INSERT, inside its transaction.
+/// Refusal leaves the edge absent. Neither asks nor claim state is
+/// written here. The event's actor columns identify who added the edge.
+fn dependency_notice_payload(
+    tx: &impl SqlWrite,
+    task_id: TaskId,
+    target: Node,
+    recommendation: DependencyRecommendation<'_>,
+) -> Result<Option<Value>> {
+    if !recommendation.team {
+        return Ok(None);
+    }
+    let waiting = read_task(tx, task_id)?;
+    let (owner, priority, target) = match target {
+        Node::Task(id) => {
+            let task = read_task(tx, id)?;
+            (
+                task.owner().person().cloned(),
+                task.priority(),
+                json!({"task_id":id}),
+            )
+        }
+        Node::Goal(id) => {
+            let goal = read_goal(tx, id)?;
+            (
+                goal.owner().cloned(),
+                goal.priority(),
+                json!({"goal_id":id}),
+            )
+        }
+    };
+    let decision = crate::domain::dependency_notice::dependency_notice(
+        waiting.owner().person(),
+        waiting.priority(),
+        owner.as_ref(),
+        priority,
+    );
+    let reason = decision.recommendation(
+        super::task_store::actor_role(tx)?,
+        recommendation.reason,
+        recommendation.require_reason,
+    )?;
+    if !decision.notify {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "task_id":task_id,"depends_on":target,"owner":owner,
+        "priority_inversion":decision.priority_inversion,"reason":reason
+    })))
+}
+
 pub(super) fn insert_dependency(
     tx: &impl SqlWrite,
     task_id: TaskId,
     predecessor_id: TaskId,
     now: &str,
+    recommendation: DependencyRecommendation<'_>,
 ) -> Result<()> {
     task::check_not_self(task_id, predecessor_id)?;
     // Neither end of an edge of a task being replanned changes: its apply
@@ -253,12 +346,30 @@ pub(super) fn insert_dependency(
     // for the task (ADR-0038).
     let cycle = waits_for(tx, Node::Task(predecessor_id), Node::Task(task_id))?;
     task::check_acyclic(task_id, predecessor_id, cycle)?;
+    let exists = tx.exists(
+        "SELECT 1 FROM task_dependencies WHERE task_id=?1 AND predecessor_id=?2",
+        sql_params![task_id, predecessor_id],
+    )?;
+    let notice = if exists {
+        None
+    } else {
+        dependency_notice_payload(tx, task_id, Node::Task(predecessor_id), recommendation)?
+    };
     let inserted = tx.execute(
         "INSERT INTO task_dependencies(task_id, predecessor_id) VALUES (?1,?2)
          ON CONFLICT(task_id, predecessor_id) DO NOTHING",
         sql_params![task_id, predecessor_id],
     )?;
     if inserted != 0 {
+        if let Some(payload) = notice {
+            event(
+                tx,
+                task_id,
+                None,
+                EventKind::CrossOwnerDependencyNoticed,
+                payload,
+            )?;
+        }
         touch(tx, task_id, now)?;
         event(
             tx,
@@ -276,6 +387,7 @@ pub(super) fn insert_goal_dependency(
     task_id: TaskId,
     goal_id: GoalId,
     now: &str,
+    recommendation: DependencyRecommendation<'_>,
 ) -> Result<()> {
     let task = read_task(tx, task_id)?;
     task::check_dependencies_editable(&task)?;
@@ -283,12 +395,30 @@ pub(super) fn insert_goal_dependency(
     task::check_not_own_goal(&task, goal_id)?;
     let cycle = waits_for(tx, Node::Goal(goal_id), Node::Task(task_id))?;
     task::check_goal_acyclic(task_id, goal_id, cycle)?;
+    let exists = tx.exists(
+        "SELECT 1 FROM task_goal_dependencies WHERE task_id=?1 AND goal_id=?2",
+        sql_params![task_id, goal_id],
+    )?;
+    let notice = if exists {
+        None
+    } else {
+        dependency_notice_payload(tx, task_id, Node::Goal(goal_id), recommendation)?
+    };
     let inserted = tx.execute(
         "INSERT INTO task_goal_dependencies(task_id, goal_id) VALUES (?1,?2)
          ON CONFLICT(task_id, goal_id) DO NOTHING",
         sql_params![task_id, goal_id],
     )?;
     if inserted != 0 {
+        if let Some(payload) = notice {
+            event(
+                tx,
+                task_id,
+                None,
+                EventKind::CrossOwnerDependencyNoticed,
+                payload,
+            )?;
+        }
         touch(tx, task_id, now)?;
         event(
             tx,
@@ -432,6 +562,90 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_issuer_from_either_deployment_form_enables_notices() {
+        for (setting, team) in [
+            ("DAGQ_OIDC_ISSUER", true),
+            ("DAGQ_OIDC_ISSUER_FILE", true),
+            ("", false),
+        ] {
+            let recommendation = DependencyRecommendation::from_env(None, |name| name == setting);
+            assert_eq!(recommendation.team, team);
+            assert!(recommendation.require_reason);
+        }
+    }
+
+    #[test]
+    fn a_notice_is_only_visible_with_all_and_its_dependency_blocks_readiness() {
+        use crate::application::watch::{EventsQuery, events_in};
+        use crate::domain::EventFilter;
+        let queue = queue();
+        let tx = queue.write_tx("notice_visibility").unwrap();
+        let waiting = insert_task(&tx, new_task("waiting", vec![]), "now", Creator::Other).unwrap();
+        let waited = insert_task(&tx, new_task("waited", vec![]), "now", Creator::Other).unwrap();
+        let owner = |subject: &str| {
+            Owner::new(crate::domain::oidc::OidcIdentity {
+                issuer: "issuer".into(),
+                subject: subject.into(),
+            })
+        };
+        set_task_owner(&tx, waiting.id(), Some(&owner("alice"))).unwrap();
+        set_task_owner(&tx, waited.id(), Some(&owner("bob"))).unwrap();
+        SqlWrite::execute(&tx, "UPDATE tasks SET status='ready'", sql_params![]).unwrap();
+        insert_dependency(
+            &tx,
+            waiting.id(),
+            waited.id(),
+            "now",
+            DependencyRecommendation {
+                team: true,
+                reason: None,
+                require_reason: true,
+            },
+        )
+        .unwrap();
+        let ready = super::super::task_store::ready_tasks(&tx).unwrap();
+        assert!(ready.iter().any(|task| task.id() == waited.id()));
+        assert!(!ready.iter().any(|task| task.id() == waiting.id()));
+        SqlWrite::execute(
+            &tx,
+            "UPDATE tasks SET status='completed' WHERE id=?1",
+            sql_params![waited.id()],
+        )
+        .unwrap();
+        assert!(
+            super::super::task_store::ready_tasks(&tx)
+                .unwrap()
+                .iter()
+                .any(|task| task.id() == waiting.id())
+        );
+        assert!(!tx.exists("SELECT 1 FROM asks", sql_params![]).unwrap());
+        tx.commit().unwrap();
+        let query = EventsQuery {
+            after: EventId::new(0),
+            limit: 100,
+            all: false,
+            full: true,
+            filter: EventFilter::default(),
+        };
+        assert!(
+            events_in(&queue, &query).unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let all = events_in(&queue, &EventsQuery { all: true, ..query }).unwrap();
+        assert_eq!(
+            all["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|event| event["kind"] == "cross_owner_dependency_noticed")
+                .count(),
+            1
+        );
+    }
+
     /// Every event writer is callable with SqlWrite as its only bound. Keep
     /// these calls inside the generic body so adding a driver trait fails build.
     #[test]
@@ -515,6 +729,15 @@ mod tests {
         assert_eq!(next_id(&tx, "tasks").unwrap(), second.id().as_i64() + 1);
         assert!(waits_for(&tx, Node::Task(second.id()), Node::Task(first.id())).unwrap());
         assert!(!waits_for(&tx, Node::Task(first.id()), Node::Task(second.id())).unwrap());
-        assert!(insert_dependency(&tx, first.id(), second.id(), "now").is_err());
+        assert!(
+            insert_dependency(
+                &tx,
+                first.id(),
+                second.id(),
+                "now",
+                DependencyRecommendation::from_process(None)
+            )
+            .is_err()
+        );
     }
 }

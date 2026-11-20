@@ -118,13 +118,16 @@ impl<E: TransactionEntries> PlanningStore for StoreQueue<E> {
         task: TaskId,
         on: Dependency,
         authorized: TaskAuthorization,
+        reason: Option<&str>,
     ) -> Result<()> {
         let authorized = Some(&authorized);
         match on {
             Dependency::Task(predecessor) => {
-                self.add_dependency_authorized(task, predecessor, authorized)
+                self.add_dependency_authorized(task, predecessor, authorized, reason)
             }
-            Dependency::Goal(goal) => self.add_goal_dependency_authorized(task, goal, authorized),
+            Dependency::Goal(goal) => {
+                self.add_goal_dependency_authorized(task, goal, authorized, reason)
+            }
         }
     }
 

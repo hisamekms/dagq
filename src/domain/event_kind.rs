@@ -20,7 +20,7 @@
 //!
 //! - planning: `task_*`, `dependency_*`, `goal_*`, `proposal_*`, `plan_*`,
 //!   `planner_*`, `draft_*`, `follow_up_*`, `request_*`, `replan_*` and
-//!   `finding_planner_*`.
+//!   `finding_planner_*` and `cross_owner_dependency_noticed`.
 //! - execution and landing: `run_*` (but `run_tmp_removed`,
 //!   `run_size_exceeded_expected` and `run_stage_peak`), `lease_*`,
 //!   `claim_*`, `worktree_*`, `workspace_*`, `wrapper_*`, `session_*`,
@@ -196,6 +196,11 @@ event_kinds! {
     CredentialPreferenceChanged => "credential_preference_changed",
     CredentialPreferenceRead => "credential_preference_read",
     CredentialPreferenceRejected => "credential_preference_rejected",
+    /// A new cross-owner edge in an OIDC deployment: payload names the
+    /// waiting task, `depends_on` task/goal, target `owner`, computed
+    /// `priority_inversion` and optional recommendation `reason`. The event
+    /// actor identifies the writer. No ask or attention is opened.
+    CrossOwnerDependencyNoticed => "cross_owner_dependency_noticed",
     DelegatesChanged => "delegates_changed",
     DependencyAdded => "dependency_added",
     DependencyRemoved => "dependency_removed",
@@ -1849,6 +1854,10 @@ mod tests {
             (
                 EventKind::CredentialPreferenceRejected,
                 "credential_preference_rejected",
+            ),
+            (
+                EventKind::CrossOwnerDependencyNoticed,
+                "cross_owner_dependency_noticed",
             ),
             (EventKind::DelegatesChanged, "delegates_changed"),
             (EventKind::DependencyAdded, "dependency_added"),

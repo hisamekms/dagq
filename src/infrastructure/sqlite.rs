@@ -1716,10 +1716,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
         task_id: TaskId,
         predecessor_id: TaskId,
         authorized: Option<&TaskAuthorization>,
+        reason: Option<&str>,
     ) -> Result<()> {
         let tx = self.write_entry("add_dependency_authorized")?;
         self.store(&tx)
-            .add_dependency_authorized(task_id, predecessor_id, authorized)
+            .add_dependency_authorized(task_id, predecessor_id, authorized, reason)
             .map_err(native_error)?;
         tx.commit()?;
         Ok(())
@@ -1744,10 +1745,11 @@ impl<E: TransactionEntries> StoreQueue<E> {
         task_id: TaskId,
         goal_id: GoalId,
         authorized: Option<&TaskAuthorization>,
+        reason: Option<&str>,
     ) -> Result<()> {
         let tx = self.write_entry("add_goal_dependency_authorized")?;
         self.store(&tx)
-            .add_goal_dependency_authorized(task_id, goal_id, authorized)
+            .add_goal_dependency_authorized(task_id, goal_id, authorized, reason)
             .map_err(native_error)?;
         tx.commit()?;
         Ok(())
@@ -1864,7 +1866,7 @@ impl<E: TransactionEntries> TaskStore for StoreQueue<E> {
     }
 
     fn add_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
-        self.add_dependency_authorized(task_id, predecessor_id, None)
+        self.add_dependency_authorized(task_id, predecessor_id, None, None)
     }
 
     fn remove_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
@@ -1872,7 +1874,7 @@ impl<E: TransactionEntries> TaskStore for StoreQueue<E> {
     }
 
     fn add_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
-        self.add_goal_dependency_authorized(task_id, goal_id, None)
+        self.add_goal_dependency_authorized(task_id, goal_id, None, None)
     }
 
     fn remove_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
@@ -3116,6 +3118,22 @@ mod store_contract_tests {
     #[test]
     fn goal_owner_records() {
         contract(|open| store_contract::goal_owner_records(&open));
+    }
+    #[test]
+    fn dependency_notices_records() {
+        contract(|open| store_contract::dependency_notices_records(&open));
+    }
+    #[test]
+    fn dependency_notices_ignored() {
+        contract(|open| store_contract::dependency_notices_ignored(&open));
+    }
+    #[test]
+    fn dependency_notices_refused() {
+        contract(|open| store_contract::dependency_notices_refused(&open));
+    }
+    #[test]
+    fn dependency_notices_undone() {
+        contract(|open| store_contract::dependency_notices_undone(&open));
     }
     #[test]
     fn goal_owner_moves() {

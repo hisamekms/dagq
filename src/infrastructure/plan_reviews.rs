@@ -306,17 +306,27 @@ fn check_action(conn: &impl SqlRead, members: &[TaskId], action: &PlanReviewActi
     Ok(())
 }
 
-fn apply_action(
+pub(super) fn apply_action(
     conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     action: &PlanReviewAction,
     proposal: ProposalId,
     now: &str,
+    recommendation: super::store_writes::DependencyRecommendation<'_>,
 ) -> Result<()> {
     match action {
         PlanReviewAction::AddDependency {
             task_id,
             depends_on,
-        } => insert_dependency(conn, *task_id, *depends_on, now),
+        } => insert_dependency(
+            conn,
+            *task_id,
+            *depends_on,
+            now,
+            super::store_writes::DependencyRecommendation {
+                require_reason: false,
+                ..recommendation
+            },
+        ),
         // An AI's task takes its goal's priority instead of a lower one of
         // its own (ADR-t1971-1 decision 4).
         PlanReviewAction::LowerPriority { task_id, .. } => inherit_priority(conn, *task_id, now),
@@ -863,7 +873,13 @@ where
         match decision {
             PlanReviewDecision::Pass => {
                 for action in actions {
-                    apply_action(&tx, action, job.proposal_id, &stamp)?;
+                    apply_action(
+                        &tx,
+                        action,
+                        job.proposal_id,
+                        &stamp,
+                        super::store_writes::DependencyRecommendation::from_process(None),
+                    )?;
                 }
                 // Every submitted AI's task takes its goal's priority
                 // instead of one the AI set, actions or none (ADR-t1971-1

@@ -162,6 +162,10 @@ pub struct CancelWrite {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyWrite {
+    /// Recommendation retained only in a new cross-owner notice. Omitted
+    /// when absent so older services still accept ordinary add/remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub task: i64,
     #[serde(default)]
     pub predecessor: Option<i64>,
@@ -530,7 +534,11 @@ pub fn answer<S: PlanningStore + RequestStore>(
         )?)?,
         QueueWrite::DependencyAdd(write) => {
             let on = dependency(&write)?;
-            serde_json::to_value(planning!().add_dependency(TaskId::new(write.task), on)?)?
+            serde_json::to_value(planning!().add_dependency(
+                TaskId::new(write.task),
+                on,
+                write.reason.as_deref(),
+            )?)?
         }
         QueueWrite::DependencyRemove(write) => {
             let on = dependency(&write)?;
@@ -763,6 +771,7 @@ mod tests {
         /// The landing mark changes that reached the store, with the owner
         /// they were authorized with.
         landing_changes: RefCell<Vec<(LandingMarkChange, Option<Owner>)>>,
+        dependency_recommendations: Vec<(TaskId, Dependency, Option<String>)>,
     }
 
     fn reached<T>() -> Result<T> {
@@ -819,7 +828,15 @@ mod tests {
         fn cancel(&mut self, _: TaskId, _: NewCancel, _: TaskAuthorization) -> Result<Task> {
             reached()
         }
-        fn add_dependency(&mut self, _: TaskId, _: Dependency, _: TaskAuthorization) -> Result<()> {
+        fn add_dependency(
+            &mut self,
+            task: TaskId,
+            on: Dependency,
+            _: TaskAuthorization,
+            reason: Option<&str>,
+        ) -> Result<()> {
+            self.dependency_recommendations
+                .push((task, on, reason.map(str::to_owned)));
             reached()
         }
         fn remove_dependency(
@@ -898,6 +915,7 @@ mod tests {
     fn every_write() -> Vec<(QueueWrite, Capability)> {
         let id = IdWrite { id: 1 };
         let dependency = DependencyWrite {
+            reason: None,
             task: 1,
             predecessor: Some(2),
             goal: None,
@@ -1297,8 +1315,72 @@ mod tests {
     }
 
     #[test]
+    fn reasonless_dependency_requests_keep_the_legacy_shape() {
+        let dependency = DependencyWrite {
+            task: 1,
+            predecessor: Some(2),
+            goal: None,
+            reason: None,
+        };
+        for (write, use_case) in [
+            (
+                QueueWrite::DependencyAdd(dependency.clone()),
+                UseCase::DependencyAdd,
+            ),
+            (
+                QueueWrite::DependencyRemove(dependency),
+                UseCase::DependencyRemove,
+            ),
+        ] {
+            let expected = json!({"task":1,"predecessor":2,"goal":null});
+            assert_eq!(write.request().unwrap(), (use_case, expected.clone()));
+            assert_eq!(QueueWrite::parse(use_case, &expected).unwrap(), Some(write));
+        }
+    }
+
+    #[test]
+    fn a_dependency_reason_round_trips_the_request_and_reaches_the_store() {
+        for (params, on) in [
+            (
+                json!({"task":1,"predecessor":2,"goal":null,"reason":"content prerequisite"}),
+                Dependency::Task(TaskId::new(2)),
+            ),
+            (
+                json!({"task":1,"predecessor":null,"goal":3,"reason":"content prerequisite"}),
+                Dependency::Goal(GoalId::new(3)),
+            ),
+        ] {
+            // Literal CLI request shapes keep the test independent of the
+            // serializer and exercise the planner's authorization, too.
+            let parsed = QueueWrite::parse(UseCase::DependencyAdd, &params)
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed.request().unwrap(), (UseCase::DependencyAdd, params));
+            let mut store = Store::default();
+            assert_eq!(
+                answer(
+                    &mut store,
+                    &ActorContext::instance(ActorRole::Planner, 1),
+                    &StaticPolicy,
+                    &parsed,
+                    || unreachable!("no submit")
+                )
+                .unwrap_err()
+                .to_string(),
+                "reached"
+            );
+            assert_eq!(
+                store.dependency_recommendations,
+                [(TaskId::new(1), on, Some("content prerequisite".into()))]
+            );
+            assert!(store.denials.borrow().is_empty());
+        }
+    }
+
+    #[test]
     fn a_dependency_names_a_predecessor_or_a_goal_and_the_goal_wins() {
         let write = |predecessor, goal| DependencyWrite {
+            reason: None,
             task: 1,
             predecessor,
             goal,

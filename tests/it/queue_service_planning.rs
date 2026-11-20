@@ -257,6 +257,7 @@ fn the_planning_commands_go_through_the_service_as_their_caller_and_print_as_on_
             Who::User,
             vec!["dependency", "add", "4", "3"],
             QueueWrite::DependencyAdd(writes::DependencyWrite {
+                reason: None,
                 task: 4,
                 predecessor: Some(3),
                 goal: None,
@@ -266,6 +267,7 @@ fn the_planning_commands_go_through_the_service_as_their_caller_and_print_as_on_
             Who::User,
             vec!["dependency", "remove", "4", "3"],
             QueueWrite::DependencyRemove(writes::DependencyWrite {
+                reason: None,
                 task: 4,
                 predecessor: Some(3),
                 goal: None,
@@ -563,4 +565,71 @@ fn the_service_refuses_each_planning_command_its_caller_may_not_run_and_records_
         assert_eq!(error["denied"]["role"], "planner", "{args:?}");
         assert_eq!(error["denied"]["reason"], "not granted", "{args:?}");
     }
+
+    // The real add request must roll back its task_created event and task
+    // when a cross-owner dependency reaches the planner's reason check.
+    // Only the service's child environment enables the team deployment.
+    printed(&served(&queue, Who::User, &["service", "stop"]));
+    crate::common::service::serve_for_test(
+        &queue.db,
+        &[
+            ("DAGQ_OIDC_ISSUER".into(), "https://notice.example".into()),
+            ("DAGQ_OIDC_AUDIENCE".into(), "queue".into()),
+            (
+                "XDG_CONFIG_HOME".into(),
+                queue.dir().join("config").to_str().unwrap().into(),
+            ),
+        ],
+    );
+    let conn = rusqlite::Connection::open(&queue.db).unwrap();
+    assert_eq!(
+        conn.execute(
+            "UPDATE goals SET owner_issuer='https://notice.example', owner_subject='bob' WHERE id=1",
+            [],
+        )
+        .unwrap(),
+        1,
+    );
+    let waiting_goal: i64 = conn.query_row(
+        "INSERT INTO goals(title,owner_issuer,owner_subject) VALUES ('waiting owner','https://notice.example','alice') RETURNING id",
+        [], |row| row.get(0),
+    ).unwrap();
+    let before_tasks: i64 = conn
+        .query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))
+        .unwrap();
+    let before = last_event(&queue.db);
+    let output = served(
+        &queue,
+        Who::Planner(1),
+        &[
+            "add",
+            "cross-owner registration",
+            "--goal",
+            &waiting_goal.to_string(),
+            "--depends-on",
+            &queue.run.task_id().to_string(),
+        ],
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = error["error"].as_str().unwrap();
+    assert!(
+        message.contains("dependency add") && message.contains("--reason"),
+        "{error}"
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before_tasks,
+    );
+    assert!(
+        !conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE title='cross-owner registration')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
+    assert_eq!(last_event(&queue.db), before);
 }

@@ -891,12 +891,14 @@ fn changes_authorized_on_another_status_change_nothing() {
                 task,
                 Dependency::Task(other),
                 ready(),
+                None,
             ),
             planning::PlanningStore::add_dependency(
                 &mut queue,
                 task,
                 Dependency::Goal(goal),
                 ready(),
+                None,
             ),
             planning::PlanningStore::remove_dependency(
                 &mut queue,
@@ -957,8 +959,14 @@ fn changes_authorized_on_another_status_change_nothing() {
     assert_eq!(moved.goal_id(), Some(goal));
     planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready()).unwrap();
     planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready()).unwrap();
-    planning::PlanningStore::add_dependency(&mut queue, task, Dependency::Task(other), ready())
-        .unwrap();
+    planning::PlanningStore::add_dependency(
+        &mut queue,
+        task,
+        Dependency::Task(other),
+        ready(),
+        None,
+    )
+    .unwrap();
     assert_eq!(queue.show(task).unwrap().dependencies.len(), 1);
     planning::PlanningStore::remove_dependency(&mut queue, task, Dependency::Task(other), ready())
         .unwrap();
@@ -1062,7 +1070,7 @@ fn changes_authorized_before_the_tasks_proposal_changed_change_nothing() {
         .collect::<Vec<_>>();
         for on in [Dependency::Task(other), Dependency::Goal(goal)] {
             for result in [
-                planning::PlanningStore::add_dependency(&mut queue, task, on, s()),
+                planning::PlanningStore::add_dependency(&mut queue, task, on, s(), None),
                 planning::PlanningStore::remove_dependency(&mut queue, task, on, s()),
             ] {
                 errors.push(result.unwrap_err().to_string());

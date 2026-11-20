@@ -1438,6 +1438,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
         task_id: TaskId,
         predecessor_id: TaskId,
         authorized: Option<&TaskAuthorization>,
+        reason: Option<&str>,
     ) -> Result<()> {
         let tx = self.tx;
         check_authorized(tx, task_id, authorized)?;
@@ -1446,6 +1447,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
             task_id,
             predecessor_id,
             &self.generators.clock.timestamp(),
+            super::store_writes::DependencyRecommendation::from_process(reason),
         )?;
 
         Ok(())
@@ -1487,11 +1489,18 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
         task_id: TaskId,
         goal_id: GoalId,
         authorized: Option<&TaskAuthorization>,
+        reason: Option<&str>,
     ) -> Result<()> {
         let tx = self.tx;
         check_authorized(tx, task_id, authorized)?;
         super::replans::check_task_step(tx, task_id, GuardedStep::Dependency)?;
-        insert_goal_dependency(tx, task_id, goal_id, &self.generators.clock.timestamp())?;
+        insert_goal_dependency(
+            tx,
+            task_id,
+            goal_id,
+            &self.generators.clock.timestamp(),
+            super::store_writes::DependencyRecommendation::from_process(reason),
+        )?;
 
         Ok(())
     }

@@ -1263,6 +1263,7 @@ pub mod concern;
 pub mod container_image;
 pub mod container_runtime;
 pub mod credential_preference;
+pub mod dependency_notice;
 pub mod direct_human;
 pub mod disk;
 pub mod doc_hints;

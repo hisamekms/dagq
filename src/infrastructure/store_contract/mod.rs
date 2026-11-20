@@ -8,6 +8,8 @@ mod cases;
 mod queue_ports;
 pub use queue_ports::queue_ports;
 mod delegates;
+mod dependency_notices;
+pub use dependency_notices::*;
 mod goal_landing_marks;
 mod goal_owners;
 pub(crate) mod ledger_earlier;
@@ -285,6 +287,22 @@ fn cases_sized<S: ContractStore, F: Fn() -> Result<S>, const SMALL: bool>()
         (
             "goal owner records",
             Case::Fixed(goal_owner_records::<S, F>),
+        ),
+        (
+            "dependency_notices_records",
+            Case::Fixed(dependency_notices_records::<S, F>),
+        ),
+        (
+            "dependency_notices_ignored",
+            Case::Fixed(dependency_notices_ignored::<S, F>),
+        ),
+        (
+            "dependency_notices_refused",
+            Case::Fixed(dependency_notices_refused::<S, F>),
+        ),
+        (
+            "dependency_notices_undone",
+            Case::Fixed(dependency_notices_undone::<S, F>),
         ),
         ("goal owner moves", Case::Fixed(goal_owner_moves::<S, F>)),
         (
@@ -1011,7 +1029,7 @@ mod tests {
                 })
                 .collect()
         }
-        const EXPECTED: [(&str, Fixture, Fixture); 79] = [
+        const EXPECTED: [(&str, Fixture, Fixture); 83] = [
             ("leader lifecycle", Fixed, Fixed),
             ("leader singleton", Fixed, Fixed),
             ("stale writer", Fixed, Fixed),
@@ -1025,6 +1043,10 @@ mod tests {
             ("members", Fixed, Fixed),
             ("member credentials", Fixed, Fixed),
             ("goal owner records", Fixed, Fixed),
+            ("dependency_notices_records", Fixed, Fixed),
+            ("dependency_notices_ignored", Fixed, Fixed),
+            ("dependency_notices_refused", Fixed, Fixed),
+            ("dependency_notices_undone", Fixed, Fixed),
             ("goal owner moves", Fixed, Fixed),
             ("goal owner move undone", Fixed, Fixed),
             ("goal landing marks", Fixed, Fixed),
@@ -1234,9 +1256,9 @@ mod tests {
         let sqlite_volume = cases::<SqliteQueue, SqliteOpen>();
         let postgres = cases::<Postgres, PostgresOpen>();
         let sqlite_small = cases_sized::<SqliteQueue, SqliteOpen, true>();
-        assert_eq!(sqlite_volume.len(), 79);
-        assert_eq!(postgres.len(), 79);
-        assert_eq!(sqlite_small.len(), 79);
+        assert_eq!(sqlite_volume.len(), 83);
+        assert_eq!(postgres.len(), 83);
+        assert_eq!(sqlite_small.len(), 83);
         assert_eq!(snapshot(sqlite_volume), full, "SQLite volume");
         assert_eq!(snapshot(postgres), full, "Postgres run");
         assert_eq!(snapshot(sqlite_small), small, "SQLite small interference");

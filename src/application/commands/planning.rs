@@ -122,6 +122,7 @@ pub trait PlanningStore {
         task: TaskId,
         on: Dependency,
         authorized: TaskAuthorization,
+        reason: Option<&str>,
     ) -> Result<()>;
     fn remove_dependency(
         &mut self,
@@ -309,9 +310,14 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     }
 
     /// `dependency add`: the task as it is afterwards.
-    pub fn add_dependency(&mut self, task: TaskId, on: Dependency) -> Result<TaskDetail> {
+    pub fn add_dependency(
+        &mut self,
+        task: TaskId,
+        on: Dependency,
+        reason: Option<&str>,
+    ) -> Result<TaskDetail> {
         let authorized = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.add_dependency(task, on, authorized)?;
+        self.store.add_dependency(task, on, authorized, reason)?;
         self.store.show(task)
     }
 
@@ -891,6 +897,7 @@ mod tests {
             _: TaskId,
             _: Dependency,
             authorized: TaskAuthorization,
+            _: Option<&str>,
         ) -> Result<()> {
             self.authorized_as = Some(authorized);
             Err(reached("dependency add"))
@@ -1045,7 +1052,7 @@ mod tests {
                 p.cancel(TASK, duplicate_of(2)).map(drop)
             }),
             ("dependency add", |p| {
-                p.add_dependency(TASK, Dependency::Task(TaskId::new(2)))
+                p.add_dependency(TASK, Dependency::Task(TaskId::new(2)), None)
                     .map(drop)
             }),
             ("dependency remove", |p| {
@@ -1627,7 +1634,8 @@ mod tests {
                 p.cancel(TASK, duplicate_of(2)).map(drop)
             }),
             ("store: dependency add", |p| {
-                p.add_dependency(TASK, Dependency::Goal(GOAL)).map(drop)
+                p.add_dependency(TASK, Dependency::Goal(GOAL), None)
+                    .map(drop)
             }),
             ("store: dependency remove", |p| {
                 p.remove_dependency(TASK, Dependency::Task(TaskId::new(2)))

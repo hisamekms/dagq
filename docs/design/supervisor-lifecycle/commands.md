@@ -75,6 +75,8 @@ related:
 
 ## 表示とreviewのコマンドをまたぐ約束
 
+- OIDCの発行元がある配置でownerをまたぐ依存を足すと、依存と同じtransactionに知らせのeventを残し、AIのplannerには推奨の理由を求める。
+
 - `status`・`doctor`・`events`・`watch`と`review`はqueueを読むだけで、どれもqueueの状態もeventも変えない。
   これらのコマンドはDBを開かずqueue serviceを通り（`review`は制御側のコマンドのstepとして送る）、`doctor`のDBの診断もserviceのユースケース（`queue.admin`）で、CLIはPATHで探すものだけを足す（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
   `watch --role inbox`が書くwatcherの生存の記録はqueueの外のファイルに置く。

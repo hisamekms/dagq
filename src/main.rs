@@ -2610,6 +2610,9 @@ enum AskCommand {
 #[derive(Subcommand, Clone)]
 enum DependencyCommand {
     Add {
+        /// Recommendation for the owner of a cross-owner prerequisite.
+        #[arg(long)]
+        reason: Option<String>,
         task: i64,
         #[arg(required_unless_present = "goal")]
         predecessor: Option<i64>,
@@ -4100,10 +4103,12 @@ fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
         }),
         Command::Dependency { command } => match command {
             DependencyCommand::Add {
+                reason,
                 task,
                 predecessor,
                 goal,
             } => QueueWrite::DependencyAdd(writes::DependencyWrite {
+                reason,
                 task,
                 predecessor,
                 goal,
@@ -4113,6 +4118,7 @@ fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
                 predecessor,
                 goal,
             } => QueueWrite::DependencyRemove(writes::DependencyWrite {
+                reason: None,
                 task,
                 predecessor,
                 goal,
@@ -8088,6 +8094,52 @@ mod tests {
                 .map(|(use_case, _)| use_case),
             Some(UseCase::ReadyInherit)
         );
+    }
+
+    /// Recommendations belong to each separately added edge, after task
+    /// registration. Both CLI target forms send the reason to the service.
+    #[test]
+    fn dependency_add_sends_its_recommendation_to_the_service() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let _ = done.send(std::panic::catch_unwind(|| {
+                    for (target, expected) in [
+                        (
+                            vec!["2"],
+                            json!({"task":1,"predecessor":2,"goal":null,"reason":"content prerequisite"}),
+                        ),
+                        (
+                            vec!["--goal", "3"],
+                            json!({"task":1,"predecessor":null,"goal":3,"reason":"content prerequisite"}),
+                        ),
+                    ] {
+                        let argv: Vec<_> = ["dagq", "dependency", "add", "1"]
+                            .into_iter()
+                            .chain(target)
+                            .chain(["--reason", "content prerequisite"])
+                            .collect();
+                        let cli = Cli::try_parse_from(argv).unwrap();
+                        let (use_case, params) = client_request(&cli.command).unwrap().unwrap();
+                        assert_eq!(use_case, UseCase::DependencyAdd);
+                        assert_eq!(params, expected);
+                        assert!(authorized_in_application(&cli.command));
+                    }
+                    // Registration has no per-edge reason; the planner adds
+                    // cross-owner edges afterwards with dependency add.
+                    assert!(Cli::try_parse_from([
+                        "dagq", "add", "task", "--reason", "content prerequisite"
+                    ]).is_err());
+                }));
+            })
+            .unwrap();
+        if let Err(panic) = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the read of the command line did not end within 60 seconds")
+        {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// The words on the command line reach what the queue service's client
