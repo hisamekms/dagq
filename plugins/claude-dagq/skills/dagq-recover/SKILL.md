@@ -72,6 +72,9 @@ Every run's session is headless in the background: nothing is typed by hand (`ru
 
 Only plan review makes a task `ready`. A person may skip it with `"$DAGQ" ready ID --bypass-review` (a draft or submitted task; `review_bypassed`): typed by them in their own TTY without `DAGQ_ROLE`, per task, for an urgent fix, a failed plan review, or a concern they already decided. Never bypass as a habit or on a planner's judgment; a retry needs none (section 4).
 
-Attention `plan review by hand` (`plan_review_failed`): a proposal's headless plan review failed; it stays `submitted` and held. `check the planner` (`planner_unresponsive`): the person looks at that planner (`planner log ID`). What to read and the person's choices: `reference/plan-review-by-hand.md`.
+`plan review by hand` (`plan_review_failed`) holds the submitted proposal.
+`check the planner` covers `planner_unresponsive` and `planner_switch_stalled`.
+A stalled switch returns work to normal planning. Carried answers went undelivered.
+See `reference/plan-review-by-hand.md` for logs and options.
 
 Attention `goal review by hand` (`goal_review_failed`): a goal review job failed; `reference/goal-review-by-hand.md`.
